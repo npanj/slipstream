@@ -1,21 +1,63 @@
 import os
 import struct
 import ctypes
+import subprocess
+import tempfile
 from pathlib import Path
 import numpy as np
 
-# Load ggml library for fast dequantization
-GGML_LIB_PATH = "/Users/nitin/Documents/shared-with-google-drive/model-serving/llama.cpp-prism/build/bin/libggml-base.0.21.0.dylib"
-if not os.path.exists(GGML_LIB_PATH):
-    raise RuntimeError(f"Cannot find ggml library at {GGML_LIB_PATH}")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEQUANT_SOURCE = Path(__file__).with_name("fast_dequant.c")
+DEQUANT_LIB = REPO_ROOT / "build/libslipstream-dequant.dylib"
+DEQUANT_TYPES = ("q4_0", "q4_1", "q5_0", "q8_0", "q4_K", "q6_K")
 
-lib = ctypes.CDLL(GGML_LIB_PATH)
-lib.dequantize_row_q4_0.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
-lib.dequantize_row_q4_1.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
-lib.dequantize_row_q5_0.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
-lib.dequantize_row_q8_0.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
-lib.dequantize_row_q4_K.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
-lib.dequantize_row_q6_K.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
+
+def _build_dequant_lib():
+    """Compile fast_dequant.c into build/ when missing or older than the source."""
+    if DEQUANT_LIB.exists() and DEQUANT_LIB.stat().st_mtime >= DEQUANT_SOURCE.stat().st_mtime:
+        return DEQUANT_LIB
+    DEQUANT_LIB.parent.mkdir(parents=True, exist_ok=True)
+    # Build beside the target and rename, so concurrent workers never load a partial file.
+    fd, tmp = tempfile.mkstemp(dir=DEQUANT_LIB.parent, suffix=".dylib")
+    os.close(fd)
+    try:
+        subprocess.run(
+            ["xcrun", "-sdk", "macosx", "clang", "-O3", "-shared", "-fPIC",
+             "-o", tmp, str(DEQUANT_SOURCE)],
+            check=True,
+        )
+        os.replace(tmp, DEQUANT_LIB)
+    except (OSError, subprocess.CalledProcessError) as error:
+        os.unlink(tmp)
+        raise RuntimeError(
+            f"Cannot build {DEQUANT_LIB} from {DEQUANT_SOURCE}: {error}. "
+            "Install the Xcode command line tools, or set SLIPSTREAM_GGML_LIB "
+            "to a libggml-base dylib."
+        ) from None
+    return DEQUANT_LIB
+
+
+def _load_dequantizers():
+    """Return {type: fn(src, dst, count)} from libggml-base or the bundled kernels."""
+    argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
+    if ggml_path := os.environ.get("SLIPSTREAM_GGML_LIB"):
+        if not os.path.exists(ggml_path):
+            raise RuntimeError(f"SLIPSTREAM_GGML_LIB points to a missing file: {ggml_path}")
+        lib = ctypes.CDLL(ggml_path)
+        names = {t: f"dequantize_row_{t}" for t in DEQUANT_TYPES}
+    else:
+        lib = ctypes.CDLL(str(_build_dequant_lib()))
+        names = {t: f"dequant_{t.lower()}" for t in DEQUANT_TYPES}
+    functions = {}
+    for ggml_type, name in names.items():
+        fn = getattr(lib, name)
+        fn.argtypes = argtypes
+        fn.restype = None
+        functions[ggml_type] = fn
+    return functions
+
+
+DEQUANT = _load_dequantizers()
 
 class MultiShardGgufReader:
     def __init__(self, model_dir_or_files, sidecars=None):
@@ -130,22 +172,22 @@ class MultiShardGgufReader:
 
         if ttype == 2: # Q4_0
             raw = fd.read(count // 32 * 18)
-            lib.dequantize_row_q4_0(raw, ptr, count)
+            DEQUANT["q4_0"](raw, ptr, count)
         elif ttype == 3: # Q4_1
             raw = fd.read(count // 32 * 20)
-            lib.dequantize_row_q4_1(raw, ptr, count)
+            DEQUANT["q4_1"](raw, ptr, count)
         elif ttype == 6: # Q5_0
             raw = fd.read(count // 32 * 22)
-            lib.dequantize_row_q5_0(raw, ptr, count)
+            DEQUANT["q5_0"](raw, ptr, count)
         elif ttype == 8: # Q8_0
             raw = fd.read(count // 32 * 34)
-            lib.dequantize_row_q8_0(raw, ptr, count)
+            DEQUANT["q8_0"](raw, ptr, count)
         elif ttype == 12: # Q4_K
             raw = fd.read(count // 256 * 144)
-            lib.dequantize_row_q4_K(raw, ptr, count)
+            DEQUANT["q4_K"](raw, ptr, count)
         elif ttype == 14: # Q6_K
             raw = fd.read(count // 256 * 210)
-            lib.dequantize_row_q6_K(raw, ptr, count)
+            DEQUANT["q6_K"](raw, ptr, count)
         else:
             raise ValueError(f"Unsupported ggml type {ttype} for tensor {name}")
 

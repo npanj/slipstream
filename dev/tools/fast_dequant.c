@@ -5,11 +5,9 @@
 typedef uint16_t ggml_fp16_t;
 
 static inline float fp16_to_fp32(ggml_fp16_t h) {
-    uint32_t w = (uint32_t)h << 16;
-    uint32_t sign = w & 0x80000000;
-    uint32_t two_w = w + w;
-    uint32_t exp = (two_w >> 24) & 0xFF;
-    uint32_t mant = (two_w >> 11) & 0x1FFF;
+    uint32_t sign = ((uint32_t)h & 0x8000) << 16;
+    int32_t exp = (h >> 10) & 0x1F;
+    uint32_t mant = h & 0x03FF;
 
     if (exp == 0) {
         if (mant == 0) {
@@ -18,12 +16,13 @@ static inline float fp16_to_fp32(ggml_fp16_t h) {
             memcpy(&f, &u, 4);
             return f;
         }
+        // Subnormal: normalize so the implicit leading bit is set.
+        exp = 1;
         while (!(mant & 0x0400)) {
             mant <<= 1;
             exp--;
         }
-        exp++;
-        mant &= ~0x0400;
+        mant &= 0x03FF;
     } else if (exp == 31) {
         float f;
         uint32_t u = sign | 0x7F800000 | (mant << 13);
@@ -31,7 +30,7 @@ static inline float fp16_to_fp32(ggml_fp16_t h) {
         return f;
     }
     exp = exp + (127 - 15);
-    uint32_t u = sign | (exp << 23) | (mant << 13);
+    uint32_t u = sign | ((uint32_t)exp << 23) | (mant << 13);
     float f;
     memcpy(&f, &u, 4);
     return f;
