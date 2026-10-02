@@ -10,6 +10,18 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEQUANT_SOURCE = Path(__file__).with_name("fast_dequant.c")
 DEQUANT_LIB = REPO_ROOT / "build/libslipstream-dequant.dylib"
 DEQUANT_TYPES = ("q4_0", "q4_1", "q5_0", "q8_0", "q4_K", "q6_K")
+# ggml type id -> (elements per block, bytes per block)
+GGML_BLOCKS = {
+    0: (1, 4),  # F32
+    1: (1, 2),  # F16
+    2: (32, 18),  # Q4_0
+    3: (32, 20),  # Q4_1
+    6: (32, 22),  # Q5_0
+    8: (32, 34),  # Q8_0
+    12: (256, 144),  # Q4_K
+    14: (256, 210),  # Q6_K
+    30: (1, 2),  # BF16
+}
 
 
 def _build_dequant_lib():
@@ -147,18 +159,44 @@ class MultiShardGgufReader:
         return name in self.tensors
 
     def read_tensor(self, name):
+        meta = self._meta(name)
+        shape = tuple(reversed(meta["dims"]))
+        return self._decode(name, 0, shape)
+
+    def read_rows(self, name, start, count):
+        """Rows [start, start + count) of a tensor viewed as 2-D, without reading the rest.
+
+        A 3-D tensor such as ffn_gate_exps flattens to [experts * rows, width], so
+        expert e is rows [e * rows, (e + 1) * rows).
+        """
+        meta = self._meta(name)
+        width, rows = meta["dims"][0], int(np.prod(meta["dims"][1:]))
+        if start < 0 or start + count > rows:
+            raise IndexError(f"rows {start}..{start + count} outside {name} ({rows} rows)")
+        block, size = GGML_BLOCKS[meta["type"]]
+        if width % block:
+            raise ValueError(f"{name} rows do not split into whole {block}-element blocks")
+        return self._decode(name, start * (width // block) * size, (count, width))
+
+    def read_expert(self, name, expert):
+        """One expert's [rows, width] matrix of a [experts, rows, width] tensor."""
+        rows = self._meta(name)["dims"][1]
+        return self.read_rows(name, expert * rows, rows)
+
+    def _meta(self, name):
         if name not in self.tensors:
             raise KeyError(f"Tensor {name} not found in GGUF shards")
+        return self.tensors[name]
+
+    def _decode(self, name, skip, shape):
+        """Read and dequantize the elements of shape starting skip bytes into name."""
         meta = self.tensors[name]
         shard = self.shards[meta["shard_idx"]]
         fd = shard["fd"]
-        offset = shard["data_offset"] + meta["offset"]
-        dims = meta["dims"]
         ttype = meta["type"]
-        shape = tuple(reversed(dims))
-        count = int(np.prod(dims))
+        count = int(np.prod(shape))
 
-        fd.seek(offset)
+        fd.seek(shard["data_offset"] + meta["offset"] + skip)
         if ttype == 0: # F32
             return np.frombuffer(fd.read(count * 4), dtype="<f4").reshape(shape)
         elif ttype == 1: # F16

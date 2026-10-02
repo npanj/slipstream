@@ -24,20 +24,32 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "dev"))
 
-from dev.tools.quantize import to_bf16, from_bf16, quantize_affine
+from dev.tools.quantize import to_bf16, from_bf16, quantize_affine, pack_nibbles
 from dev.tools.package_format import (
-    ALIGNMENT, BF16, GROUP, STORAGE_N, EXPERT_STORAGE_N,
-    WeightFile, pad_rows, tile_q4, q4_bytes
+    ALIGNMENT, BF16, GROUP, FINE_GROUP, STORAGE_N, EXPERT_STORAGE_N,
+    StreamingWeightFile, WeightFile, pad_rows, tile_q4, q4_bytes
 )
 from dev.tools.sharded_gguf_reader import MultiShardGgufReader
 from models.qwen4exp.tools.convert_qwen4exp import (
     quantized_q8, quantized_q8_tile, quantized_tile, q8_bytes,
     LAYER_MAGIC, NGRAM_MAGIC, HEAD_MAGIC, EMBEDDING_MAGIC, DRAFT_MAGIC,
-    write_manifest
+    write_manifest, write_placeholder_draft
 )
 
 MTP_COMBINER_MAGIC = b"MDFN0035"
 HYPER_DOWN_PADDED = 512
+
+NGRAM_VOCABULARY = 320_001_536
+NGRAM_HEAD_DIMENSION = 160
+NGRAM_SHARDS = 128
+NGRAM_CHUNK_ROWS = 1 << 19
+WORKER_MEMORY_BYTES = 12 << 30
+
+# The GGUF carries no HF tokenizer files; the base model's match its vocabulary
+# and chat template exactly. config.json is written by write_manifest.
+TOKENIZER_REPO = "Qwen/Qwen3.8-Flash-Next"
+TOKENIZER_REVISION = "de4b8e4d43b917e7706784d8bb445c9af86a3540"
+TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json", "vocab.json")
 
 LAYOUT = {
     "layers": 48,
@@ -162,22 +174,22 @@ def convert_single_layer(model_dir: str, sidecar_path: str | None, layer_idx: in
     router = reader.read_tensor(f"{prefix}.ffn_gate_inp.weight")
     packed.section(quantized_q8(router))
 
-    # 512 experts gate, up, down
-    gate_exps = reader.read_tensor(f"{prefix}.ffn_gate_exps.weight")
+    # 512 experts gate, up, down, one expert at a time: whole, each tensor is 3.4 GB as float32
     packed.section(b"".join(
-        quantized_tile(gate_exps[i], storage_n=EXPERT_STORAGE_N, group=GROUP)
+        quantized_tile(reader.read_expert(f"{prefix}.ffn_gate_exps.weight", i),
+                       storage_n=EXPERT_STORAGE_N, group=GROUP)
         for i in range(512)
     ))
 
-    up_exps = reader.read_tensor(f"{prefix}.ffn_up_exps.weight")
     packed.section(b"".join(
-        quantized_tile(up_exps[i], storage_n=EXPERT_STORAGE_N, group=GROUP)
+        quantized_tile(reader.read_expert(f"{prefix}.ffn_up_exps.weight", i),
+                       storage_n=EXPERT_STORAGE_N, group=GROUP)
         for i in range(512)
     ))
 
-    down_exps = reader.read_tensor(f"{prefix}.ffn_down_exps.weight")
     packed.section(b"".join(
-        quantized_tile(down_exps[i], storage_n=EXPERT_STORAGE_N, group=GROUP)
+        quantized_tile(reader.read_expert(f"{prefix}.ffn_down_exps.weight", i),
+                       storage_n=EXPERT_STORAGE_N, group=GROUP)
         for i in range(512)
     ))
 
@@ -267,21 +279,21 @@ def convert_mtp_layer(model_dir: str, sidecar_path: str, out_file: str) -> str:
     packed.section(quantized_q8(router))
 
     # 512 experts gate, up, down
-    gate_exps = reader.read_tensor(f"{prefix}.ffn_gate_exps.weight")
     packed.section(b"".join(
-        quantized_tile(gate_exps[i], storage_n=EXPERT_STORAGE_N, group=GROUP)
+        quantized_tile(reader.read_expert(f"{prefix}.ffn_gate_exps.weight", i),
+                       storage_n=EXPERT_STORAGE_N, group=GROUP)
         for i in range(512)
     ))
 
-    up_exps = reader.read_tensor(f"{prefix}.ffn_up_exps.weight")
     packed.section(b"".join(
-        quantized_tile(up_exps[i], storage_n=EXPERT_STORAGE_N, group=GROUP)
+        quantized_tile(reader.read_expert(f"{prefix}.ffn_up_exps.weight", i),
+                       storage_n=EXPERT_STORAGE_N, group=GROUP)
         for i in range(512)
     ))
 
-    down_exps = reader.read_tensor(f"{prefix}.ffn_down_exps.weight")
     packed.section(b"".join(
-        quantized_tile(down_exps[i], storage_n=EXPERT_STORAGE_N, group=GROUP)
+        quantized_tile(reader.read_expert(f"{prefix}.ffn_down_exps.weight", i),
+                       storage_n=EXPERT_STORAGE_N, group=GROUP)
         for i in range(512)
     ))
 
@@ -398,13 +410,87 @@ def convert_embedding(model_dir: str, out_file: str) -> str:
     reader.close()
     return f"Embedding finished ({total / (1024*1024):.1f} MB)"
 
+def convert_ngram(model_dir: str, out_file: str) -> str:
+    """The per-layer n-gram table and its PLE projections, in write_per_layer_embedding's order.
+
+    llama.cpp concatenates the 128 checkpoint shards into one table of 320M rows
+    of 160. Dequantized whole it would be ~190 GiB, so it is requantized a chunk
+    of rows at a time: codes stream straight into the file, while scales and
+    biases (3 GiB each) go to scratch files beside it and are appended after.
+    """
+    reader = MultiShardGgufReader(model_dir)
+    out_path = Path(out_file)
+    if out_path.exists():
+        out_path.unlink()
+
+    table = "per_layer_token_embd.weight"
+    width, rows = reader.tensors[table]["dims"]
+    if (width, rows) != (NGRAM_HEAD_DIMENSION, NGRAM_VOCABULARY):
+        raise ValueError(f"{table} is {rows}x{width}, expected {NGRAM_VOCABULARY}x{NGRAM_HEAD_DIMENSION}")
+
+    packed = StreamingWeightFile(out_path, NGRAM_MAGIC, NGRAM_SHARDS, width)
+    scratch = [out_path.with_name(out_path.name + f".{part}.tmp") for part in ("scales", "biases")]
+    try:
+        with open(scratch[0], "wb") as scales, open(scratch[1], "wb") as biases:
+            packed.begin()
+            for start in range(0, rows, NGRAM_CHUNK_ROWS):
+                values = reader.read_rows(table, start, min(NGRAM_CHUNK_ROWS, rows - start))
+                codes, scale_bits, bias_bits = quantize_affine(values, group=FINE_GROUP)
+                packed.write(pack_nibbles(codes).tobytes())
+                scales.write(scale_bits.tobytes())
+                biases.write(bias_bits.tobytes())
+        for path in scratch:
+            packed.begin()
+            with open(path, "rb") as part:
+                while chunk := part.read(1 << 26):
+                    packed.write(chunk)
+    finally:
+        for path in scratch:
+            path.unlink(missing_ok=True)
+
+    # The hash constants travel as GGUF metadata, already little-endian 64-bit.
+    for key in ("head_offsets", "head_vocab_sizes", "layer_multipliers"):
+        packed.section(reader.metadata[f"qwen4exp.ple.{key}"])
+
+    prefix = "blk.1"
+    packed.section(quantized_tile(reader.read_tensor(f"{prefix}.ple_key.weight")))
+    packed.section(quantized_tile(reader.read_tensor(f"{prefix}.ple_value.weight")))
+    # PLE norms stored as 1.0 + weight in GGUF
+    for norm in ("key", "query", "conv"):
+        weight = reader.read_tensor(f"{prefix}.ple_norm_{norm}.weight") - 1.0
+        packed.section(to_bf16(weight).tobytes())
+    packed.section(to_bf16(reader.read_tensor(f"{prefix}.ple_conv1d.weight")).tobytes())
+
+    total = packed.finish()
+    reader.close()
+    return f"N-gram table finished ({total / (1024*1024):.1f} MB)"
+
+def fetch_tokenizer(tokenizer_dir: Path) -> None:
+    """Download the base model's tokenizer; its vocabulary and chat template match the GGUF's."""
+    from huggingface_hub import hf_hub_download
+
+    for name in TOKENIZER_FILES:
+        if not (tokenizer_dir / name).exists():
+            shutil.copyfile(
+                hf_hub_download(TOKENIZER_REPO, name, revision=TOKENIZER_REVISION),
+                tokenizer_dir / name,
+            )
+    print(f"Fetched tokenizer from {TOKENIZER_REPO}")
+
+def default_workers() -> int:
+    """Workers that fit in memory: a layer peaks near 4 GiB, the head near 13 GiB."""
+    memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    return max(1, min(8, memory // WORKER_MEMORY_BYTES))
+
 def prepare_gguf_model(
     model_dir: str | Path,
     output_dir: str | Path,
     sidecar_path: str | Path | None = None,
     reference_dir: str | Path | None = None,
-    workers: int = 8
+    workers: int | None = None
 ) -> None:
+    if workers is None:
+        workers = default_workers()
     model_dir = Path(model_dir).expanduser().resolve()
     output_dir = Path(output_dir).expanduser().resolve()
     target_dir = output_dir / "target"
@@ -426,12 +512,14 @@ def prepare_gguf_model(
                 sidecar_path = candidate
                 break
 
+    # A previously prepared package saves converting the n-gram table; without
+    # one everything is built from the GGUF. The output itself never counts.
     if reference_dir is None:
         for candidate in [
             Path.home() / "models/qwen38-flash-next-v3/prepared",
             Path.home() / "models/qwen38-flash-next-splash",
         ]:
-            if candidate.exists():
+            if candidate.resolve() != output_dir and (candidate / "target/ngram.bin").exists():
                 reference_dir = candidate
                 break
 
@@ -441,9 +529,11 @@ def prepare_gguf_model(
     print(f"Output: {output_dir}")
     print(f"Sidecar: {sidecar_path}")
     print(f"Reference: {reference_dir}")
+    print(f"Workers: {workers}")
 
-    # Copy / hardlink n-gram table if available
+    # Copy / hardlink n-gram table if available, else convert it with the layers
     ngram_dst = target_dir / "ngram.bin"
+    convert_ngram_table = False
     if not ngram_dst.exists():
         if reference_dir and (Path(reference_dir) / "target/ngram.bin").exists():
             ngram_src = Path(reference_dir) / "target/ngram.bin"
@@ -454,7 +544,7 @@ def prepare_gguf_model(
                 shutil.copyfile(ngram_src, ngram_dst)
                 print(f"Copied ngram.bin from {ngram_src}")
         else:
-            raise FileNotFoundError("ngram.bin required (table conversion takes 29.8 GiB)")
+            convert_ngram_table = True
 
     # Copy tokenizer & draft vocab if available
     if reference_dir:
@@ -474,9 +564,12 @@ def prepare_gguf_model(
                 shutil.copyfile(f, draft_dir / f.name)
         print("Copied draft files")
 
-    # Generate manifest.json
-    write_manifest(output_dir)
-    print("Generated manifest.json")
+    if not all((tokenizer_dir / name).exists() for name in TOKENIZER_FILES):
+        fetch_tokenizer(tokenizer_dir)
+    # This model has no DFlash 2 draft; the package format still expects one.
+    if not (draft_dir / "model.bin").exists():
+        write_placeholder_draft(draft_dir)
+        print("Wrote placeholder draft")
 
     # Parallel conversion tasks
     tasks = []
@@ -510,6 +603,8 @@ def prepare_gguf_model(
         emb_file = str(target_dir / "embedding.bin")
         tasks.append(executor.submit(convert_head, str(model_dir), head_file))
         tasks.append(executor.submit(convert_embedding, str(model_dir), emb_file))
+        if convert_ngram_table:
+            tasks.append(executor.submit(convert_ngram, str(model_dir), str(ngram_dst)))
 
         for future in concurrent.futures.as_completed(tasks):
             try:
@@ -519,6 +614,11 @@ def prepare_gguf_model(
                 print(f"  [ERROR] Task failed: {e}")
                 raise e
 
+    # Last, so a package with a manifest is a complete one: the launcher
+    # treats manifest.json and layer-0.bin as "already prepared".
+    write_manifest(output_dir)
+    print("Generated manifest.json")
+
     elapsed = time.perf_counter() - start_time
     print(f"=== Successfully prepared Slipstream model in {elapsed:.1f}s ===")
 
@@ -527,8 +627,8 @@ def main():
     parser.add_argument("--model-dir", required=True, help="Directory containing GGUF shards")
     parser.add_argument("--output", required=True, help="Destination directory for prepared package")
     parser.add_argument("--sidecar", default=None, help="Path to MTP draft sidecar GGUF")
-    parser.add_argument("--reference", default=None, help="Reference model directory (for tokenizer and ngram)")
-    parser.add_argument("--workers", type=int, default=8, help="Number of worker processes")
+    parser.add_argument("--reference", default=None, help="Previously prepared package to reuse ngram.bin, tokenizer and draft from")
+    parser.add_argument("--workers", type=int, default=None, help="Number of worker processes (default: by installed memory, at most 8)")
     args = parser.parse_args()
 
     prepare_gguf_model(args.model_dir, args.output, args.sidecar, args.reference, workers=args.workers)
