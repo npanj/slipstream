@@ -33,18 +33,6 @@ class LauncherError(RuntimeError):
     pass
 
 
-def _use_repo_models_package():
-    """Make `models` resolve to the repo's models/ package, not install/models.py.
-
-    Run as a script, install/ is sys.path[0] and the fallback import above
-    caches install/models.py as `models`; model_artifacts keeps its reference.
-    """
-    if sys.path[:1] != [str(ROOT)]:
-        sys.path.insert(0, str(ROOT))
-    if getattr(sys.modules.get("models"), "__path__", None) is None:
-        sys.modules.pop("models", None)
-
-
 def _request_json(path, timeout=2):
     request = urllib.request.Request(BASE_URL + path)
     if key := (
@@ -161,9 +149,15 @@ def serve(args):
                 layer0_path = prepared_dir / "target/layer-0.bin"
                 if not (manifest_path.exists() and layer0_path.exists()):
                     print(f"[Slipstream] Preparing GGUF model from {model_path}...", flush=True)
-                    _use_repo_models_package()
-                    from models.qwen4exp.tools.convert_qwen4exp_gguf import prepare_gguf_model
-                    prepare_gguf_model(model_path, prepared_dir)
+                    # A separate process: install/models.py, imported above as
+                    # `models`, would shadow the repo's models/ package here.
+                    converter = ROOT / "models/qwen4exp/tools/convert_qwen4exp_gguf.py"
+                    prepared = subprocess.run(
+                        [str(paths.PYTHON), "-u", str(converter),
+                         "--model-dir", str(model_path), "--output", str(prepared_dir)]
+                    )
+                    if prepared.returncode != 0:
+                        raise LauncherError(f"preparing {model_path} failed; see the output above")
                 root = prepared_dir
                 model_id = f"local/{model_path.name}"
             elif (model_path / "manifest.json").exists():
