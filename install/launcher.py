@@ -123,9 +123,12 @@ def serve(args):
                 "stop it with Ctrl+C first"
             ) from None
         port = getattr(args, "port", None) or PORT
+        host = getattr(args, "host", None) or "127.0.0.1"
         lock.seek(0)
         lock.truncate()
-        json.dump({"pid": os.getpid(), "model": args.model, "port": port}, lock)
+        json.dump(
+            {"pid": os.getpid(), "model": args.model, "port": port, "host": host}, lock
+        )
         lock.flush()
         # Fail before downloads/builds if another service owns the default port.
         # The HTTP server also binds before loading weights, closing the race.
@@ -134,10 +137,11 @@ def serve(args):
             # not block a restart; a live listener still owns the address.
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                probe.bind(("127.0.0.1", port))
-            except OSError:
+                probe.bind((host, port))
+            except OSError as error:
                 raise LauncherError(
-                    f"127.0.0.1:{port} is in use; stop that service first"
+                    f"cannot listen on {host}:{port} ({error.strerror or error}); "
+                    "stop the service using it or choose another address"
                 ) from None
         model_str = args.model
         model_path = Path(model_str).expanduser()
@@ -179,7 +183,7 @@ def serve(args):
             "--max-context",
             "auto" if args.max_context is None else str(args.max_context),
         ]
-        command.extend(["--port", str(port)])
+        command.extend(["--host", host, "--port", str(port)])
         if args.max_image_pixels is not None:
             command.extend(["--max-image-pixels", str(args.max_image_pixels)])
         if args.no_webui:
@@ -349,6 +353,12 @@ def parse_args(argv=None):
             or os.environ.get("SPLASH_API_KEY")
         ),
         help="API key (default: SLIPSTREAM_V2_API_KEY environment variable)",
+    )
+    server.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="address to listen on (default: 127.0.0.1, this Mac only); 0.0.0.0 "
+        "accepts connections from the network, so set --api-key with it",
     )
     server.add_argument(
         "--port",

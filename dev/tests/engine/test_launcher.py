@@ -100,6 +100,7 @@ class LauncherTests(unittest.TestCase):
                 "pid": os.getpid(),
                 "model": MODEL_ID,
                 "port": launcher.PORT,
+                "host": "127.0.0.1",
             }
 
             def check_install(model):
@@ -231,6 +232,28 @@ class LauncherTests(unittest.TestCase):
                     )
                     self.assertEqual(lock_path.read_bytes(), content)
                     install.assert_not_called()
+
+    def test_host_is_probed_passed_to_the_server_and_recorded(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            with (
+                mock.patch.object(launcher, "RUNTIME_DIR", runtime),
+                mock.patch.object(launcher.socket, "socket") as factory,
+                mock.patch.object(launcher.catalog, "spawn_refresh"),
+                mock.patch.object(launcher, "_ensure_installed"),
+                mock.patch.object(launcher.os, "execve") as execute,
+                mock.patch("sys.stdout", io.StringIO()),
+            ):
+                launcher.main(
+                    ["serve", "--model", MODEL_ID, "--host", "0.0.0.0", "--port", "8123"]
+                )
+            probe = factory.return_value.__enter__.return_value
+            probe.bind.assert_called_once_with(("0.0.0.0", 8123))
+            argv = execute.call_args.args[1]
+            self.assertEqual(argv[argv.index("--host") + 1], "0.0.0.0")
+            self.assertEqual(argv[argv.index("--port") + 1], "8123")
+            lock = json.loads((runtime / "serve.lock").read_text())
+            self.assertEqual((lock["host"], lock["port"]), ("0.0.0.0", 8123))
 
     def test_busy_port_and_duplicate_serve_fail_before_model_work(self):
         with tempfile.TemporaryDirectory() as temporary:
