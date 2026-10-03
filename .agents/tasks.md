@@ -215,4 +215,3 @@
 - [x] **Community PRs Merged & Credited**: Cleanly reviewed, validated, and merged PRs #7, #8, #9, and #10 by @mzinner.
 - [x] **GGUF Standardization**: Deprecated proprietary Splash package distribution on Hugging Face; standardized documentation and launcher on universal GGUF format with in-place APFS hole punching.
 - [x] **Synchronized with Origin**: Pushed all 14 commits to `origin/main` with 100% green CI and unit test suite.
-
