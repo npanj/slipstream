@@ -2,6 +2,7 @@
 
 #include "ModelDescriptor.hpp"
 #include "models/qwen4exp/Qwen4Exp.hpp"
+#include "models/qwen38/Qwen3_8.hpp"
 #include "ops/Q8PageStorage.hpp"
 #include "ops/ExecutionPlans.hpp"
 
@@ -12,7 +13,8 @@
 namespace splash::model {
 
 // One alternative per model family; a new model adds its weights here.
-using TargetWeights = std::variant<Qwen4ExpWeights>;
+using TargetWeights =
+    std::variant<Qwen4ExpWeights, Qwen3_8Weights, Qwen3_8Q8Weights>;
 
 struct ModelPackage final {
   ModelDescriptor descriptor;

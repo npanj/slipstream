@@ -1268,12 +1268,17 @@ class MultiplexedRuntime:
 
         def finish() -> None:
             if not isinstance(failure, RuntimeClosed):
-                self._crash_trace.dump(
-                    generation,
-                    failure,
-                    process_returncode=returncode,
-                    last_status=last_status,
-                )
+                try:
+                    self._crash_trace.dump(
+                        generation,
+                        failure,
+                        process_returncode=returncode,
+                        last_status=last_status,
+                    )
+                except Exception:
+                    # A diagnostic: one not written must not keep the failure
+                    # from reaching the listener, the calls and the engine.
+                    pass
             for call in calls:
                 self._admission_slots.release()
                 call._set_terminal(error=failure)

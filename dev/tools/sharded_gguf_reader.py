@@ -93,6 +93,8 @@ class MultiShardGgufReader:
         self.shards = []
         self.tensors = {}
         self.metadata = {}
+        # Every tensor read so far, so a caller can tell which source bytes it is done with.
+        self.read_names = set()
 
         for shard_idx, shard_path in enumerate(shard_paths):
             fd = open(shard_path, "rb")
@@ -183,9 +185,25 @@ class MultiShardGgufReader:
         rows = self._meta(name)["dims"][1]
         return self.read_rows(name, expert * rows, rows)
 
+    def extent(self, name, start=0, count=None):
+        """(shard path, byte offset, byte length) of a tensor, or of rows [start, start + count) of it."""
+        meta = self.tensors[name]
+        block, size = GGML_BLOCKS[meta["type"]]
+        width, rows = meta["dims"][0], int(np.prod(meta["dims"][1:]))
+        row_bytes = width // block * size
+        if count is None:
+            count = rows - start
+        shard = self.shards[meta["shard_idx"]]
+        return (
+            shard["path"],
+            shard["data_offset"] + meta["offset"] + start * row_bytes,
+            count * row_bytes,
+        )
+
     def _meta(self, name):
         if name not in self.tensors:
             raise KeyError(f"Tensor {name} not found in GGUF shards")
+        self.read_names.add(name)
         return self.tensors[name]
 
     def _decode(self, name, skip, shape):

@@ -1,32 +1,36 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-02 23:20 PDT by antigravity.
+**Updated:** 2026-10-03 08:52 PDT by antigravity.
 **Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`).
 
 ## In one line
 
-Integrated high-leverage speed and quality optimizations: probability-gated speculative early exit in `Qwen4ExpTarget.cpp` (+3% to +6% tok/s decode on complex reasoning), vectorized Metal compute buffer bindings (`setBuffers:offsets:withRange:`) in `MetalBackend.mm` eliminating 1,000+ scalar Objective-C dispatches per step, defensive out-of-vocabulary / non-finite logits guard in `Engine.cpp` with unit test, and pre-compiled sampling policy pipelines in `Runtime.mm` eliminating 200–400 ms first-token JIT spikes. Full CPU engine test suite 21/21 targets and 171/171 Python server tests pass 100% green.
+Native 27B model architecture (`models/qwen38/`, `Qwen3_8Layout`, `Qwen3_8Q8Layout`) fully operational alongside Flash-Next, with auto-detection for GGUF and MLX models, in-place GGUF preparation using APFS hole-punching (`F_PUNCHHOLE`) that halves peak disk requirements, and upstream synchronization (whole-number float parsing, zero-copy retry, crash-trace dump isolation, status cache tracking). Full CPU engine test suite 21/21 targets, model execution plans, 171/171 Python server tests, and 17/17 launcher tests pass 100% green.
 
 ---
 
 ## How to use it
 
 ```zsh
-# One-line install of prebuilt binary (no compilation needed):
+# One-line install of prebuilt binary:
 curl -fsSL https://raw.githubusercontent.com/npanj/slipstream/main/install.sh | sh
 
-# Serve Swift V3 directly pointing at local directory:
+# Serve Swift-Qwen3.8-Flash-Next-V3 (local directory or Hugging Face repo):
 ./slipstream serve --model ~/models/swift-qwen38-flash-next-v3 --port 8090
-
-# Or serve directly by Hugging Face repo ID:
 ./slipstream serve --model nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF --port 8090
 
-# Backward compatibility forwarders also work:
+# Serve 27B models (GGUF folder, single .gguf file, MLX safetensors, or prepared package):
+./slipstream serve --model ~/models/swift-qwen38-27b-splash-hq --port 8090
+./slipstream serve --model /path/to/qwen38-27b.gguf --port 8090
+./slipstream serve --model /path/to/mlx-27b-directory --port 8090
+
+# Inspect a remote Hugging Face repository before downloading:
+./slipstream pull nitinpanj/qwen38-flash-next-v3 --check
+./slipstream pull nitinpanj/qwen38-flash-next-v3 --check --json
+
+# Backward compatibility forwarders work identically:
 ./slipstream-v2 serve --model ~/models/swift-qwen38-flash-next-v3 --port 8090
 ./splash serve --model ~/models/swift-qwen38-flash-next-v3 --port 8090
-
-# Run guarded A/B benchmark comparing Slipstream vs llama.cpp:
-python3 dev/tools/compare_slipstream_vs_llamacpp.py --model-dir ~/models/swift-qwen38-flash-next-v3
 ```
 
 ---
@@ -60,23 +64,6 @@ Completed across 145 paired items (seed 1234, temperature 0.0), run sequentially
 | **HumanEval** | 25 | **92.0% (23/25)** | **92.0% (23/25)** | 0.0% | 40.6 tok/s | 40.6 tok/s |
 | **Hard Systems & Logic**| 5 | **100.0% (5/5)** | **100.0% (5/5)** | 0.0% | 39.2 tok/s | 39.2 tok/s |
 | **TOTAL / OVERALL** | **145** | **70.3% (102/145)** | **67.6% (98/145)** | **+2.8%** | **44.4 tok/s** | **43.9 tok/s** |
-
----
-
-## Context Scaling: Telemetry to 130k Tokens
-
-Empirical telemetry across 3,086 live requests:
-
-| Context Window | Live Runs | Avg Decode | Median Decode | Peak Decode | Avg TTFT |
-|---|---:|---:|---:|---:|---:|
-| **< 1k** | 314 | **41.5 tok/s** | 41.9 tok/s | 59.8 tok/s | 2.16 s |
-| **1k – 4k** | 21 | **41.0 tok/s** | 42.5 tok/s | 64.5 tok/s | 5.26 s |
-| **4k – 8k** | 58 | **43.6 tok/s** | 43.2 tok/s | 67.2 tok/s | 7.36 s |
-| **8k – 16k** | 117 | **43.6 tok/s** | 44.6 tok/s | 58.2 tok/s | 7.91 s |
-| **16k – 32k** | 562 | **38.2 tok/s** | 40.9 tok/s | 58.0 tok/s | 13.59 s |
-| **32k – 64k** | 1,029 | **35.0 tok/s** | 37.5 tok/s | 55.6 tok/s | 13.24 s |
-| **64k – 96k** | 650 | **32.4 tok/s** | 34.7 tok/s | 53.9 tok/s | 12.81 s |
-| **96k – 130k** | 364 | **32.9 tok/s** | 33.3 tok/s | 43.8 tok/s | 7.95 s |
 
 ---
 

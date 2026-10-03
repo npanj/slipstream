@@ -10,10 +10,14 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import fcntl
+import json
 import os
+import re
 import shutil
 import struct
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -24,16 +28,32 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "dev"))
 
-from dev.tools.quantize import to_bf16, from_bf16, quantize_affine, pack_nibbles
-from dev.tools.package_format import (
-    ALIGNMENT, BF16, GROUP, FINE_GROUP, STORAGE_N, EXPERT_STORAGE_N,
-    StreamingWeightFile, WeightFile, pad_rows, tile_q4, q4_bytes
+from dev.tools.package_format import (  # noqa: E402
+    BF16,
+    EXPERT_STORAGE_N,
+    FINE_GROUP,
+    GROUP,
+    STORAGE_N,
+    StreamingWeightFile,
+    WeightFile,
 )
-from dev.tools.sharded_gguf_reader import MultiShardGgufReader
-from models.qwen4exp.tools.convert_qwen4exp import (
-    quantized_q8, quantized_q8_tile, quantized_tile, q8_bytes,
-    LAYER_MAGIC, NGRAM_MAGIC, HEAD_MAGIC, EMBEDDING_MAGIC, DRAFT_MAGIC,
-    write_manifest, write_placeholder_draft
+from dev.tools.quantize import (  # noqa: E402
+    from_bf16,
+    pack_nibbles,
+    quantize_affine,
+    to_bf16,
+)
+from dev.tools.sharded_gguf_reader import MultiShardGgufReader  # noqa: E402
+from models.qwen4exp.tools.convert_qwen4exp import (  # noqa: E402
+    EMBEDDING_MAGIC,
+    HEAD_MAGIC,
+    LAYER_MAGIC,
+    NGRAM_MAGIC,
+    quantized_q8,
+    quantized_q8_tile,
+    quantized_tile,
+    write_manifest,
+    write_placeholder_draft,
 )
 
 MTP_COMBINER_MAGIC = b"MDFN0035"
@@ -65,19 +85,161 @@ LAYOUT = {
     "head_dimension": 128,
 }
 
+
 def is_full_attention(layer: int) -> bool:
     return (layer + 1) % 4 == 0
 
-def convert_single_layer(model_dir: str, sidecar_path: str | None, layer_idx: int, out_file: str) -> str:
+
+# A part is written beside its final name and renamed once complete and on
+# disk, so a part under its final name is always whole.
+PARTIAL_SUFFIX = ".partial"
+
+
+def _partial(path: Path) -> Path:
+    return path.with_name(path.name + PARTIAL_SUFFIX)
+
+
+def _commit(path: Path) -> None:
+    partial = _partial(path)
+    with open(partial, "rb+") as written:
+        os.fsync(written.fileno())
+    os.replace(partial, path)
+
+
+def tensor_owner(name: str) -> str | None:
+    """The part whose conversion reads a GGUF tensor: once it is written, the tensor can go."""
+    if name == "per_layer_token_embd.weight" or name.startswith("blk.1.ple_"):
+        return "ngram.bin"
+    if name == "token_embd.weight":
+        return "embedding.bin"
+    if name.startswith("output"):
+        return "head.bin"
+    match = re.match(r"blk\.(\d+)\.", name)
+    if match:
+        layer = int(match.group(1))
+        if layer < LAYOUT["layers"]:
+            return f"layer-{layer}.bin"
+        if layer == LAYOUT["layers"]:
+            return (
+                "mtp-combiner.bin"
+                if name.startswith("blk.48.nextn.")
+                else "mtp-layer.bin"
+            )
+    return None
+
+
+# Converting in place: each tensor's bytes are given back to the file system as
+# soon as the part that reads it is written, so the package grows while the
+# GGUF shrinks, and preparing needs little more room than the model itself.
+F_PUNCHHOLE = 99  # <sys/fcntl.h>: deallocate a range; the file keeps its size.
+# How much larger the package is than the GGUF data it is made from (measured: 2.6 %).
+OUTPUT_GROWTH = 1.05
+# A part being written while its source is still there: a layer is 1.4 GiB.
+IN_FLIGHT_BYTES_PER_WORKER = 3 << 29
+
+
+def _punch_hole(path: Path, offset: int, length: int) -> None:
+    descriptor = os.open(path, os.O_RDWR)
+    try:
+        block = os.fstatvfs(descriptor).f_frsize
+        # Only whole blocks inside the range: its neighbours may still be needed.
+        start = -(-offset // block) * block
+        end = (offset + length) // block * block
+        if end > start:
+            fcntl.fcntl(
+                descriptor, F_PUNCHHOLE, struct.pack("IIqq", 0, 0, start, end - start)
+            )
+    finally:
+        os.close(descriptor)
+
+
+def can_free_in_place(directory: Path) -> bool:
+    """Whether the file system under directory frees a punched range (APFS does, ExFAT does not)."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=directory, prefix=".punch-probe-"
+        ) as probe:
+            block = os.fstatvfs(probe.fileno()).f_frsize
+            probe.write(b"\1" * block * 4)
+            probe.flush()
+            os.fsync(probe.fileno())
+            before = os.fstat(probe.fileno()).st_blocks
+            _punch_hole(Path(probe.name), block, 2 * block)
+            return os.fstat(probe.fileno()).st_blocks < before
+    except OSError:
+        return False
+
+
+class SourceJournal:
+    """What an in-place preparation did to its GGUF files, so an interrupted one can resume.
+
+    prepared/.prepare-journal holds JSON lines: the source files the run started
+    from, then each tensor it frees, recorded before it is freed. Parts already
+    written are kept on a resume; a freed tensor whose part is missing means the
+    source can no longer finish the package.
+    """
+
+    NAME = ".prepare-journal"
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.recorded: set[str] = set()
+
+    @staticmethod
+    def fingerprint(sources: list[Path]) -> list:
+        # The inode changes when a file is downloaded again; freeing ranges keeps it.
+        return [
+            [path.name, path.stat().st_size, path.stat().st_ino] for path in sources
+        ]
+
+    def load(self, sources: list[Path]) -> set[str] | None:
+        """The tensors freed by an earlier run over these same files, or None."""
+        try:
+            lines = [
+                json.loads(line) for line in self.path.read_text().splitlines() if line
+            ]
+        except (OSError, ValueError):
+            return None
+        if not lines or lines[0].get("source") != self.fingerprint(sources):
+            return None
+        freed = {line["freed"] for line in lines[1:] if "freed" in line}
+        self.recorded |= freed
+        return freed
+
+    def start(self, sources: list[Path]) -> None:
+        self.path.write_text(json.dumps({"source": self.fingerprint(sources)}) + "\n")
+
+    def release(
+        self,
+        reader: MultiShardGgufReader,
+        name: str,
+        start: int = 0,
+        count: int | None = None,
+    ) -> None:
+        """Free a tensor's bytes in its shard, or rows [start, start + count) of it."""
+        if name not in self.recorded:
+            descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND)
+            try:
+                os.write(descriptor, (json.dumps({"freed": name}) + "\n").encode())
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            self.recorded.add(name)
+        _punch_hole(*reader.extent(name, start, count))
+
+
+def convert_single_layer(
+    model_dir: str, sidecar_path: str | None, layer_idx: int, out_file: str
+) -> str:
     reader = MultiShardGgufReader(model_dir, sidecars=sidecar_path)
     out_path = Path(out_file)
-    if out_path.exists():
-        out_path.unlink()
 
     full = is_full_attention(layer_idx)
     kind = 1 if full else 0
     prefix = f"blk.{layer_idx}"
-    packed = WeightFile(out_path, LAYER_MAGIC, layer_idx, kind)
+    packed = WeightFile(_partial(out_path), LAYER_MAGIC, layer_idx, kind)
 
     # 1. Attention Hyper-connection (norm stored as 1.0 + weight in GGUF)
     norm = reader.read_tensor(f"{prefix}.hc_attn_norm.weight") - 1.0
@@ -122,7 +284,12 @@ def convert_single_layer(model_dir: str, sidecar_path: str | None, layer_idx: in
     else:
         # GDN value heads in GGUF are permuted (3, 16) instead of canonical (16, 3)
         qkv = reader.read_tensor(f"{prefix}.attn_qkv.weight")
-        qkv_v = qkv[4096:].reshape(3, 16, 128, 2560).transpose(1, 0, 2, 3).reshape(6144, 2560)
+        qkv_v = (
+            qkv[4096:]
+            .reshape(3, 16, 128, 2560)
+            .transpose(1, 0, 2, 3)
+            .reshape(6144, 2560)
+        )
         qkv = np.vstack([qkv[:4096], qkv_v])
 
         gate = reader.read_tensor(f"{prefix}.attn_gate.weight")
@@ -138,7 +305,9 @@ def convert_single_layer(model_dir: str, sidecar_path: str | None, layer_idx: in
         packed.section(quantized_q8_tile(stacked, pad_to=LAYOUT["packed_gdn"]))
 
         conv1d = reader.read_tensor(f"{prefix}.ssm_conv1d.weight")
-        conv_v = conv1d[4096:].reshape(3, 16, 128, 4).transpose(1, 0, 2, 3).reshape(6144, 4)
+        conv_v = (
+            conv1d[4096:].reshape(3, 16, 128, 4).transpose(1, 0, 2, 3).reshape(6144, 4)
+        )
         conv1d = np.vstack([conv1d[:4096], conv_v])
         packed.section(to_bf16(conv1d.flatten()).tobytes())
 
@@ -154,7 +323,9 @@ def convert_single_layer(model_dir: str, sidecar_path: str | None, layer_idx: in
         packed.section(to_bf16(ssm_norm).tobytes())
 
         out_proj = reader.read_tensor(f"{prefix}.ssm_out.weight")
-        out_proj = out_proj.reshape(2560, 3, 16, 128).transpose(0, 2, 1, 3).reshape(2560, 6144)
+        out_proj = (
+            out_proj.reshape(2560, 3, 16, 128).transpose(0, 2, 1, 3).reshape(2560, 6144)
+        )
         packed.section(quantized_q8_tile(out_proj))
 
     # 3. MLP Hyper-connection (norm stored as 1.0 + weight in GGUF)
@@ -175,23 +346,38 @@ def convert_single_layer(model_dir: str, sidecar_path: str | None, layer_idx: in
     packed.section(quantized_q8(router))
 
     # 512 experts gate, up, down, one expert at a time: whole, each tensor is 3.4 GB as float32
-    packed.section(b"".join(
-        quantized_tile(reader.read_expert(f"{prefix}.ffn_gate_exps.weight", i),
-                       storage_n=EXPERT_STORAGE_N, group=GROUP)
-        for i in range(512)
-    ))
+    packed.section(
+        b"".join(
+            quantized_tile(
+                reader.read_expert(f"{prefix}.ffn_gate_exps.weight", i),
+                storage_n=EXPERT_STORAGE_N,
+                group=GROUP,
+            )
+            for i in range(512)
+        )
+    )
 
-    packed.section(b"".join(
-        quantized_tile(reader.read_expert(f"{prefix}.ffn_up_exps.weight", i),
-                       storage_n=EXPERT_STORAGE_N, group=GROUP)
-        for i in range(512)
-    ))
+    packed.section(
+        b"".join(
+            quantized_tile(
+                reader.read_expert(f"{prefix}.ffn_up_exps.weight", i),
+                storage_n=EXPERT_STORAGE_N,
+                group=GROUP,
+            )
+            for i in range(512)
+        )
+    )
 
-    packed.section(b"".join(
-        quantized_tile(reader.read_expert(f"{prefix}.ffn_down_exps.weight", i),
-                       storage_n=EXPERT_STORAGE_N, group=GROUP)
-        for i in range(512)
-    ))
+    packed.section(
+        b"".join(
+            quantized_tile(
+                reader.read_expert(f"{prefix}.ffn_down_exps.weight", i),
+                storage_n=EXPERT_STORAGE_N,
+                group=GROUP,
+            )
+            for i in range(512)
+        )
+    )
 
     # Shared expert
     shexp_gate = reader.read_tensor(f"{prefix}.ffn_gate_shexp.weight")
@@ -210,16 +396,19 @@ def convert_single_layer(model_dir: str, sidecar_path: str | None, layer_idx: in
 
     total_bytes = packed.finish()
     reader.close()
-    return f"Layer {layer_idx:2d} finished ({total_bytes / (1024*1024):.1f} MB)"
+    _commit(out_path)
+    return (
+        f"Layer {layer_idx:2d} finished ({total_bytes / (1024 * 1024):.1f} MB)",
+        reader.read_names,
+    )
+
 
 def convert_mtp_layer(model_dir: str, sidecar_path: str, out_file: str) -> str:
     reader = MultiShardGgufReader(model_dir, sidecars=sidecar_path)
     out_path = Path(out_file)
-    if out_path.exists():
-        out_path.unlink()
 
     prefix = "blk.48"
-    packed = WeightFile(out_path, LAYER_MAGIC, 48, 1)
+    packed = WeightFile(_partial(out_path), LAYER_MAGIC, 48, 1)
 
     # 1. Attention Hyper-connection
     norm = reader.read_tensor(f"{prefix}.hc_attn_norm.weight") - 1.0
@@ -279,23 +468,38 @@ def convert_mtp_layer(model_dir: str, sidecar_path: str, out_file: str) -> str:
     packed.section(quantized_q8(router))
 
     # 512 experts gate, up, down
-    packed.section(b"".join(
-        quantized_tile(reader.read_expert(f"{prefix}.ffn_gate_exps.weight", i),
-                       storage_n=EXPERT_STORAGE_N, group=GROUP)
-        for i in range(512)
-    ))
+    packed.section(
+        b"".join(
+            quantized_tile(
+                reader.read_expert(f"{prefix}.ffn_gate_exps.weight", i),
+                storage_n=EXPERT_STORAGE_N,
+                group=GROUP,
+            )
+            for i in range(512)
+        )
+    )
 
-    packed.section(b"".join(
-        quantized_tile(reader.read_expert(f"{prefix}.ffn_up_exps.weight", i),
-                       storage_n=EXPERT_STORAGE_N, group=GROUP)
-        for i in range(512)
-    ))
+    packed.section(
+        b"".join(
+            quantized_tile(
+                reader.read_expert(f"{prefix}.ffn_up_exps.weight", i),
+                storage_n=EXPERT_STORAGE_N,
+                group=GROUP,
+            )
+            for i in range(512)
+        )
+    )
 
-    packed.section(b"".join(
-        quantized_tile(reader.read_expert(f"{prefix}.ffn_down_exps.weight", i),
-                       storage_n=EXPERT_STORAGE_N, group=GROUP)
-        for i in range(512)
-    ))
+    packed.section(
+        b"".join(
+            quantized_tile(
+                reader.read_expert(f"{prefix}.ffn_down_exps.weight", i),
+                storage_n=EXPERT_STORAGE_N,
+                group=GROUP,
+            )
+            for i in range(512)
+        )
+    )
 
     # Shared expert
     shexp_gate = reader.read_tensor(f"{prefix}.ffn_gate_shexp.weight")
@@ -314,15 +518,18 @@ def convert_mtp_layer(model_dir: str, sidecar_path: str, out_file: str) -> str:
 
     total_bytes = packed.finish()
     reader.close()
-    return f"MTP Layer (48) finished ({total_bytes / (1024*1024):.1f} MB)"
+    _commit(out_path)
+    return (
+        f"MTP Layer (48) finished ({total_bytes / (1024 * 1024):.1f} MB)",
+        reader.read_names,
+    )
+
 
 def convert_mtp_combiner(model_dir: str, sidecar_path: str, out_file: str) -> str:
     reader = MultiShardGgufReader(model_dir, sidecars=sidecar_path)
     out_path = Path(out_file)
-    if out_path.exists():
-        out_path.unlink()
 
-    combiner = WeightFile(out_path, MTP_COMBINER_MAGIC, 48, 3)
+    combiner = WeightFile(_partial(out_path), MTP_COMBINER_MAGIC, 48, 3)
 
     enorm = reader.read_tensor("blk.48.nextn.enorm.weight") - 1.0
     combiner.section(to_bf16(enorm).tobytes())
@@ -347,15 +554,15 @@ def convert_mtp_combiner(model_dir: str, sidecar_path: str, out_file: str) -> st
 
     total = combiner.finish()
     reader.close()
-    return f"MTP Combiner finished ({total / (1024*1024):.1f} MB)"
+    _commit(out_path)
+    return f"MTP Combiner finished ({total / (1024 * 1024):.1f} MB)", reader.read_names
+
 
 def convert_head(model_dir: str, out_file: str) -> str:
     reader = MultiShardGgufReader(model_dir)
     out_path = Path(out_file)
-    if out_path.exists():
-        out_path.unlink()
 
-    packed = WeightFile(out_path, HEAD_MAGIC, 48, 2)
+    packed = WeightFile(_partial(out_path), HEAD_MAGIC, 48, 2)
 
     norm = reader.read_tensor("output_hc_norm.weight") - 1.0
     packed.section(to_bf16(norm).tobytes())
@@ -378,15 +585,17 @@ def convert_head(model_dir: str, out_file: str) -> str:
 
     total = packed.finish()
     reader.close()
-    return f"Head finished ({total / (1024*1024):.1f} MB)"
+    _commit(out_path)
+    return f"Head finished ({total / (1024 * 1024):.1f} MB)", reader.read_names
+
 
 def convert_embedding(model_dir: str, out_file: str) -> str:
     reader = MultiShardGgufReader(model_dir)
     out_path = Path(out_file)
-    if out_path.exists():
-        out_path.unlink()
 
-    packed = WeightFile(out_path, EMBEDDING_MAGIC, LAYOUT["vocabulary"], LAYOUT["hidden"])
+    packed = WeightFile(
+        _partial(out_path), EMBEDDING_MAGIC, LAYOUT["vocabulary"], LAYOUT["hidden"]
+    )
     embed = reader.read_tensor("token_embd.weight")
     rows, width = embed.shape
     groups = embed.reshape(rows, width // GROUP, GROUP)
@@ -408,45 +617,49 @@ def convert_embedding(model_dir: str, out_file: str) -> str:
 
     total = packed.finish()
     reader.close()
-    return f"Embedding finished ({total / (1024*1024):.1f} MB)"
+    _commit(out_path)
+    return f"Embedding finished ({total / (1024 * 1024):.1f} MB)", reader.read_names
 
-def convert_ngram(model_dir: str, out_file: str) -> str:
+
+def convert_ngram(model_dir: str, out_file: str, journal_path: str | None = None):
     """The per-layer n-gram table and its PLE projections, in write_per_layer_embedding's order.
 
     llama.cpp concatenates the 128 checkpoint shards into one table of 320M rows
     of 160. Dequantized whole it would be ~190 GiB, so it is requantized a chunk
-    of rows at a time: codes stream straight into the file, while scales and
-    biases (3 GiB each) go to scratch files beside it and are appended after.
+    of rows at a time, each chunk's codes, scales and biases written straight
+    into their sections. With a journal, each chunk's source rows are freed once
+    written: the table is a quarter of the model.
     """
     reader = MultiShardGgufReader(model_dir)
     out_path = Path(out_file)
-    if out_path.exists():
-        out_path.unlink()
+    journal = SourceJournal(journal_path) if journal_path else None
 
     table = "per_layer_token_embd.weight"
     width, rows = reader.tensors[table]["dims"]
     if (width, rows) != (NGRAM_HEAD_DIMENSION, NGRAM_VOCABULARY):
-        raise ValueError(f"{table} is {rows}x{width}, expected {NGRAM_VOCABULARY}x{NGRAM_HEAD_DIMENSION}")
+        raise ValueError(
+            f"{table} is {rows}x{width}, expected {NGRAM_VOCABULARY}x{NGRAM_HEAD_DIMENSION}"
+        )
 
-    packed = StreamingWeightFile(out_path, NGRAM_MAGIC, NGRAM_SHARDS, width)
-    scratch = [out_path.with_name(out_path.name + f".{part}.tmp") for part in ("scales", "biases")]
-    try:
-        with open(scratch[0], "wb") as scales, open(scratch[1], "wb") as biases:
-            packed.begin()
-            for start in range(0, rows, NGRAM_CHUNK_ROWS):
-                values = reader.read_rows(table, start, min(NGRAM_CHUNK_ROWS, rows - start))
-                codes, scale_bits, bias_bits = quantize_affine(values, group=FINE_GROUP)
-                packed.write(pack_nibbles(codes).tobytes())
-                scales.write(scale_bits.tobytes())
-                biases.write(bias_bits.tobytes())
-        for path in scratch:
-            packed.begin()
-            with open(path, "rb") as part:
-                while chunk := part.read(1 << 26):
-                    packed.write(chunk)
-    finally:
-        for path in scratch:
-            path.unlink(missing_ok=True)
+    packed = StreamingWeightFile(_partial(out_path), NGRAM_MAGIC, NGRAM_SHARDS, width)
+    cursors = None
+    for start in range(0, rows, NGRAM_CHUNK_ROWS):
+        count = min(NGRAM_CHUNK_ROWS, rows - start)
+        values = reader.read_rows(table, start, count)
+        codes, scale_bits, bias_bits = quantize_affine(values, group=FINE_GROUP)
+        pieces = (
+            pack_nibbles(codes).tobytes(),
+            scale_bits.tobytes(),
+            bias_bits.tobytes(),
+        )
+        if cursors is None:
+            # Codes, scales and biases are each a fixed number of bytes per row.
+            cursors = [packed.reserve(len(piece) // count * rows) for piece in pieces]
+        for index, piece in enumerate(pieces):
+            packed.write_at(cursors[index], piece)
+            cursors[index] += len(piece)
+        if journal is not None:
+            journal.release(reader, table, start, count)
 
     # The hash constants travel as GGUF metadata, already little-endian 64-bit.
     for key in ("head_offsets", "head_vocab_sizes", "layer_multipliers"):
@@ -463,7 +676,9 @@ def convert_ngram(model_dir: str, out_file: str) -> str:
 
     total = packed.finish()
     reader.close()
-    return f"N-gram table finished ({total / (1024*1024):.1f} MB)"
+    _commit(out_path)
+    return f"N-gram table finished ({total / (1024 * 1024):.1f} MB)", reader.read_names
+
 
 def fetch_tokenizer(tokenizer_dir: Path) -> None:
     """Download the base model's tokenizer; its vocabulary and chat template match the GGUF's."""
@@ -477,18 +692,28 @@ def fetch_tokenizer(tokenizer_dir: Path) -> None:
             )
     print(f"Fetched tokenizer from {TOKENIZER_REPO}")
 
+
 def default_workers() -> int:
     """Workers that fit in memory: a layer peaks near 4 GiB, the head near 13 GiB."""
     memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     return max(1, min(8, memory // WORKER_MEMORY_BYTES))
+
 
 def prepare_gguf_model(
     model_dir: str | Path,
     output_dir: str | Path,
     sidecar_path: str | Path | None = None,
     reference_dir: str | Path | None = None,
-    workers: int | None = None
+    workers: int | None = None,
+    consume_source: bool = False,
 ) -> None:
+    """Convert the GGUF files in model_dir into a package in output_dir.
+
+    With consume_source, the GGUF files in model_dir are used up: each tensor's
+    bytes are freed once converted, and the files are deleted when the package
+    is complete. Preparing then needs a few percent more disk than the model
+    rather than twice it. An MTP head outside model_dir is never touched.
+    """
     if workers is None:
         workers = default_workers()
     model_dir = Path(model_dir).expanduser().resolve()
@@ -505,7 +730,10 @@ def prepare_gguf_model(
     # looked for next to the model: other models' folders are never searched, so a
     # package is built from what its own folder holds.
     if sidecar_path is None:
-        for candidate in [model_dir / "MTP/mtp-shared-Q4_K_M.gguf", model_dir / "mtp-shared-Q4_K_M.gguf"]:
+        for candidate in [
+            model_dir / "MTP/mtp-shared-Q4_K_M.gguf",
+            model_dir / "mtp-shared-Q4_K_M.gguf",
+        ]:
             if candidate.exists():
                 sidecar_path = candidate
                 break
@@ -524,12 +752,15 @@ def prepare_gguf_model(
         reference_dir = None
 
     start_time = time.perf_counter()
-    print(f"=== Fast GGUF Ingestion for Qwen3.8-Flash-Next ===")
+    print("=== Fast GGUF Ingestion for Qwen3.8-Flash-Next ===")
     print(f"Source: {model_dir}")
     print(f"Output: {output_dir}")
     print(f"Sidecar: {sidecar_path}")
     print(f"Reference: {reference_dir}")
     print(f"Workers: {workers}")
+    print(
+        f"Source files: {'freed as they are converted, then deleted' if consume_source else 'kept'}"
+    )
 
     # Copy / hardlink n-gram table if available, else convert it with the layers
     ngram_dst = target_dir / "ngram.bin"
@@ -571,67 +802,193 @@ def prepare_gguf_model(
         write_placeholder_draft(draft_dir)
         print("Wrote placeholder draft")
 
-    # Parallel conversion tasks
-    tasks = []
+    # The parts to convert, by output name.
+    parts = {
+        f"layer-{i}.bin": (convert_single_layer, str(model_dir), str(sidecar_path), i)
+        for i in range(LAYOUT["layers"])
+    }
+    if sidecar_path and Path(sidecar_path).exists():
+        parts["mtp-layer.bin"] = (convert_mtp_layer, str(model_dir), str(sidecar_path))
+        parts["mtp-combiner.bin"] = (
+            convert_mtp_combiner,
+            str(model_dir),
+            str(sidecar_path),
+        )
+    elif reference_dir:
+        ref_path = Path(reference_dir)
+        for mtp_name in ["mtp-layer.bin", "mtp-combiner.bin"]:
+            src = ref_path / f"target/{mtp_name}"
+            dst = target_dir / mtp_name
+            if src.exists() and not dst.exists():
+                try:
+                    os.link(src, dst)
+                    print(f"Linked {mtp_name} from {src} (0 extra bytes)")
+                except Exception:
+                    shutil.copyfile(src, dst)
+                    print(f"Copied {mtp_name} from {src}")
+    parts["head.bin"] = (convert_head, str(model_dir))
+    parts["embedding.bin"] = (convert_embedding, str(model_dir))
+    parts["ngram.bin"] = (convert_ngram, str(model_dir))
+
+    reader = MultiShardGgufReader(model_dir, sidecars=sidecar_path)
+    sources = [Path(shard["path"]) for shard in reader.shards]
+    # Only the model's own files are used up; a shared MTP head elsewhere is not.
+    own = {path for path in sources if path.resolve().is_relative_to(model_dir)}
+    journal = SourceJournal(output_dir / SourceJournal.NAME)
+    freed = journal.load(sources)
+    if freed is None:
+        # A fresh start: whatever an earlier run left under these names may be partial.
+        done = set() if convert_ngram_table else {"ngram.bin"}
+        for name in parts.keys() - done:
+            for path in (target_dir / name, _partial(target_dir / name)):
+                path.unlink(missing_ok=True)
+        journal.start(sources)
+    else:
+        done = {name for name in parts if (target_dir / name).exists()}
+        lost = sorted(
+            part
+            for part in {tensor_owner(name) for name in freed} - {None}
+            if not (target_dir / part).exists()
+        )
+        if lost:
+            raise SystemExit(
+                f"error: an interrupted preparation already freed GGUF data that {', '.join(lost)} "
+                f"still needs. Delete these files and download them again:\n  "
+                + "\n  ".join(str(path) for path in sources if path in own)
+            )
+        if done:
+            print(f"Resuming: {len(done)} of {len(parts)} parts are already converted")
+
+    in_place = consume_source and can_free_in_place(model_dir)
+    if consume_source and not in_place:
+        print(
+            "This disk cannot free parts of a file; the GGUF files are deleted once the package is complete"
+        )
+    remaining = sum(
+        reader.extent(name)[2]
+        for name in reader.tensors
+        if tensor_owner(name) in parts and tensor_owner(name) not in done
+    )
+    if in_place:
+        needed = (
+            int(remaining * (OUTPUT_GROWTH - 1)) + workers * IN_FLIGHT_BYTES_PER_WORKER
+        )
+    else:
+        needed = int(remaining * OUTPUT_GROWTH)
+    free = shutil.disk_usage(target_dir).free
+    if needed > free:
+        raise SystemExit(
+            f"error: preparing needs {needed / 2**30:.1f} GiB of free disk space; "
+            f"{free / 2**30:.1f} GiB is free"
+            + (
+                ""
+                if in_place
+                else f" (converting in place, which uses up the GGUF files, needs about "
+                f"{(remaining * (OUTPUT_GROWTH - 1) + workers * IN_FLIGHT_BYTES_PER_WORKER) / 2**30:.0f} GiB)"
+            )
+        )
+
+    if in_place:
+        # Parts already written no longer need their source: an interrupted run
+        # may have stopped before freeing it, and a reused ngram.bin never read it.
+        for name in reader.tensors:
+            part = tensor_owner(name)
+            if (
+                part
+                and part not in parts.keys() - done
+                and (target_dir / part).exists()
+                and reader.extent(name)[0] in own
+            ):
+                journal.release(reader, name)
+
+    def release(part: str, read: set[str]) -> None:
+        for name in sorted(read):
+            if tensor_owner(name) != part:
+                raise RuntimeError(
+                    f"{part} read {name}, which {tensor_owner(name) or 'no part'} owns; "
+                    "its bytes cannot be freed safely"
+                )
+            if reader.extent(name)[0] in own:
+                journal.release(reader, name)
+
     with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
-        # Layers 0..47
-        for i in range(48):
-            out_file = str(target_dir / f"layer-{i}.bin")
-            tasks.append(executor.submit(convert_single_layer, str(model_dir), str(sidecar_path), i, out_file))
-
-        # MTP layer & combiner
-        if sidecar_path and Path(sidecar_path).exists():
-            mtp_layer_file = str(target_dir / "mtp-layer.bin")
-            mtp_comb_file = str(target_dir / "mtp-combiner.bin")
-            tasks.append(executor.submit(convert_mtp_layer, str(model_dir), str(sidecar_path), mtp_layer_file))
-            tasks.append(executor.submit(convert_mtp_combiner, str(model_dir), str(sidecar_path), mtp_comb_file))
-        elif reference_dir:
-            ref_path = Path(reference_dir)
-            for mtp_name in ["mtp-layer.bin", "mtp-combiner.bin"]:
-                src = ref_path / f"target/{mtp_name}"
-                dst = target_dir / mtp_name
-                if src.exists() and not dst.exists():
-                    try:
-                        os.link(src, dst)
-                        print(f"Linked {mtp_name} from {src} (0 extra bytes)")
-                    except Exception:
-                        shutil.copyfile(src, dst)
-                        print(f"Copied {mtp_name} from {src}")
-
-        # Head & Embedding
-        head_file = str(target_dir / "head.bin")
-        emb_file = str(target_dir / "embedding.bin")
-        tasks.append(executor.submit(convert_head, str(model_dir), head_file))
-        tasks.append(executor.submit(convert_embedding, str(model_dir), emb_file))
-        if convert_ngram_table:
-            tasks.append(executor.submit(convert_ngram, str(model_dir), str(ngram_dst)))
+        tasks = {}
+        for name, (function, *arguments) in parts.items():
+            if name in done:
+                print(f"  [DONE] {name} already converted")
+                continue
+            extra = (
+                [str(journal.path)] if function is convert_ngram and in_place else []
+            )
+            tasks[
+                executor.submit(function, *arguments, str(target_dir / name), *extra)
+            ] = name
 
         for future in concurrent.futures.as_completed(tasks):
             try:
-                res = future.result()
+                res, read = future.result()
                 print(f"  [DONE] {res}")
+                if in_place:
+                    release(tasks[future], read)
             except Exception as e:
                 print(f"  [ERROR] Task failed: {e}")
                 raise e
+    reader.close()
 
     # Last, so a package with a manifest is a complete one: the launcher
     # treats manifest.json and layer-0.bin as "already prepared".
     write_manifest(output_dir)
     print("Generated manifest.json")
+    if consume_source:
+        for path in sorted(own):
+            size = path.stat().st_size
+            path.unlink()
+            print(f"Deleted {path.relative_to(model_dir)} ({size / 2**30:.1f} GiB)")
+    journal.path.unlink(missing_ok=True)
 
     elapsed = time.perf_counter() - start_time
     print(f"=== Successfully prepared Slipstream model in {elapsed:.1f}s ===")
 
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model-dir", required=True, help="Directory containing GGUF shards")
-    parser.add_argument("--output", required=True, help="Destination directory for prepared package")
-    parser.add_argument("--sidecar", default=None, help="Path to MTP draft sidecar GGUF")
-    parser.add_argument("--reference", default=None, help="Previously prepared package to reuse ngram.bin, tokenizer and draft from")
-    parser.add_argument("--workers", type=int, default=None, help="Number of worker processes (default: by installed memory, at most 8)")
+    parser.add_argument(
+        "--model-dir", required=True, help="Directory containing GGUF shards"
+    )
+    parser.add_argument(
+        "--output", required=True, help="Destination directory for prepared package"
+    )
+    parser.add_argument(
+        "--sidecar", default=None, help="Path to MTP draft sidecar GGUF"
+    )
+    parser.add_argument(
+        "--reference",
+        default=None,
+        help="Previously prepared package to reuse ngram.bin, tokenizer and draft from",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Number of worker processes (default: by installed memory, at most 8)",
+    )
+    parser.add_argument(
+        "--consume-source",
+        action="store_true",
+        help="free the GGUF files' data as it is converted and delete them once the package is "
+        "complete: preparing then needs little more disk space than the model, not twice it",
+    )
     args = parser.parse_args()
 
-    prepare_gguf_model(args.model_dir, args.output, args.sidecar, args.reference, workers=args.workers)
+    prepare_gguf_model(
+        args.model_dir,
+        args.output,
+        args.sidecar,
+        args.reference,
+        workers=args.workers,
+        consume_source=args.consume_source,
+    )
+
 
 if __name__ == "__main__":
     main()

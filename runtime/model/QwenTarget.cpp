@@ -2,6 +2,8 @@
 
 #include "models/qwen4exp/Qwen4Exp.hpp"
 #include "models/qwen4exp/Qwen4ExpTarget.hpp"
+#include "models/qwen38/Qwen3_8.hpp"
+#include "models/qwen38/Qwen3_8Target.hpp"
 
 #include "ops/Embedding.hpp"
 #include "ops/Normalization.hpp"
@@ -55,6 +57,20 @@ QwenTargetGeometry geometryFor(const Qwen4ExpLayout &layout) {
   // history and restarts the window: config eos_token_id, the first stop.
   result.pleEndToken = layout.stopTokens[0];
   result.extraKvLayers = layout.mtpLayers;
+  return result;
+}
+
+QwenTargetGeometry geometryFor(const Qwen3_8Layout &layout) {
+  QwenTargetGeometry result = commonGeometry(layout);
+  result.denseIntermediateSize = layout.intermediateSize;
+  result.ffnKind = QwenFfnKind::Dense;
+  return result;
+}
+
+QwenTargetGeometry geometryFor(const Qwen3_8Q8Layout &layout) {
+  QwenTargetGeometry result = commonGeometry(layout);
+  result.denseIntermediateSize = layout.intermediateSize;
+  result.ffnKind = QwenFfnKind::Dense;
   return result;
 }
 
@@ -154,15 +170,47 @@ QwenTarget::QwenTarget(const Qwen4ExpWeights &weights,
       metal::BufferStorage::Private, "qwen4exp-head-reduced");
 }
 
+QwenTarget::QwenTarget(const Qwen3_8Weights &weights,
+                       metal::MetalBackend &backend,
+                       const ops::ExecutionPlans &operators)
+    : weights_(&weights), geometry_(qwenTargetGeometry(weights)),
+      backend_(backend), operators_(operators),
+      qwen38Target_(std::make_unique<Qwen3_8Target>(weights, geometry_, backend, operators)) {
+  requireWeights(weights, geometry_);
+}
+
+QwenTarget::QwenTarget(const Qwen3_8Q8Weights &weights,
+                       metal::MetalBackend &backend,
+                       const ops::ExecutionPlans &operators)
+    : weights_(&weights), geometry_(qwenTargetGeometry(weights)),
+      backend_(backend), operators_(operators),
+      qwen38Target_(std::make_unique<Qwen3_8Target>(weights, geometry_, backend, operators)) {
+  requireWeights(weights, geometry_);
+}
+
+QwenTarget::~QwenTarget() = default;
+QwenTarget::QwenTarget(QwenTarget &&) noexcept = default;
+
 QwenTargetGeometry qwenTargetGeometry(const Qwen4ExpWeights &weights) {
   return geometryFor(weights.layout);
 }
 
+QwenTargetGeometry qwenTargetGeometry(const Qwen3_8Weights &weights) {
+  return geometryFor(weights.layout);
+}
+
+QwenTargetGeometry qwenTargetGeometry(const Qwen3_8Q8Weights &weights) {
+  return geometryFor(weights.layout);
+}
 
 void QwenTarget::addPrefill(
     metal::CommandGraph &graph, QwenTargetPrefillBuffers buffers,
     std::span<const QwenTargetPrefillSequence> sequences, uint32_t rows,
     std::span<const kv::Q8LayerStorage> kvLayers) const {
+  if (qwen38Target_) {
+    qwen38Target_->addPrefill(graph, std::move(buffers), sequences, rows, kvLayers);
+    return;
+  }
   Qwen4ExpTarget::addPrefill(*std::get<const Qwen4ExpWeights *>(weights_),
                              geometry_, backend_, operators_, graph,
                              std::move(buffers), sequences, rows, kvLayers);
@@ -174,10 +222,14 @@ void QwenTarget::addVerify(
     std::span<const kv::Q8ChunkedPrefillParams> q8,
     std::span<const kv::Q8VerifyAttentionParams> verify, uint32_t lanes,
     ops::Q4DispatchStats &stats) const {
+  if (qwen38Target_) {
+    qwen38Target_->addVerify(graph, std::move(buffers), kvLayers, q8, verify, lanes, stats);
+    return;
+  }
   Qwen4ExpTarget::addVerify(*std::get<const Qwen4ExpWeights *>(weights_),
-                            geometry_, backend_, operators_, graph,
-                            std::move(buffers), kvLayers, q8, verify, lanes,
-                            stats);
+                             geometry_, backend_, operators_, graph,
+                             std::move(buffers), kvLayers, q8, verify, lanes,
+                             stats);
 }
 
 void QwenTarget::addHead(metal::CommandGraph &graph,
@@ -188,6 +240,10 @@ void QwenTarget::addHead(metal::CommandGraph &graph,
   if (!normalizedRows ||
       normalizedRows > ExecutionLimits::targetVerifyRows) {
     throw std::invalid_argument("invalid Qwen head row count");
+  }
+  if (qwen38Target_) {
+    qwen38Target_->addHead(graph, std::move(hidden), std::move(finalHidden), std::move(logits), normalizedRows);
+    return;
   }
   Qwen4ExpTarget::addHead(*std::get<const Qwen4ExpWeights *>(weights_),
                           geometry_, operators_, graph, std::move(hidden),
@@ -203,6 +259,10 @@ void QwenTarget::addEmbedding(metal::CommandGraph &graph,
                               metal::MetalBuffer tokens,
                               metal::MetalBuffer hidden,
                               uint32_t rows) const {
+  if (qwen38Target_) {
+    qwen38Target_->addEmbedding(graph, std::move(tokens), std::move(hidden), rows);
+    return;
+  }
   if (std::holds_alternative<const Qwen4ExpWeights *>(weights_)) {
     const auto *exp = std::get<const Qwen4ExpWeights *>(weights_);
     Qwen4ExpTarget::addEmbedding(*exp, geometry_, graph, std::move(tokens),
@@ -217,12 +277,15 @@ void QwenTarget::addEmbedding(metal::CommandGraph &graph,
       weights_);
 }
 
-
 void QwenTarget::addStateCommit(metal::CommandGraph &graph,
                                 QwenTargetCommitBuffers buffers,
                                 uint32_t lanes) const {
   if (!lanes || lanes > ExecutionLimits::maximumBatchWidth)
     throw std::invalid_argument("invalid Qwen state commit batch");
+  if (qwen38Target_) {
+    qwen38Target_->addStateCommit(graph, std::move(buffers), lanes);
+    return;
+  }
   if (geometry_.hasPerLayerEmbedding())
     Qwen4ExpTarget::addPerLayerEmbeddingCommit(geometry_, backend_, graph,
                                                buffers, lanes);

@@ -501,12 +501,23 @@ struct Runtime::Impl {
     return mtpDrafting() && !std::getenv("SPLASH_MTP_SHADOW");
   }
 
-  // Proposals the MTP head made this step (it stops when unsure).
+  bool isQwen38() const noexcept {
+    return std::holds_alternative<Qwen3_8Weights>(package.target) ||
+           std::holds_alternative<Qwen3_8Q8Weights>(package.target);
+  }
+  bool promptLookupProposing(const Request &) const noexcept {
+    if (isQwen38()) {
+      return !std::getenv("SPLASH_NO_PLD");
+    }
+    return false;
+  }
+
+  // Proposals made this step (it stops when unsure).
   uint32_t mtpProposed = mtpProposals();
 
   uint32_t retainedRowLimit(uint32_t remaining,
                             const Request *entry = nullptr) const noexcept {
-    if (entry && mtpProposing(*entry))
+    if (entry && (mtpProposing(*entry) || promptLookupProposing(*entry)))
       return std::min(remaining, 1 + mtpProposals());
     return std::min(remaining, 1u);
   }
@@ -874,8 +885,10 @@ struct Runtime::Impl {
     buffers.mtpProposedOut = &mtpProposed;
     buffers.mtpDraftOnly = mtpPhase == MtpPhase::DraftOnly;
     buffers.mtpDrafted = mtpPhase == MtpPhase::AlreadyDrafted;
-    buffers.mtpEnabled = mtpDrafting();
-    buffers.mtpShadow = !(lanes == 1 && mtpProposing(laneEntry(entries, 0)));
+    const bool isProposing =
+        lanes == 1 && (mtpProposing(laneEntry(entries, 0)) ||
+                       promptLookupProposing(laneEntry(entries, 0)));
+    buffers.mtpShadow = !isProposing;
     if (!buffers.mtpShadow)
       buffers.liveRowsPerLane = 1 + mtpProposals();
     buffers.kvPageCount = kvPages.pageCount();
@@ -1143,8 +1156,10 @@ struct Runtime::Impl {
       entry.nextDraftMask.clear();
       entry.maskWords.clear();
       entry.verifyMaskInFlight = false;
-      entry.decodeStage = DecodeStage::Regular;
-      const uint32_t stepDrafted = mtpProposing(entry) ? mtpProposed : kDraftProposalTokens;
+      const uint32_t stepDrafted =
+          (mtpProposing(entry) || promptLookupProposing(entry))
+              ? mtpProposed
+              : 0;
       ModelStepResult &result = results[lane];
       result = {entry.id,
                 0,
@@ -1204,12 +1219,48 @@ struct Runtime::Impl {
         // simulate, so draft them now; the target step below reuses them.
         const bool mtpProposes = lanes_.size() == 1 &&
                                  impl_.mtpProposing(*lanes_[0].request);
+        const bool pldProposes = lanes_.size() == 1 &&
+                                 impl_.promptLookupProposing(*lanes_[0].request);
         if (mtpProposes) {
           entries[0] = lanes_[0].request;
           CommandGraph unused;
           impl_.encodeTargetVerifyBatchForward(
               unused, {entries.data(), 1}, items_, stats_,
               MtpPhase::DraftOnly);
+        } else if (pldProposes) {
+          Request &entry = *lanes_[0].request;
+          const uint32_t anchor = *entry.pendingToken;
+          std::array<uint32_t, 1> queryTokens{anchor};
+          std::array<uint32_t, kDraftProposalTokens> pldDrafts{};
+          const uint32_t pldFound = entry.promptLookup.propose(
+              queryTokens, pldDrafts, kDraftProposalTokens, 2);
+          uint32_t *proposed = contents<uint32_t>(
+              impl_.decodeArena->get(0, DecodeTensor::ProposedTokens),
+              "constrained pld proposals");
+          float *probs = contents<float>(
+              impl_.decodeArena->get(0, DecodeTensor::ProposalProbs),
+              "constrained pld probs");
+          uint32_t *candidates = contents<uint32_t>(
+              impl_.decodeArena->get(0, DecodeTensor::Candidates),
+              "constrained pld candidates");
+          if (pldFound >= 2) {
+            for (uint32_t j = 0; j < kDraftProposalTokens; ++j) {
+              const uint32_t tok = (j < pldFound) ? pldDrafts[j] : UINT32_MAX;
+              proposed[j] = tok;
+              candidates[j * 16 + 0] = tok;
+              probs[j * 16 + 0] = (j < pldFound) ? 1.0f : 1e9f;
+              for (uint32_t c = 1; c < 16; ++c) {
+                candidates[j * 16 + c] = UINT32_MAX;
+                probs[j * 16 + c] = 0.0f;
+              }
+            }
+            impl_.mtpProposed = pldFound;
+          } else {
+            for (uint32_t j = 0; j < kDraftProposalTokens; ++j) {
+              proposed[j] = UINT32_MAX;
+            }
+            impl_.mtpProposed = 0;
+          }
         }
         for (uint32_t lane = 0; lane < lanes_.size(); ++lane) {
           DecodeLaneResult &laneResult = lanes_[lane];
@@ -1223,8 +1274,8 @@ struct Runtime::Impl {
           const uint32_t remaining = entry.maxNewTokens - entry.generatedTokens;
           laneResult.currentAnchor = *entry.pendingToken;
           laneResult.maximumRetained = impl_.retainedRowLimit(remaining, &entry);
-          // The head may have stopped early; keep no row it did not propose.
-          if (mtpProposes)
+          // The proposer may have stopped early; keep no row it did not propose.
+          if (mtpProposes || pldProposes)
             laneResult.maximumRetained = std::min(laneResult.maximumRetained,
                                                   1 + impl_.mtpProposed);
           laneResult.verify = true;
@@ -1744,6 +1795,53 @@ Runtime::decodeAsync(const BatchPlan &plan,
     laneResult.verify = true;
   }
 
+  if (!lanes.empty() && impl_->promptLookupProposing(*lanes[0].request)) {
+    for (uint32_t lane = 0; lane < lanes.size(); ++lane) {
+      Impl::DecodeLaneResult &laneResult = lanes[lane];
+      if (!laneResult.request || !laneResult.request->pendingToken)
+        continue;
+      Impl::Request &entry = *laneResult.request;
+      const uint32_t anchor = *entry.pendingToken;
+      std::array<uint32_t, 1> queryTokens{anchor};
+      std::array<uint32_t, kDraftProposalTokens> pldDrafts{};
+      const uint32_t pldFound = entry.promptLookup.propose(
+          queryTokens, pldDrafts, kDraftProposalTokens, 2);
+      if (pldFound >= 2) {
+        uint32_t *proposed = contents<uint32_t>(
+            impl_->decodeArena->get(lane, DecodeTensor::ProposedTokens),
+            "pld proposals");
+        float *probs = contents<float>(
+            impl_->decodeArena->get(lane, DecodeTensor::ProposalProbs),
+            "pld probs");
+        uint32_t *candidates = contents<uint32_t>(
+            impl_->decodeArena->get(lane, DecodeTensor::Candidates),
+            "pld candidates");
+        for (uint32_t j = 0; j < kDraftProposalTokens; ++j) {
+          const uint32_t tok = (j < pldFound) ? pldDrafts[j] : UINT32_MAX;
+          proposed[j] = tok;
+          candidates[j * 16 + 0] = tok;
+          probs[j * 16 + 0] = (j < pldFound) ? 1.0f : 1e9f;
+          for (uint32_t c = 1; c < 16; ++c) {
+            candidates[j * 16 + c] = UINT32_MAX;
+            probs[j * 16 + c] = 0.0f;
+          }
+        }
+        impl_->mtpProposed = pldFound;
+        laneResult.maximumRetained =
+            std::min(laneResult.maximumRetained, 1 + pldFound);
+      } else {
+        uint32_t *proposed = contents<uint32_t>(
+            impl_->decodeArena->get(lane, DecodeTensor::ProposedTokens),
+            "pld proposals");
+        for (uint32_t j = 0; j < kDraftProposalTokens; ++j) {
+          proposed[j] = UINT32_MAX;
+        }
+        impl_->mtpProposed = 0;
+        laneResult.maximumRetained = 1u;
+      }
+    }
+  }
+
   CommandGraph commandGraph;
   uint32_t verified = 0;
   uint32_t draftComputed = 0;
@@ -1766,8 +1864,9 @@ Runtime::decodeAsync(const BatchPlan &plan,
         impl_->decodeArena->packed(DecodeTensor::RopeCos, width),
         impl_->decodeArena->packed(DecodeTensor::RopeSin, width));
   }
-  const bool mtpProposes = lanes.size() == 1 && lanes[0].request &&
-                           impl_->mtpProposing(*lanes[0].request);
+  const bool proposing = lanes.size() == 1 && lanes[0].request &&
+                         (impl_->mtpProposing(*lanes[0].request) ||
+                          impl_->promptLookupProposing(*lanes[0].request));
   if (verified) {
     impl_->encodeBatchVerifyInput(commandGraph, width);
     impl_->encodeBatchEmbedding(commandGraph, DecodeTensor::InputTokens,
@@ -1780,8 +1879,8 @@ Runtime::decodeAsync(const BatchPlan &plan,
     }
     impl_->encodeTargetVerifyBatchForward(
         commandGraph, {requests.data(), lanes.size()}, items, batchStats);
-    // The head may have stopped early; keep no row it did not propose.
-    if (mtpProposes)
+    // The proposer may have stopped early; keep no row it did not propose.
+    if (proposing)
       maximumRetained[0] = std::min(maximumRetained[0], 1 + impl_->mtpProposed);
     impl_->encodeTargetVerifyBatchPolicy(commandGraph,
                                          {requests.data(), lanes.size()});

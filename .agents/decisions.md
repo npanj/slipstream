@@ -1,5 +1,29 @@
 # Decisions — qwen4exp port
 
+## Full Native Qwen3.8-27B Architecture Port & Multi-Format Support (2026-10-03)
+
+Ported complete native C++ and Metal support for 27B dense hybrid models (`Swift-Qwen3.8-27B` and `Qwen3.8-27B`):
+- Architecture layout in `models/qwen38/`: 64 layers (hybrid GDN recurrent + full attention every 4th layer), hidden dimension 5,120, intermediate FFN size 17,408, vocabulary 248,320.
+- Implemented `Qwen3_8.cpp`, `Qwen3_8.hpp`, `Qwen3_8Target.cpp`, `Qwen3_8Target.hpp` with clean isolation matching `check_architecture.py`. Shared code reaches concrete models only via `ModelDescriptor.hpp`, `ModelFactory.hpp`, `QwenTarget.cpp`, and `Runtime.mm`.
+- Integrated `models/qwen38/tools/convert_qwen38_gguf.py` and `convert_qwen38_mlx.py` allowing users to serve single `.gguf` files, multi-shard GGUF directories, MLX safetensors folders, or pre-converted `splash-packed-q4` / `splash-packed-q8` packages.
+- Added automatic format and architecture detection in `install/launcher.py` (`_detect_model_format_and_arch`), routing to appropriate converters and preserving draft/tokenizer invariants without manual flags.
+
+## In-Place GGUF Preparation with APFS Hole-Punching (2026-10-03)
+
+Standard GGUF conversion previously duplicated weight storage on disk, requiring 2x the model size in free disk space (~197 GB for Flash-Next, ~34 GB for 27B).
+- Integrated `F_PUNCHHOLE = 99` via macOS Darwin `fcntl(fd, F_PUNCHHOLE, struct.pack("IIqq", 0, 0, start, length))` across `package_format.py`, `sharded_gguf_reader.py`, `convert_qwen4exp_gguf.py`, and `convert_qwen38_gguf.py`.
+- Slices of source GGUF shards are freed in-place as soon as target layers are written. Peak disk requirements drop by ~50% (~102 GB for Flash-Next, ~17 GB for 27B).
+- Added `--keep-gguf` flag in `serve` to allow users to retain original GGUF files when desired.
+
+## Upstream Synchronization & Defensive Hardening (2026-10-03)
+
+Selectively ported high-leverage upstream fixes from `upstream-incoai` and community PRs:
+1. `runtime/model/ModelDescriptor.mm`: Accept finite whole-number floats up to $2^{53}-1$ in `requireUnsigned` (`rope_theta=1e7` written as `10000000.0` by Python configs) without throwing invalid argument errors.
+2. `runtime/metal/MetalBackend.mm`: In `wrapSharedMemory`, throw `MetalAllocationError` rather than `MetalBackendError` on zero-copy mapping refusal, enabling driver allocation retries.
+3. `server/runtime.py`: Isolate crash-trace diagnostic dumps in `try...except Exception: pass` inside `_begin_generation_failure` so diagnostic failures never block request completion or process teardown.
+4. `server/backend.py`: Track engine restarts in `_cache_status` so status responses from crashed/replaced engines are immediately invalidated.
+5. `server/schema_validation.py`: Preserved bounded regular expression evaluation across `evolve` on schemas with nested `$schema` dialect declarations.
+
 ## Pre-Compiled Sampling & Constrained Policy Pipelines (2026-10-02)
 
 Metal compute pipeline state creation (`newComputePipelineStateWithFunction:error:`) compiles MSL shader bytecode into hardware machine code for the Apple Silicon GPU execution cores. Previously, policy-conditioned kernels (`decode_sample_top32_sharded`, `decode_sample_top32_probs`, `decode_sample_sparse_draw`, `decode_sample_sparse_top1`, `decode_sample_top32_sharded_batch`, `decode_sample_top32_probs_batch`) were compiled lazily upon first invocation.

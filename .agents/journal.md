@@ -1,5 +1,14 @@
 # Journal — qwen4exp port
 
+## 2026-10-03 08:50 PDT — antigravity
+
+1. Ported native 27B model architecture (`models/qwen38/`, `Qwen3_8Layout` and `Qwen3_8Q8Layout`), enabling Slipstream to run Qwen3.8-27B and Swift-Qwen3.8-27B alongside Flash-Next with zero regression to Flash-Next.
+2. Built standalone GGUF (`convert_qwen38_gguf.py`) and MLX (`convert_qwen38_mlx.py`) conversion tools supporting single `.gguf` files, multi-shard GGUF directories, and safetensors checkpoints.
+3. Implemented in-place GGUF preparation via APFS hole punching (`F_PUNCHHOLE` = 99), cutting peak disk consumption in half during conversion. Added `--keep-gguf` to `serve` and `--check` / `--json` to `pull`.
+4. Synced selective upstream improvements: finite whole-number float parsing in `ModelDescriptor.mm`, zero-copy retry via `MetalAllocationError` in `MetalBackend.mm`, crash-trace error isolation in `server/runtime.py`, and status cache tracking on engine replacement in `server/backend.py`.
+5. All 21 CPU engine tests, model execution plans, 171 server tests, and 17 launcher tests pass 100% green; `check_architecture.py` passes cleanly.
+Blocked on: nothing.
+
 ## 2026-10-02 23:18 PDT — antigravity
 
 1. Rigorously evaluated upstream Splash, ds4, llama.cpp, and sglang, selectively rejecting cosmetic server additions and QSA indexer gather (which degrades perplexity from 4.5 to 10.3 past 3k tokens) in favor of high-leverage quality and speed improvements.
