@@ -67,9 +67,11 @@ jobs:
           SH
           chmod 755 "$PKG/bin/slipstream"
 
-          mkdir -p "$PKG/models/qwen4exp/tools" "$PKG/dev/tools" "$PKG/build"
+          mkdir -p "$PKG/models/qwen4exp/tools" "$PKG/models/qwen38/tools" "$PKG/dev/tools" "$PKG/build"
           cp models/qwen4exp/tools/convert_qwen4exp_gguf.py models/qwen4exp/tools/convert_qwen4exp.py \
             "$PKG/models/qwen4exp/tools/"
+          cp models/qwen38/tools/convert_qwen38_gguf.py models/qwen38/tools/convert_qwen38_mlx.py \
+            "$PKG/models/qwen38/tools/"
           cp dev/__init__.py "$PKG/dev/"
           cp dev/tools/__init__.py dev/tools/quantize.py dev/tools/package_format.py \
             dev/tools/sharded_gguf_reader.py dev/tools/fast_dequant.c "$PKG/dev/tools/"
@@ -90,6 +92,8 @@ jobs:
           "smoke/$PACKAGE/python/bin/python3" -c "import sys; sys.path.insert(0, 'smoke/$PACKAGE'); \
             import dev.tools.sharded_gguf_reader as r; print('dequantizers:', ', '.join(r.DEQUANT))"
           "smoke/$PACKAGE/python/bin/python3" "smoke/$PACKAGE/models/qwen4exp/tools/convert_qwen4exp_gguf.py" --help >/dev/null
+          "smoke/$PACKAGE/python/bin/python3" "smoke/$PACKAGE/models/qwen38/tools/convert_qwen38_gguf.py" --help >/dev/null
+
 
       - name: Publish the release
         uses: softprops/action-gh-release@v2
