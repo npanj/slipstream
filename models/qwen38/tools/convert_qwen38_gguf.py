@@ -19,9 +19,8 @@ import shutil
 import struct
 import sys
 import tempfile
-import time
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Set, Tuple
 
 import numpy as np
 
@@ -30,12 +29,15 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "dev"))
 
-from dev.tools.quantize import to_bf16, from_bf16, quantize_affine
-from dev.tools.package_format import (
-    ALIGNMENT, BF16, GROUP, STORAGE_N,
-    StreamingWeightFile, WeightFile, pad_rows, plain_q4, tile_q4, q4_bytes
+from dev.tools.package_format import (  # noqa: E402
+    ALIGNMENT,
+    WeightFile,
+    pad_rows,
+    plain_q4,
+    tile_q4,
 )
-from dev.tools.sharded_gguf_reader import MultiShardGgufReader
+from dev.tools.quantize import quantize_affine, to_bf16  # noqa: E402
+from dev.tools.sharded_gguf_reader import MultiShardGgufReader  # noqa: E402
 
 LAYER_Q4_MAGIC = b"MDFL0006"
 HEAD_Q4_MAGIC = b"MDFL0002"
@@ -64,8 +66,10 @@ F_PUNCHHOLE = 99
 OUTPUT_GROWTH = 1.05
 IN_FLIGHT_BYTES_PER_WORKER = 3 << 29
 
+
 def is_full_attention(layer_index: int) -> bool:
     return (layer_index + 1) % LAYOUT["full_attention_period"] == 0
+
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -73,6 +77,7 @@ def sha256_file(path: Path) -> str:
         while chunk := f.read(8 * 1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
 
 def _punch_hole(path: Path, offset: int, length: int) -> None:
     descriptor = os.open(path, os.O_RDWR)
@@ -87,11 +92,14 @@ def _punch_hole(path: Path, offset: int, length: int) -> None:
     finally:
         os.close(descriptor)
 
+
 def can_free_in_place(directory: Path) -> bool:
     if sys.platform != "darwin":
         return False
     try:
-        with tempfile.NamedTemporaryFile(dir=directory, prefix=".punch-probe-") as probe:
+        with tempfile.NamedTemporaryFile(
+            dir=directory, prefix=".punch-probe-"
+        ) as probe:
             block = os.fstatvfs(probe.fileno()).f_frsize
             probe.write(b"\1" * block * 4)
             probe.flush()
@@ -101,6 +109,7 @@ def can_free_in_place(directory: Path) -> bool:
             return os.fstat(probe.fileno()).st_blocks < before
     except OSError:
         return False
+
 
 def tensor_owner(name: str) -> str | None:
     if name == "token_embd.weight":
@@ -114,13 +123,17 @@ def tensor_owner(name: str) -> str | None:
             return f"layer-{layer}.bin"
     return None
 
+
 def concatenate(parts, rows):
     codes = np.vstack([part[0] for part in parts])
     scales = np.vstack([part[1] for part in parts])
     biases = np.vstack([part[2] for part in parts])
     return pad_rows(codes, scales, biases, rows)
 
-def convert_single_layer(model_dir: str, layer_idx: int, out_file: str) -> Tuple[str, Set[str]]:
+
+def convert_single_layer(
+    model_dir: str, layer_idx: int, out_file: str
+) -> Tuple[str, Set[str]]:
     reader = MultiShardGgufReader(model_dir)
     out_path = Path(out_file)
     if out_path.exists():
@@ -145,60 +158,130 @@ def convert_single_layer(model_dir: str, layer_idx: int, out_file: str) -> Tuple
             q4_qkv = quantize_affine(qkv, group=64, bits=4)
             packed.section(tile_q4(*pad_rows(*q4_qkv, LAYOUT["packed_full"])))
         else:
-            q = quantize_affine(reader.read_tensor(f"{prefix}.attn_q.weight"), group=64, bits=4)
-            k = quantize_affine(reader.read_tensor(f"{prefix}.attn_k.weight"), group=64, bits=4)
-            v = quantize_affine(reader.read_tensor(f"{prefix}.attn_v.weight"), group=64, bits=4)
+            q = quantize_affine(
+                reader.read_tensor(f"{prefix}.attn_q.weight"), group=64, bits=4
+            )
+            k = quantize_affine(
+                reader.read_tensor(f"{prefix}.attn_k.weight"), group=64, bits=4
+            )
+            v = quantize_affine(
+                reader.read_tensor(f"{prefix}.attn_v.weight"), group=64, bits=4
+            )
             packed.section(tile_q4(*concatenate([q, k, v], LAYOUT["packed_full"])))
 
-        q_norm = reader.read_tensor(f"{prefix}.attn_q_norm.weight") if reader.has(f"{prefix}.attn_q_norm.weight") else np.zeros(LAYOUT["attention_head_dimension"], dtype=np.float32)
-        k_norm = reader.read_tensor(f"{prefix}.attn_k_norm.weight") if reader.has(f"{prefix}.attn_k_norm.weight") else np.zeros(LAYOUT["attention_head_dimension"], dtype=np.float32)
+        q_norm = (
+            reader.read_tensor(f"{prefix}.attn_q_norm.weight")
+            if reader.has(f"{prefix}.attn_q_norm.weight")
+            else np.zeros(LAYOUT["attention_head_dimension"], dtype=np.float32)
+        )
+        k_norm = (
+            reader.read_tensor(f"{prefix}.attn_k_norm.weight")
+            if reader.has(f"{prefix}.attn_k_norm.weight")
+            else np.zeros(LAYOUT["attention_head_dimension"], dtype=np.float32)
+        )
         packed.section(to_bf16(q_norm).tobytes())
         packed.section(to_bf16(k_norm).tobytes())
 
-        o_proj = quantize_affine(reader.read_tensor(f"{prefix}.attn_output.weight"), group=64, bits=4)
+        o_proj = quantize_affine(
+            reader.read_tensor(f"{prefix}.attn_output.weight"), group=64, bits=4
+        )
         packed.section(tile_q4(*o_proj))
     else:
         # GDN Mixer
         if reader.has(f"{prefix}.ssm_in.weight"):
-            ssm_in = quantize_affine(reader.read_tensor(f"{prefix}.ssm_in.weight"), group=64, bits=4)
+            ssm_in = quantize_affine(
+                reader.read_tensor(f"{prefix}.ssm_in.weight"), group=64, bits=4
+            )
             packed.section(tile_q4(*pad_rows(*ssm_in, LAYOUT["packed_gdn"])))
         else:
             # Fallback to individual projections
-            qkv_key = f"{prefix}.ssm_in_qkv.weight" if reader.has(f"{prefix}.ssm_in_qkv.weight") else f"{prefix}.linear_attn.in_proj_qkv"
-            z_key = f"{prefix}.ssm_in_z.weight" if reader.has(f"{prefix}.ssm_in_z.weight") else f"{prefix}.linear_attn.in_proj_z"
-            b_key = f"{prefix}.ssm_in_b.weight" if reader.has(f"{prefix}.ssm_in_b.weight") else f"{prefix}.linear_attn.in_proj_b"
-            a_key = f"{prefix}.ssm_in_a.weight" if reader.has(f"{prefix}.ssm_in_a.weight") else f"{prefix}.linear_attn.in_proj_a"
+            qkv_key = (
+                f"{prefix}.ssm_in_qkv.weight"
+                if reader.has(f"{prefix}.ssm_in_qkv.weight")
+                else f"{prefix}.linear_attn.in_proj_qkv"
+            )
+            z_key = (
+                f"{prefix}.ssm_in_z.weight"
+                if reader.has(f"{prefix}.ssm_in_z.weight")
+                else f"{prefix}.linear_attn.in_proj_z"
+            )
+            b_key = (
+                f"{prefix}.ssm_in_b.weight"
+                if reader.has(f"{prefix}.ssm_in_b.weight")
+                else f"{prefix}.linear_attn.in_proj_b"
+            )
+            a_key = (
+                f"{prefix}.ssm_in_a.weight"
+                if reader.has(f"{prefix}.ssm_in_a.weight")
+                else f"{prefix}.linear_attn.in_proj_a"
+            )
             qkv = quantize_affine(reader.read_tensor(qkv_key), group=64, bits=4)
             z = quantize_affine(reader.read_tensor(z_key), group=64, bits=4)
             b = quantize_affine(reader.read_tensor(b_key), group=64, bits=4)
             a = quantize_affine(reader.read_tensor(a_key), group=64, bits=4)
             packed.section(tile_q4(*concatenate([qkv, z, b, a], LAYOUT["packed_gdn"])))
 
-        conv_key = f"{prefix}.ssm_conv1d.weight" if reader.has(f"{prefix}.ssm_conv1d.weight") else f"{prefix}.linear_attn.conv1d.weight"
+        conv_key = (
+            f"{prefix}.ssm_conv1d.weight"
+            if reader.has(f"{prefix}.ssm_conv1d.weight")
+            else f"{prefix}.linear_attn.conv1d.weight"
+        )
         packed.section(to_bf16(reader.read_tensor(conv_key)).tobytes())
 
-        a_key = f"{prefix}.ssm_a" if reader.has(f"{prefix}.ssm_a") else f"{prefix}.linear_attn.A_log"
+        a_key = (
+            f"{prefix}.ssm_a"
+            if reader.has(f"{prefix}.ssm_a")
+            else f"{prefix}.linear_attn.A_log"
+        )
         a_log = reader.read_tensor(a_key)
         packed.section((-np.exp(a_log)).astype("<f4").tobytes())
 
-        dt_key = f"{prefix}.ssm_dt" if reader.has(f"{prefix}.ssm_dt") else f"{prefix}.linear_attn.dt_bias"
+        dt_key = (
+            f"{prefix}.ssm_dt"
+            if reader.has(f"{prefix}.ssm_dt")
+            else f"{prefix}.linear_attn.dt_bias"
+        )
         packed.section(to_bf16(reader.read_tensor(dt_key)).tobytes())
 
-        norm_key = f"{prefix}.ssm_norm.weight" if reader.has(f"{prefix}.ssm_norm.weight") else f"{prefix}.linear_attn.norm.weight"
+        norm_key = (
+            f"{prefix}.ssm_norm.weight"
+            if reader.has(f"{prefix}.ssm_norm.weight")
+            else f"{prefix}.linear_attn.norm.weight"
+        )
         packed.section(to_bf16(reader.read_tensor(norm_key)).tobytes())
 
-        out_key = f"{prefix}.ssm_out.weight" if reader.has(f"{prefix}.ssm_out.weight") else f"{prefix}.linear_attn.out_proj"
+        out_key = (
+            f"{prefix}.ssm_out.weight"
+            if reader.has(f"{prefix}.ssm_out.weight")
+            else f"{prefix}.linear_attn.out_proj"
+        )
         out_proj = quantize_affine(reader.read_tensor(out_key), group=64, bits=4)
         packed.section(tile_q4(*out_proj))
 
     # 3. Post Attention Layernorm
-    post_norm_key = f"{prefix}.ffn_norm.weight" if reader.has(f"{prefix}.ffn_norm.weight") else f"{prefix}.post_attention_layernorm.weight"
+    post_norm_key = (
+        f"{prefix}.ffn_norm.weight"
+        if reader.has(f"{prefix}.ffn_norm.weight")
+        else f"{prefix}.post_attention_layernorm.weight"
+    )
     packed.section(to_bf16(reader.read_tensor(post_norm_key)).tobytes())
 
     # 4. Dense FFN
-    gate_key = f"{prefix}.ffn_gate.weight" if reader.has(f"{prefix}.ffn_gate.weight") else f"{prefix}.mlp.gate_proj"
-    up_key = f"{prefix}.ffn_up.weight" if reader.has(f"{prefix}.ffn_up.weight") else f"{prefix}.mlp.up_proj"
-    down_key = f"{prefix}.ffn_down.weight" if reader.has(f"{prefix}.ffn_down.weight") else f"{prefix}.mlp.down_proj"
+    gate_key = (
+        f"{prefix}.ffn_gate.weight"
+        if reader.has(f"{prefix}.ffn_gate.weight")
+        else f"{prefix}.mlp.gate_proj"
+    )
+    up_key = (
+        f"{prefix}.ffn_up.weight"
+        if reader.has(f"{prefix}.ffn_up.weight")
+        else f"{prefix}.mlp.up_proj"
+    )
+    down_key = (
+        f"{prefix}.ffn_down.weight"
+        if reader.has(f"{prefix}.ffn_down.weight")
+        else f"{prefix}.mlp.down_proj"
+    )
 
     gate = quantize_affine(reader.read_tensor(gate_key), group=64, bits=4)
     up = quantize_affine(reader.read_tensor(up_key), group=64, bits=4)
@@ -213,6 +296,7 @@ def convert_single_layer(model_dir: str, layer_idx: int, out_file: str) -> Tuple
     reader.close()
     return f"layer-{layer_idx}.bin", read_names
 
+
 def convert_head(model_dir: str, out_file: str) -> Tuple[str, Set[str]]:
     reader = MultiShardGgufReader(model_dir)
     out_path = Path(out_file)
@@ -220,10 +304,16 @@ def convert_head(model_dir: str, out_file: str) -> Tuple[str, Set[str]]:
         out_path.unlink()
     packed = WeightFile(out_path, HEAD_Q4_MAGIC, LAYOUT["layers"], 2)
 
-    norm_key = "output_norm.weight" if reader.has("output_norm.weight") else "language_model.model.norm.weight"
+    norm_key = (
+        "output_norm.weight"
+        if reader.has("output_norm.weight")
+        else "language_model.model.norm.weight"
+    )
     packed.section(to_bf16(reader.read_tensor(norm_key)).tobytes())
 
-    out_key = "output.weight" if reader.has("output.weight") else "language_model.lm_head"
+    out_key = (
+        "output.weight" if reader.has("output.weight") else "language_model.lm_head"
+    )
     head = quantize_affine(reader.read_tensor(out_key), group=64, bits=4)
     packed.section(tile_q4(*head))
     packed.finish()
@@ -231,13 +321,20 @@ def convert_head(model_dir: str, out_file: str) -> Tuple[str, Set[str]]:
     reader.close()
     return "head.bin", read_names
 
+
 def convert_embedding(model_dir: str, out_file: str) -> Tuple[str, Set[str]]:
     reader = MultiShardGgufReader(model_dir)
     out_path = Path(out_file)
     if out_path.exists():
         out_path.unlink()
-    packed = WeightFile(out_path, EMBEDDING_Q4_MAGIC, LAYOUT["vocabulary"], LAYOUT["hidden"])
-    emb_key = "token_embd.weight" if reader.has("token_embd.weight") else "language_model.model.embed_tokens"
+    packed = WeightFile(
+        out_path, EMBEDDING_Q4_MAGIC, LAYOUT["vocabulary"], LAYOUT["hidden"]
+    )
+    emb_key = (
+        "token_embd.weight"
+        if reader.has("token_embd.weight")
+        else "language_model.model.embed_tokens"
+    )
     emb = quantize_affine(reader.read_tensor(emb_key), group=64, bits=4)
     for run in plain_q4(*emb):
         packed.section(run)
@@ -246,7 +343,10 @@ def convert_embedding(model_dir: str, out_file: str) -> Tuple[str, Set[str]]:
     reader.close()
     return "embedding.bin", read_names
 
-def prepare_gguf_model(model_dir: Path, output_dir: Path, workers: int = 4, consume_source: bool = False) -> Path:
+
+def prepare_gguf_model(
+    model_dir: Path, output_dir: Path, workers: int = 4, consume_source: bool = False
+) -> Path:
     target_dir = output_dir / "target"
     tokenizer_dir = output_dir / "tokenizer"
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -256,7 +356,9 @@ def prepare_gguf_model(model_dir: Path, output_dir: Path, workers: int = 4, cons
     base_dir = model_dir if model_dir.is_dir() else model_dir.parent
     reader = MultiShardGgufReader(model_dir)
     sources = [Path(shard["path"]) for shard in reader.shards]
-    own = {path for path in sources if path.resolve().is_relative_to(base_dir.resolve())}
+    own = {
+        path for path in sources if path.resolve().is_relative_to(base_dir.resolve())
+    }
     in_place = consume_source and can_free_in_place(base_dir)
 
     parts = {
@@ -297,7 +399,13 @@ def prepare_gguf_model(model_dir: Path, output_dir: Path, workers: int = 4, cons
     draft_dir.mkdir(parents=True, exist_ok=True)
 
     # Copy tokenizer files if present
-    for fname in ["tokenizer.json", "tokenizer_config.json", "vocab.json", "chat_template.jinja", "config.json"]:
+    for fname in [
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.json",
+        "chat_template.jinja",
+        "config.json",
+    ]:
         src_f = base_dir / fname
         if src_f.exists():
             shutil.copy2(src_f, tokenizer_dir / fname)
@@ -334,11 +442,13 @@ def prepare_gguf_model(model_dir: Path, output_dir: Path, workers: int = 4, cons
             for file in sorted(files):
                 file_path = Path(root) / file
                 rel_path = file_path.relative_to(output_dir)
-                artifacts.append({
-                    "path": str(rel_path),
-                    "sha256": sha256_file(file_path),
-                    "size": file_path.stat().st_size,
-                })
+                artifacts.append(
+                    {
+                        "path": str(rel_path),
+                        "sha256": sha256_file(file_path),
+                        "size": file_path.stat().st_size,
+                    }
+                )
 
     manifest = {
         "model": "Swift-Qwen3.8-27B",
@@ -374,14 +484,30 @@ def prepare_gguf_model(model_dir: Path, output_dir: Path, workers: int = 4, cons
     print(f"[Slipstream] GGUF preparation complete at {output_dir}", flush=True)
     return output_dir
 
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model-dir", required=True, type=Path, help="Directory containing GGUF shards")
-    parser.add_argument("--output", required=True, type=Path, help="Output directory for prepared package")
+    parser.add_argument(
+        "--model-dir", required=True, type=Path, help="Directory containing GGUF shards"
+    )
+    parser.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="Output directory for prepared package",
+    )
     parser.add_argument("--workers", type=int, default=4, help="Worker count")
-    parser.add_argument("--consume-source", action="store_true", help="Free GGUF source blocks in place")
+    parser.add_argument(
+        "--consume-source", action="store_true", help="Free GGUF source blocks in place"
+    )
     args = parser.parse_args()
-    prepare_gguf_model(args.model_dir, args.output, workers=args.workers, consume_source=args.consume_source)
+    prepare_gguf_model(
+        args.model_dir,
+        args.output,
+        workers=args.workers,
+        consume_source=args.consume_source,
+    )
+
 
 if __name__ == "__main__":
     main()

@@ -137,7 +137,10 @@ def _detect_model_format_and_arch(model_path: Path):
             if config_file.is_file():
                 try:
                     config = json.loads(config_file.read_text())
-                    if config.get("model_type") == "qwen4exp" or config.get("num_hidden_layers") == 48:
+                    if (
+                        config.get("model_type") == "qwen4exp"
+                        or config.get("num_hidden_layers") == 48
+                    ):
                         return "mlx", "qwen4exp"
                 except Exception:
                     pass
@@ -171,10 +174,17 @@ def _prepare_model(model_path: Path, consume_source: bool = False):
 
     kind, arch = _detect_model_format_and_arch(model_path)
     if kind == "package":
-        return model_path if (model_path / "manifest.json").is_file() else (model_path / "prepared")
+        return (
+            model_path
+            if (model_path / "manifest.json").is_file()
+            else (model_path / "prepared")
+        )
 
     if kind == "gguf":
-        print(f"[Slipstream] Preparing GGUF model ({arch or 'qwen'}) from {model_path}...", flush=True)
+        print(
+            f"[Slipstream] Preparing GGUF model ({arch or 'qwen'}) from {model_path}...",
+            flush=True,
+        )
         if arch == "qwen4exp":
             converter = ROOT / "models/qwen4exp/tools/convert_qwen4exp_gguf.py"
         else:
@@ -223,7 +233,9 @@ def _prepare_model(model_path: Path, consume_source: bool = False):
             ]
         prepared = subprocess.run(cmd)
         if prepared.returncode != 0:
-            raise LauncherError(f"preparing MLX {model_path} failed; see the output above")
+            raise LauncherError(
+                f"preparing MLX {model_path} failed; see the output above"
+            )
         return prepared_dir
 
     raise LauncherError(
@@ -297,7 +309,11 @@ def serve(args):
             # downloads, which can be fetched again, are.
             kind, arch = _detect_model_format_and_arch(model_path)
             if kind == "package":
-                root = model_path if (model_path / "manifest.json").exists() else (model_path / "prepared")
+                root = (
+                    model_path
+                    if (model_path / "manifest.json").exists()
+                    else (model_path / "prepared")
+                )
                 model_id = f"local/{model_path.name}"
             elif kind in ("gguf", "mlx"):
                 root = _prepare_model(model_path, consume_source=False)

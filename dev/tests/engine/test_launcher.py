@@ -127,24 +127,32 @@ class LauncherTests(unittest.TestCase):
             td = Path(temp_dir)
             # 1. Package with manifest.json
             (td / "manifest.json").write_text("{}")
-            self.assertEqual(launcher._detect_model_format_and_arch(td), ("package", None))
+            self.assertEqual(
+                launcher._detect_model_format_and_arch(td), ("package", None)
+            )
             (td / "manifest.json").unlink()
 
             # 2. Package with prepared/manifest.json
             (td / "prepared").mkdir()
             (td / "prepared/manifest.json").write_text("{}")
-            self.assertEqual(launcher._detect_model_format_and_arch(td), ("package", None))
+            self.assertEqual(
+                launcher._detect_model_format_and_arch(td), ("package", None)
+            )
             (td / "prepared/manifest.json").unlink()
             (td / "prepared").rmdir()
 
             # 3. MLX with config.json (qwen38)
             (td / "model.safetensors").write_bytes(b"\0" * 16)
             (td / "config.json").write_text(json.dumps({"num_hidden_layers": 64}))
-            self.assertEqual(launcher._detect_model_format_and_arch(td), ("mlx", "qwen38"))
+            self.assertEqual(
+                launcher._detect_model_format_and_arch(td), ("mlx", "qwen38")
+            )
 
             # 4. MLX with config.json (qwen4exp)
             (td / "config.json").write_text(json.dumps({"model_type": "qwen4exp"}))
-            self.assertEqual(launcher._detect_model_format_and_arch(td), ("mlx", "qwen4exp"))
+            self.assertEqual(
+                launcher._detect_model_format_and_arch(td), ("mlx", "qwen4exp")
+            )
 
     def test_size_validation(self):
         for value in ("1G", "1GB", "1GiB", "1073741824"):

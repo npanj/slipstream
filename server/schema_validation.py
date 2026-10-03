@@ -58,6 +58,7 @@ def _additional_properties(validator, additional, instance, schema):
                 elif isinstance(additional, dict):
                     yield from validator.descend(value, additional, path=key)
 
+
 @lru_cache(maxsize=8)
 def _bounded_class(base):
     bounded = validators.extend(

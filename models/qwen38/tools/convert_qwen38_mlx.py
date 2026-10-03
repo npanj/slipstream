@@ -17,7 +17,7 @@ import struct
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 import numpy as np
 
@@ -26,11 +26,14 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "dev"))
 
-from dev.tools.quantize import to_bf16, from_bf16, quantize_affine
-from dev.tools.package_format import (
-    ALIGNMENT, BF16, GROUP, STORAGE_N,
-    WeightFile, pad_rows, plain_q4, tile_q4, q4_bytes
+from dev.tools.package_format import (  # noqa: E402
+    ALIGNMENT,
+    WeightFile,
+    pad_rows,
+    plain_q4,
+    tile_q4,
 )
+from dev.tools.quantize import quantize_affine, to_bf16  # noqa: E402
 
 LAYER_MAGIC = b"MDFL0006"
 HEAD_MAGIC = b"MDFL0002"
@@ -51,8 +54,10 @@ LAYOUT = {
     "full_attention_period": 4,
 }
 
+
 def is_full_attention(layer_index: int) -> bool:
     return (layer_index + 1) % LAYOUT["full_attention_period"] == 0
+
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -61,11 +66,16 @@ def sha256_file(path: Path) -> str:
             digest.update(chunk)
     return digest.hexdigest()
 
+
 def widen_bf16(payload: bytes) -> np.ndarray:
-    return (np.frombuffer(payload, dtype=np.uint16).astype(np.uint32) << 16).view(np.float32)
+    return (np.frombuffer(payload, dtype=np.uint16).astype(np.uint32) << 16).view(
+        np.float32
+    )
+
 
 class SafetensorsCheckpoint:
     """Reads tensors directly from safetensors files without requiring external libraries."""
+
     def __init__(self, root: Path):
         self.root = Path(root)
         index_file = self.root / "model.safetensors.index.json"
@@ -137,20 +147,27 @@ class SafetensorsCheckpoint:
                 codes = np.empty((out, inp), dtype=np.uint8)
                 for nibble in range(8):
                     codes[:, nibble::8] = (words >> (4 * nibble)) & 0xF
-                scales = np.frombuffer(scales_bytes, dtype=np.uint16).reshape(out, groups)
-                biases = np.frombuffer(biases_bytes, dtype=np.uint16).reshape(out, groups)
+                scales = np.frombuffer(scales_bytes, dtype=np.uint16).reshape(
+                    out, groups
+                )
+                biases = np.frombuffer(biases_bytes, dtype=np.uint16).reshape(
+                    out, groups
+                )
                 return codes, scales, biases
             else:
                 # 5-bit or other: dequantize using MLX if available, else numpy
                 try:
                     import mlx.core as mx
+
                     shard = self.map[w_name]
                     if shard not in self._mlx_cache:
                         self._mlx_cache[shard] = mx.load(str(self.root / shard))
                     w_mx = self._mlx_cache[shard][w_name]
                     s_mx = self._mlx_cache[shard][s_name]
                     b_mx = self._mlx_cache[shard][b_name]
-                    deq = mx.dequantize(w_mx, s_mx, b_mx, group_size=64, bits=5).astype(mx.float32)
+                    deq = mx.dequantize(w_mx, s_mx, b_mx, group_size=64, bits=5).astype(
+                        mx.float32
+                    )
                     deq_np = np.array(deq)
                     return quantize_affine(deq_np, group=64, bits=4)
                 except ImportError:
@@ -160,7 +177,11 @@ class SafetensorsCheckpoint:
         if dtype == "BF16":
             arr = widen_bf16(packed).reshape(shape)
         elif dtype == "F16":
-            arr = np.frombuffer(packed, dtype=np.float16).astype(np.float32).reshape(shape)
+            arr = (
+                np.frombuffer(packed, dtype=np.float16)
+                .astype(np.float32)
+                .reshape(shape)
+            )
         else:
             arr = np.frombuffer(packed, dtype=np.float32).reshape(shape)
         return quantize_affine(arr, group=64, bits=4)
@@ -171,11 +192,13 @@ class SafetensorsCheckpoint:
         self._open.clear()
         self._mlx_cache.clear()
 
+
 def concatenate(parts, rows):
     codes = np.vstack([part[0] for part in parts])
     scales = np.vstack([part[1] for part in parts])
     biases = np.vstack([part[2] for part in parts])
     return pad_rows(codes, scales, biases, rows)
+
 
 def write_layer(source: SafetensorsCheckpoint, index: int, destination: Path) -> Path:
     full = is_full_attention(index)
@@ -187,11 +210,13 @@ def write_layer(source: SafetensorsCheckpoint, index: int, destination: Path) ->
     prefixes = [
         f"language_model.model.layers.{index}.",
         f"model.layers.{index}.",
-        f"layers.{index}."
+        f"layers.{index}.",
     ]
     pfx = prefixes[0]
     for p in prefixes:
-        if (p + "input_layernorm.weight") in source.map or (p + "input_layernorm") in source.map:
+        if (p + "input_layernorm.weight") in source.map or (
+            p + "input_layernorm"
+        ) in source.map:
             pfx = p
             break
 
@@ -228,6 +253,7 @@ def write_layer(source: SafetensorsCheckpoint, index: int, destination: Path) ->
     packed.finish()
     return path
 
+
 def write_head(source: SafetensorsCheckpoint, destination: Path) -> Path:
     path = destination / "head.bin"
     packed = WeightFile(path, HEAD_MAGIC, LAYOUT["layers"], 2)
@@ -248,12 +274,18 @@ def write_head(source: SafetensorsCheckpoint, destination: Path) -> Path:
     packed.finish()
     return path
 
+
 def write_embedding(source: SafetensorsCheckpoint, destination: Path) -> Path:
     path = destination / "embedding.bin"
     packed = WeightFile(path, EMBEDDING_MAGIC, LAYOUT["vocabulary"], LAYOUT["hidden"])
     emb_name = "language_model.model.embed_tokens"
     if (emb_name + ".weight") not in source.map and emb_name not in source.map:
-        for alt in ["model.embed_tokens.weight", "model.embed_tokens", "embed_tokens.weight", "embed_tokens"]:
+        for alt in [
+            "model.embed_tokens.weight",
+            "model.embed_tokens",
+            "embed_tokens.weight",
+            "embed_tokens",
+        ]:
             if alt in source.map:
                 emb_name = alt.removesuffix(".weight")
                 break
@@ -261,6 +293,7 @@ def write_embedding(source: SafetensorsCheckpoint, destination: Path) -> Path:
         packed.section(run)
     packed.finish()
     return path
+
 
 def prepare_mlx_model(source_dir: Path, output_dir: Path) -> Path:
     target_dir = output_dir / "target"
@@ -271,13 +304,16 @@ def prepare_mlx_model(source_dir: Path, output_dir: Path) -> Path:
     print(f"[Slipstream] Loading MLX checkpoint from {source_dir}...", flush=True)
     source = SafetensorsCheckpoint(source_dir)
 
-    print(f"[Slipstream] Converting 64 layers for Qwen3.8-27B...", flush=True)
+    print("[Slipstream] Converting 64 layers for Qwen3.8-27B...", flush=True)
     for index in range(LAYOUT["layers"]):
         t0 = time.time()
         write_layer(source, index, target_dir)
         kind = "attn" if is_full_attention(index) else "gdn"
         if (index + 1) % 8 == 0 or index == 0 or index == 63:
-            print(f"  [{index+1:02d}/64] layer-{index}.bin ({kind}) [{time.time()-t0:.2f}s]", flush=True)
+            print(
+                f"  [{index + 1:02d}/64] layer-{index}.bin ({kind}) [{time.time() - t0:.2f}s]",
+                flush=True,
+            )
 
     print("[Slipstream] Packing head.bin and embedding.bin...", flush=True)
     write_head(source, target_dir)
@@ -286,7 +322,14 @@ def prepare_mlx_model(source_dir: Path, output_dir: Path) -> Path:
     draft_dir.mkdir(parents=True, exist_ok=True)
 
     print("[Slipstream] Copying tokenizer assets...", flush=True)
-    for fname in ["tokenizer.json", "tokenizer_config.json", "vocab.json", "chat_template.jinja", "config.json", "merges.txt"]:
+    for fname in [
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.json",
+        "chat_template.jinja",
+        "config.json",
+        "merges.txt",
+    ]:
         src_f = source_dir / fname
         if src_f.exists():
             shutil.copy2(src_f, tokenizer_dir / fname)
@@ -323,11 +366,13 @@ def prepare_mlx_model(source_dir: Path, output_dir: Path) -> Path:
             for file in sorted(files):
                 file_path = Path(root) / file
                 rel_path = file_path.relative_to(output_dir)
-                artifacts.append({
-                    "path": str(rel_path),
-                    "sha256": sha256_file(file_path),
-                    "size": file_path.stat().st_size,
-                })
+                artifacts.append(
+                    {
+                        "path": str(rel_path),
+                        "sha256": sha256_file(file_path),
+                        "size": file_path.stat().st_size,
+                    }
+                )
 
     manifest = {
         "model": "Swift-Qwen3.8-27B",
@@ -363,12 +408,21 @@ def prepare_mlx_model(source_dir: Path, output_dir: Path) -> Path:
     print(f"[Slipstream] Package preparation complete at {output_dir}", flush=True)
     return output_dir
 
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", required=True, type=Path, help="Directory containing safetensors")
-    parser.add_argument("--output", required=True, type=Path, help="Output directory for prepared package")
+    parser.add_argument(
+        "--source", required=True, type=Path, help="Directory containing safetensors"
+    )
+    parser.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="Output directory for prepared package",
+    )
     args = parser.parse_args()
     prepare_mlx_model(args.source, args.output)
+
 
 if __name__ == "__main__":
     main()
