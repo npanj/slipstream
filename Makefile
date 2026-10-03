@@ -9,6 +9,7 @@ VENV := .venv
 PYTHON = $(VENV)/bin/python
 # Holds the hash of the requirements the environment was last installed from.
 VENV_STAMP = $(VENV)/.requirements-installed
+INSTALL_LOCK = $(VENV).install.lock
 REQUIREMENTS := install/requirements.txt
 PYTHON_CANDIDATES := python3.13 python3.12 python3.14 python3
 BUILD_ID_PYTHON ?= python3
