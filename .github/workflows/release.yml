@@ -108,7 +108,7 @@ jobs:
             ### macOS (Apple Silicon)
 
             ```sh
-            curl -fsSL https://github.com/${{ github.repository }}/raw/main/install.sh | SLIPSTREAM_TAG=${{ env.TAG }} sh
+            curl -fsSL https://github.com/${{ github.repository }}/raw/main/install.sh | SLIPSTREAM_REPO=${{ github.repository }} SLIPSTREAM_TAG=${{ env.TAG }} sh
             ```
 
             Installs into `~/.local/share/slipstream/<version>` and links `slipstream` into
