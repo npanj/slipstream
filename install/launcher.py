@@ -103,8 +103,8 @@ def pull(args):
         "--model",
         args.model,
     ]
-    if args.check:
-        command += ["check", "--json"] if args.json else ["check"]
+    if getattr(args, "check", False):
+        command += ["check", "--json"] if getattr(args, "json", False) else ["check"]
     else:
         command.append("prepare")
     # Replaced rather than waited for, so an interrupt (Ctrl+C, or a frontend
@@ -113,20 +113,74 @@ def pull(args):
     os.execv(command[0], command)
 
 
-def _prepare_gguf(model_path, consume_source=False):
-    """Convert a folder of GGUF shards into model_path/prepared, once.
+def _detect_model_format_and_arch(model_path: Path):
+    """Detect format ('gguf', 'mlx', 'package') and architecture ('qwen4exp', 'qwen38')."""
+    if model_path.is_dir():
+        if (model_path / "manifest.json").is_file():
+            return "package", None
+        if (model_path / "prepared/manifest.json").is_file():
+            return "package", None
+        gguf_files = sorted(p for p in model_path.glob("*.gguf") if p.is_file())
+        if gguf_files:
+            try:
+                with open(gguf_files[0], "rb") as f:
+                    header = f.read(model_artifacts.GGUF_HEADER_BYTES)
+                arch = model_artifacts.gguf_architecture(header)
+            except Exception:
+                arch = None
+            if arch == "qwen4exp":
+                return "gguf", "qwen4exp"
+            return "gguf", "qwen38"
+        safetensors = sorted(p for p in model_path.glob("*.safetensors") if p.is_file())
+        if safetensors:
+            config_file = model_path / "config.json"
+            if config_file.is_file():
+                try:
+                    config = json.loads(config_file.read_text())
+                    if config.get("model_type") == "qwen4exp" or config.get("num_hidden_layers") == 48:
+                        return "mlx", "qwen4exp"
+                except Exception:
+                    pass
+            return "mlx", "qwen38"
+    elif model_path.is_file() and model_path.name.endswith(".gguf"):
+        try:
+            with open(model_path, "rb") as f:
+                header = f.read(model_artifacts.GGUF_HEADER_BYTES)
+            arch = model_artifacts.gguf_architecture(header)
+        except Exception:
+            arch = None
+        if arch == "qwen4exp":
+            return "gguf", "qwen4exp"
+        return "gguf", "qwen38"
+    return "unknown", None
 
-    consume_source uses the shards up while converting them, so preparing needs
-    little more disk than the model instead of twice it, and removes shards an
-    earlier preparation left behind.
-    """
-    prepared_dir = model_path / "prepared"
-    if not model_artifacts.gguf_prepared(model_path):
-        print(f"[Slipstream] Preparing GGUF model from {model_path}...", flush=True)
-        # A separate process: install/models.py, imported above as
-        # `models`, would shadow the repo's models/ package here.
-        converter = ROOT / "models/qwen4exp/tools/convert_qwen4exp_gguf.py"
-        command = [
+
+def _prepare_model(model_path: Path, consume_source: bool = False):
+    """Convert GGUF shards or MLX checkpoints into model_path/prepared, once."""
+    if model_path.is_dir():
+        prepared_dir = model_path / "prepared"
+    else:
+        prepared_dir = model_path.parent / (model_path.stem + "-prepared")
+
+    manifest = prepared_dir / "manifest.json"
+    layer0 = prepared_dir / "target/layer-0.bin"
+    if manifest.is_file() and layer0.is_file():
+        if consume_source and model_path.is_dir():
+            model_artifacts.remove_gguf_source(model_path)
+        return prepared_dir
+
+    kind, arch = _detect_model_format_and_arch(model_path)
+    if kind == "package":
+        return model_path if (model_path / "manifest.json").is_file() else (model_path / "prepared")
+
+    if kind == "gguf":
+        print(f"[Slipstream] Preparing GGUF model ({arch or 'qwen'}) from {model_path}...", flush=True)
+        if arch == "qwen4exp":
+            converter = ROOT / "models/qwen4exp/tools/convert_qwen4exp_gguf.py"
+        else:
+            converter = ROOT / "models/qwen38/tools/convert_qwen38_gguf.py"
+
+        cmd = [
             str(paths.PYTHON),
             "-u",
             str(converter),
@@ -136,13 +190,49 @@ def _prepare_gguf(model_path, consume_source=False):
             str(prepared_dir),
         ]
         if consume_source:
-            command.append("--consume-source")
-        prepared = subprocess.run(command)
+            cmd.append("--consume-source")
+        prepared = subprocess.run(cmd)
         if prepared.returncode != 0:
             raise LauncherError(f"preparing {model_path} failed; see the output above")
-    elif consume_source:
-        model_artifacts.remove_gguf_source(model_path)
-    return prepared_dir
+        if consume_source and model_path.is_dir():
+            model_artifacts.remove_gguf_source(model_path)
+        return prepared_dir
+
+    if kind == "mlx":
+        print(f"[Slipstream] Preparing MLX checkpoint from {model_path}...", flush=True)
+        if arch == "qwen4exp":
+            converter = ROOT / "models/qwen4exp/tools/convert_qwen4exp.py"
+            cmd = [
+                str(paths.PYTHON),
+                "-u",
+                str(converter),
+                str(model_path),
+                "--output",
+                str(prepared_dir),
+            ]
+        else:
+            converter = ROOT / "models/qwen38/tools/convert_qwen38_mlx.py"
+            cmd = [
+                str(paths.PYTHON),
+                "-u",
+                str(converter),
+                "--source",
+                str(model_path),
+                "--output",
+                str(prepared_dir),
+            ]
+        prepared = subprocess.run(cmd)
+        if prepared.returncode != 0:
+            raise LauncherError(f"preparing MLX {model_path} failed; see the output above")
+        return prepared_dir
+
+    raise LauncherError(
+        f"Directory or file {model_path} does not contain supported model files (GGUF, MLX, or manifest.json)"
+    )
+
+
+def _prepare_gguf(model_path, consume_source=False):
+    return _prepare_model(model_path, consume_source=consume_source)
 
 
 def _serve_lock_owner(lock):
@@ -202,28 +292,25 @@ def serve(args):
                 ) from None
         model_str = args.model
         model_path = Path(model_str).expanduser()
-        if model_path.is_dir():
+        if model_path.exists() or model_str.startswith(("/", "./", "../", "~")):
             # A folder of the user's own is never used up; only the model store's
             # downloads, which can be fetched again, are.
-            gguf_files = list(model_path.glob("*.gguf"))
-            if gguf_files:
-                root = _prepare_gguf(model_path)
+            kind, arch = _detect_model_format_and_arch(model_path)
+            if kind == "package":
+                root = model_path if (model_path / "manifest.json").exists() else (model_path / "prepared")
                 model_id = f"local/{model_path.name}"
-            elif (model_path / "manifest.json").exists():
-                root = model_path
-                model_id = f"local/{model_path.name}"
-            elif (model_path / "prepared/manifest.json").exists():
-                root = model_path / "prepared"
+            elif kind in ("gguf", "mlx"):
+                root = _prepare_model(model_path, consume_source=False)
                 model_id = f"local/{model_path.name}"
             else:
                 raise LauncherError(
-                    f"Directory {model_path} does not contain GGUF files or a manifest.json"
+                    f"Directory or file {model_path} does not contain supported model files (GGUF, MLX, or manifest.json)"
                 )
         else:
             _ensure_installed(args.model)
             root = model_artifacts.installed_root(paths.MODELS, args.model)
             if model_artifacts.is_gguf_installation(root):
-                root = _prepare_gguf(root, consume_source=not args.keep_gguf)
+                root = _prepare_model(root, consume_source=not args.keep_gguf)
             model_id = args.model
         command = [
             str(paths.PYTHON),
@@ -439,7 +526,7 @@ def parse_args(argv=None):
         "model",
         type=model_artifacts.parse_repo_id,
         metavar="OWNER/REPO",
-        help="Hugging Face repository: a model package, or Qwen3.8-Flash-Next GGUF files",
+        help="Hugging Face repository: a model package, or GGUF files",
     )
     puller.add_argument(
         "--check",

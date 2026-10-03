@@ -9,9 +9,8 @@ VENV := .venv
 PYTHON = $(VENV)/bin/python
 # Holds the hash of the requirements the environment was last installed from.
 VENV_STAMP = $(VENV)/.requirements-installed
-INSTALL_LOCK = $(VENV).install.lock
 REQUIREMENTS := install/requirements.txt
-PYTHON_CANDIDATES := python3.13 python3 python3.12 python3.14
+PYTHON_CANDIDATES := python3.13 python3.12 python3.14 python3
 BUILD_ID_PYTHON ?= python3
 SLIPSTREAM_MAKEFILE := $(abspath $(firstword $(MAKEFILE_LIST)))
 MODEL_INSTALL = $(PYTHON) install/models.py
@@ -240,6 +239,8 @@ ENGINE_CPP_SOURCES := \
 	models/qwen4exp/Qwen4Exp.cpp \
 	runtime/model/QwenTarget.cpp \
 	models/qwen4exp/Qwen4ExpTarget.cpp \
+	models/qwen38/Qwen3_8.cpp \
+	models/qwen38/Qwen3_8Target.cpp \
 	runtime/model/ModelFactory.cpp \
 	runtime/model/QwenState.cpp
 ENGINE_MM_SOURCES := \

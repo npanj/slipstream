@@ -292,21 +292,25 @@ class NativeBackend:
             raise ValueError("native status does not match the current schema")
         return snapshot
 
-    def _cache_status(self, snapshot):
+    def _cache_status(self, snapshot, restarts=None):
         with self.lock:
             if self.closing:
-                return
+                return False
+            if restarts is not None and self.runtime.restart_count != restarts:
+                return False
             self.status_snapshot = copy.deepcopy(snapshot)
             self.status_snapshot_at = time.monotonic()
             self.status_refresh_failures = 0
             self.status_refresh_after = 0.0
+            return True
 
     def _background_status_refresh(self):
         try:
             if not self.runtime.ready:
                 self.runtime.wait_ready()
+            restarts = self.runtime.restart_count
             event = self.runtime.status(timeout=STATUS_BACKGROUND_TIMEOUT_SECONDS)
-            self._cache_status(self._decode_status_event(event))
+            self._cache_status(self._decode_status_event(event), restarts=restarts)
         except Exception:
             with self.lock:
                 self.status_refresh_failures = min(5, self.status_refresh_failures + 1)
@@ -350,6 +354,7 @@ class NativeBackend:
         try:
             if refresh_pending:
                 raise TimeoutError("native status refresh is pending")
+            restarts = self.runtime.restart_count
             event = self.runtime.status(timeout=timeout)
             snapshot = self._decode_status_event(event)
         except Exception as error:
@@ -370,7 +375,8 @@ class NativeBackend:
             if not self.runtime.ready or isinstance(error, TimeoutError):
                 self._ensure_background_status_refresh()
         else:
-            self._cache_status(snapshot)
+            if not self._cache_status(snapshot, restarts=restarts):
+                snapshot["ready"] = False
         with self.lock:
             transport_ready = not self.closing and self.runtime.ready
         snapshot["transport"] = {

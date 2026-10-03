@@ -201,3 +201,14 @@
 - [x] **Defensive Out-of-Vocabulary Logits Guard**: Hardened `runtime/engine/Engine.cpp` against non-finite (NaN/INF) logits emitting out-of-vocabulary sentinels (`0xffffffff`), failing the lane cleanly before KV cache publication or output.
 - [x] **Pre-Compiled Policy Pipelines**: Added `MetalBackend::preparePipeline` and wired `preparePolicyPipelines()` in `Runtime.mm` to warm up sampling and constrained decoding shaders at startup, eliminating the 200–400 ms first-token JIT spike.
 - [x] **Regression Coverage**: Added `testOutOfVocabularyOutputFailsLaneOnly` in `dev/tests/engine/kv_first_engine_test.cpp`, verified 21/21 CPU engine tests pass 100% green, and verified 171/171 Python server tests pass.
+
+## Native Qwen3.8-27B Port & Upstream Synchronization
+
+- [x] **Native 27B Architecture Integration**: Added layout, C++ weights loader, and execution plan for `Qwen3_8Layout` and `Qwen3_8Q8Layout` in `models/qwen38/` with clean architecture isolation (`check_architecture.py` PASS).
+- [x] **GGUF 27B Converter**: Created `models/qwen38/tools/convert_qwen38_gguf.py` supporting single-file .gguf, multi-shard GGUF, and `--consume-source` hole punching.
+- [x] **MLX 27B Converter**: Created `models/qwen38/tools/convert_qwen38_mlx.py` converting safetensors/MLX checkpoints into `splash-packed-q4`.
+- [x] **APFS Hole Punching (`F_PUNCHHOLE`)**: Integrated Darwin `fcntl(F_PUNCHHOLE)` into `package_format.py`, `sharded_gguf_reader.py`, `convert_qwen4exp_gguf.py`, and `convert_qwen38_gguf.py` to halve peak disk requirements during GGUF preparation.
+- [x] **Launcher Auto-Detection**: Implemented `_detect_model_format_and_arch` and `_prepare_model` in `install/launcher.py` to seamlessly route single `.gguf` files, GGUF folders, MLX folders, and pre-converted packages.
+- [x] **CLI Flag Enhancements**: Added `--keep-gguf` to `serve` and `--check` / `--json` to `pull`. Added full test suite in `dev/tests/engine/test_launcher.py`.
+- [x] **Upstream Fixes**: Ported finite whole-number float support in `ModelDescriptor.mm`, zero-copy retry via `MetalAllocationError` in `MetalBackend.mm`, crash-trace dump isolation in `server/runtime.py`, and status cache tracking on engine restarts in `server/backend.py`.
+- [x] **Verification**: All 21 CPU engine tests pass (`make test-engine-cpu`), model execution plans pass (`model-execution-plans`), all 171 server tests pass (`test_server.py`), and all 17 launcher tests pass (`test_launcher.py`).

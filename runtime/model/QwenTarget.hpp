@@ -13,6 +13,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -22,6 +23,9 @@
 namespace splash::model {
 
 struct Qwen4ExpWeights;
+struct Qwen3_8Weights;
+struct Qwen3_8Q8Weights;
+class Qwen3_8Target;
 
 enum class QwenFfnKind : uint8_t { Dense, SparseMoe };
 
@@ -72,6 +76,7 @@ struct QwenMixerGeometry final {
                                              bool eightBit = false);
 
 inline constexpr std::string_view kEmbeddingMagic = "MDFE0001";
+inline constexpr std::string_view kEmbeddingQ8Magic = "MDFE0008";
 
 // Reads a packed target directory: one file per hybrid layer (input norm,
 // mixer, post-attention norm, then the architecture's FFN through readFfn),
@@ -82,6 +87,7 @@ loadQwenTargetWeights(metal::MetalBackend &backend,
                       const std::filesystem::path &directory,
                       const Layout &layout, std::string_view headMagic,
                       ReadFfn readFfn) {
+  constexpr bool isQ8 = std::is_same_v<decltype(Weights{}.logitsProjection), ops::Q8Projection>;
   const uint64_t allocationBaseline = backend.memoryStats().allocatedBytes;
   Weights result;
   result.layout = layout;
@@ -98,7 +104,7 @@ loadQwenTargetWeights(metal::MetalBackend &backend,
     auto &layer = result.layers.emplace_back();
     layer.inputNorm = file.section(hiddenBytes, "input-norm");
     layer.mixer =
-        readQwenMixer(file, backend, layout.mixerGeometry(), fullAttention);
+        readQwenMixer(file, backend, layout.mixerGeometry(), fullAttention, isQ8);
     layer.postAttentionNorm =
         file.section(hiddenBytes, "post-attention-norm");
     readFfn(file, layer);
@@ -110,17 +116,28 @@ loadQwenTargetWeights(metal::MetalBackend &backend,
     WeightFile file(backend, directory / "head.bin", "target/head.bin",
                     headMagic, layout.layers, 2);
     result.finalNorm = file.section(hiddenBytes, "final-norm");
-    result.logitsProjection = readQ4Projection(
-        file, backend, layout.vocabularySize, layout.hiddenSize, "logits");
+    if constexpr (isQ8) {
+      result.logitsProjection = readQ8Projection(
+          file, backend, layout.vocabularySize, layout.hiddenSize, "logits");
+    } else {
+      result.logitsProjection = readQ4Projection(
+          file, backend, layout.vocabularySize, layout.hiddenSize, "logits");
+    }
     file.finish();
     result.files.push_back(file.record());
   }
   {
+    constexpr std::string_view embeddingMagic = isQ8 ? kEmbeddingQ8Magic : kEmbeddingMagic;
     WeightFile file(backend, directory / "embedding.bin",
-                    "target/embedding.bin", kEmbeddingMagic,
+                    "target/embedding.bin", embeddingMagic,
                     layout.vocabularySize, layout.hiddenSize);
-    result.tokenEmbedding = readQ4ProjectionComponents(
-        file, layout.vocabularySize, layout.hiddenSize, "embedding");
+    if constexpr (isQ8) {
+      result.tokenEmbedding = readQ8ProjectionComponents(
+          file, layout.vocabularySize, layout.hiddenSize, "embedding");
+    } else {
+      result.tokenEmbedding = readQ4ProjectionComponents(
+          file, layout.vocabularySize, layout.hiddenSize, "embedding");
+    }
     file.finish();
     result.files.push_back(file.record());
   }
@@ -386,6 +403,10 @@ struct QwenTargetCommitBuffers final {
 
 [[nodiscard]] QwenTargetGeometry
 qwenTargetGeometry(const Qwen4ExpWeights &weights);
+[[nodiscard]] QwenTargetGeometry
+qwenTargetGeometry(const Qwen3_8Weights &weights);
+[[nodiscard]] QwenTargetGeometry
+qwenTargetGeometry(const Qwen3_8Q8Weights &weights);
 
 // Measurement only: the residual rows a model kept from the last prompt chunk
 // (SPLASH_CAPTURE_LAYERS), one bf16 [rows x width] block per layer.
@@ -402,6 +423,14 @@ class QwenTarget final {
 public:
   QwenTarget(const Qwen4ExpWeights &weights, metal::MetalBackend &backend,
              const ops::ExecutionPlans &operators);
+  QwenTarget(const Qwen3_8Weights &weights, metal::MetalBackend &backend,
+             const ops::ExecutionPlans &operators);
+  QwenTarget(const Qwen3_8Q8Weights &weights, metal::MetalBackend &backend,
+             const ops::ExecutionPlans &operators);
+  ~QwenTarget();
+  QwenTarget(QwenTarget &&) noexcept;
+  QwenTarget(const QwenTarget &) = delete;
+  QwenTarget &operator=(const QwenTarget &) = delete;
 
   [[nodiscard]] const QwenTargetGeometry &geometry() const noexcept {
     return geometry_;
@@ -427,7 +456,9 @@ public:
   [[nodiscard]] CapturedPrefillLayers capturedPrefillLayers() const;
 
 private:
-  using WeightView = std::variant<const Qwen4ExpWeights *>;
+  using WeightView =
+      std::variant<const Qwen4ExpWeights *, const Qwen3_8Weights *,
+                   const Qwen3_8Q8Weights *>;
 
   WeightView weights_;
   QwenTargetGeometry geometry_;
@@ -436,6 +467,7 @@ private:
   metal::MetalBuffer embeddingScratch_;
   metal::MetalBuffer headNormalized_;
   metal::MetalBuffer headReduced_;
+  std::unique_ptr<Qwen3_8Target> qwen38Target_;
 };
 
 } // namespace splash::model

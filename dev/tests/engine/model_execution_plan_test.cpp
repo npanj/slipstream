@@ -115,6 +115,11 @@ int main() {
     for (uint32_t family : {9U, 10U})
       checkPackage(qwen4exp, family);
     std::cout << "model execution plans: PASS (qwen4exp)\n";
+
+    const auto qwen38 = package<model::Qwen3_8Weights>();
+    for (uint32_t family : {9U, 10U})
+      checkPackage(qwen38, family);
+    std::cout << "model execution plans: PASS (qwen38)\n";
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';
     return 1;

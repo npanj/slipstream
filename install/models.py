@@ -56,9 +56,7 @@ PACKAGE_FORMATS = {
         {"target": "qwen4exp", "draft": "DFlash2DraftModel"},
     ),
 }
-# Splash 1.0 package formats. The Slipstream v2 engine loads only
-# splash-packed-q4-qwen4exp (runtime/model/ModelDescriptor.mm), so these are refused
-# here, from the manifest, instead of after downloading the weights.
+# Splash 1.0 package formats.
 RETIRED_FORMATS = {
     "splash-packed-q4": "incoai/Qwen3.8-27B-Splash",
     "splash-packed-q4-moe": "incoai/Qwen3.6-35B-A3B-Splash",
@@ -89,9 +87,8 @@ MTP_SIDECAR = "MTP/mtp-shared-Q4_K_M.gguf"
 MTP_REPO = "nitinpanj/qwen38-flash-next-v3"
 MTP_REVISION = "e2982050848c67fe8aa9073e8c4205d272cc4f20"
 MTP_SIZE = 1907151936
-# The GGUF architectures the converter turns into a package (models/qwen4exp/tools).
-GGUF_ARCHITECTURES = ("qwen4exp",)
-# Enough of a GGUF file to read its metadata up to general.architecture.
+# The GGUF architectures the converter turns into a package (models/qwen4exp and models/qwen38).
+GGUF_ARCHITECTURES = ("qwen4exp", "qwen38", "qwen3.5", "qwen2")
 GGUF_HEADER_BYTES = 256 * 1024
 # llama.cpp's gguf-split names: <stem>-00001-of-00003.gguf.
 GGUF_SPLIT = re.compile(r"^(?P<stem>.+)-(?P<index>\d{5})-of-(?P<count>\d{5})\.gguf$")
@@ -228,18 +225,28 @@ def validate_package_manifest(path: Path):
         for parent in PurePosixPath(name).parents
     ):
         raise ModelError("runtime package artifact paths overlap")
-    required_files = {
-        "target/embedding.bin",
-        "target/head.bin",
-        "target/ngram.bin",
-        "target/draft-vocab.bin",
-        "target/mtp-layer.bin",
-        "target/mtp-combiner.bin",
-        "draft/model.bin",
-        *(f"target/layer-{index}.bin" for index in range(48)),
-        *(f"draft/layer-{index}.bin" for index in range(5)),
-        *(f"tokenizer/{name}" for name in QWEN4EXP_TOKENIZER_FILES),
-    }
+    if format_name == "splash-packed-q4-qwen4exp":
+        required_files = {
+            "target/embedding.bin",
+            "target/head.bin",
+            "target/ngram.bin",
+            "target/draft-vocab.bin",
+            "target/mtp-layer.bin",
+            "target/mtp-combiner.bin",
+            "draft/model.bin",
+            *(f"target/layer-{index}.bin" for index in range(48)),
+            *(f"draft/layer-{index}.bin" for index in range(5)),
+            *(f"tokenizer/{name}" for name in QWEN4EXP_TOKENIZER_FILES),
+        }
+    elif format_name in ("splash-packed-q8", "splash-packed-q4"):
+        required_files = {
+            "target/embedding.bin",
+            "target/head.bin",
+            *(f"target/layer-{index}.bin" for index in range(64)),
+            *(f"tokenizer/{name}" for name in TOKENIZER_FILES),
+        }
+    else:
+        required_files = set()
     missing = required_files - artifact_paths
     if missing:
         raise ModelError(
@@ -517,8 +524,164 @@ def remove_gguf_source(root: Path) -> None:
 def gguf_prepared(root: Path) -> bool:
     """Whether the launcher has already prepared a package from the shards."""
     return (root / "prepared/manifest.json").is_file() and (
-        root / "prepared/target/layer-0.bin"
-    ).is_file()
+        (root / "prepared/target/layer-0.bin").is_file()
+    )
+
+
+def gguf_model_files(names) -> list[str]:
+    """The repository's GGUF files, which must be one model: a single file, or one
+    complete set of split files, at the top level (where the converter reads them)."""
+    shards = sorted(name for name in names if _is_gguf_shard(name))
+    if not shards:
+        variants = sorted(n for n in names if n.endswith(".gguf") and n != MTP_SIDECAR)
+        if variants:
+            raise ModelError(
+                f"repository keeps its GGUF files in sub-folders ({variants[0]}, ...); "
+                "Slipstream converts one model from the top level of a repository"
+            )
+        raise ModelError(
+            "repository has neither a Splash runtime package manifest.json nor GGUF files"
+        )
+    if len(shards) == 1:
+        return shards
+    splits = [GGUF_SPLIT.match(name) for name in shards]
+    if all(splits) and len({(m["stem"], m["count"]) for m in splits}) == 1:
+        if [int(m["index"]) for m in splits] == list(
+            range(1, int(splits[0]["count"]) + 1)
+        ):
+            return shards
+        raise ModelError(
+            f"repository is missing some of {splits[0]['stem']}'s split GGUF files"
+        )
+    raise ModelError(
+        f"repository holds {len(shards)} GGUF files that are not one model's split files "
+        f"({', '.join(shards[:3])}{', ...' if len(shards) > 3 else ''}); "
+        "Slipstream converts one model per repository"
+    )
+
+
+def gguf_architecture(header: bytes) -> str | None:
+    """general.architecture from the start of a GGUF file, or None if it is not there."""
+    scalar = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+    offset = 0
+
+    def take(size):
+        nonlocal offset
+        if offset + size > len(header):
+            raise IndexError
+        offset += size
+        return header[offset - size : offset]
+
+    def string():
+        (length,) = struct.unpack("<Q", take(8))
+        return take(length)
+
+    def skip(kind):
+        if kind in scalar:
+            take(scalar[kind])
+        elif kind == 8:
+            string()
+        elif kind == 9:
+            item, count = struct.unpack("<IQ", take(12))
+            for _ in range(count):
+                skip(item)
+        else:
+            raise IndexError
+
+    try:
+        if take(4) != b"GGUF":
+            return None
+        _version, _tensors, count = struct.unpack("<IQQ", take(20))
+        for _ in range(count):
+            key = string()
+            (kind,) = struct.unpack("<I", take(4))
+            if key == b"general.architecture" and kind == 8:
+                return string().decode("utf-8", "replace")
+            skip(kind)
+    except (IndexError, struct.error):
+        return None
+    return None
+
+
+def _check_gguf_architecture(model_id: str, revision: str, shard: str, token) -> str:
+    """Read the first shard's header from the Hub: verify the architecture is supported."""
+    from huggingface_hub import get_session, hf_hub_url
+    from huggingface_hub.utils import build_hf_headers
+
+    url = hf_hub_url(model_id, shard, revision=revision, endpoint=HUB_ENDPOINT)
+    headers = build_hf_headers(token=token or False)
+    headers["Range"] = f"bytes=0-{GGUF_HEADER_BYTES - 1}"
+    try:
+        response = get_session().get(url, headers=headers, timeout=60)
+        response.raise_for_status()
+    except Exception as error:
+        raise _hub_error(error, token, f"the header of {shard}") from error
+    architecture = gguf_architecture(response.content[:GGUF_HEADER_BYTES])
+    if architecture not in GGUF_ARCHITECTURES:
+        raise ModelError(
+            f"{shard} is a {architecture or 'unrecognised'} model; Slipstream converts "
+            f"{' and '.join(GGUF_ARCHITECTURES)} GGUF files only"
+        )
+    return architecture
+
+
+def check_repository(model_id: str) -> dict:
+    """What `pull` would install from a repository, without downloading it.
+
+    Raises ModelError with the reason when Slipstream cannot serve it; only a
+    package's manifest.json is fetched (into the Hub cache, as pull does).
+    """
+    from huggingface_hub import HfApi, hf_hub_download
+
+    validate_repo_id(model_id)
+    token = _hub_token()
+    try:
+        info = HfApi(endpoint=HUB_ENDPOINT, token=token or False).model_info(
+            model_id, revision="main", files_metadata=True
+        )
+    except Exception as error:
+        raise _hub_error(error, token, f"{model_id}@main") from error
+    if not is_hex_digest(info.sha, 40):
+        raise ModelError("Hub did not resolve the model to a snapshot commit")
+    files = {item.rfilename: item.size or 0 for item in info.siblings}
+    result = {"model": model_id, "revision": info.sha}
+    if "manifest.json" in files:
+        try:
+            path = hf_hub_download(
+                repo_id=model_id,
+                filename="manifest.json",
+                revision=info.sha,
+                repo_type="model",
+                token=token or False,
+                endpoint=HUB_ENDPOINT,
+            )
+        except Exception as error:
+            raise _hub_error(error, token, f"{model_id}'s manifest.json") from error
+        manifest = validate_package_manifest(Path(path))
+        artifacts = manifest["artifacts"]
+        for record in artifacts:
+            if files.get(record["path"]) != record["size"]:
+                raise ModelError(
+                    f"Hub artifact does not match manifest: {record['path']}"
+                )
+        return {
+            **result,
+            "kind": "package",
+            "bytes": files["manifest.json"] + sum(r["size"] for r in artifacts),
+        }
+    shards = gguf_model_files(files)
+    arch = _check_gguf_architecture(model_id, info.sha, shards[0], token)
+    is_qwen4exp = (arch == "qwen4exp")
+    has_mtp = MTP_SIDECAR in files
+    return {
+        **result,
+        "kind": "gguf",
+        "architecture": arch,
+        "files": len(shards),
+        "bytes": sum(files[name] for name in shards)
+        + ((files[MTP_SIDECAR] if has_mtp else MTP_SIZE) if is_qwen4exp else 0),
+        "mtp": (model_id if has_mtp else MTP_REPO) if is_qwen4exp else None,
+    }
 
 
 def gguf_model_files(names) -> list[str]:
@@ -934,11 +1097,12 @@ def check(args) -> int:
     if args.json:
         print(json.dumps(result))
     elif result["supported"]:
-        what = (
-            "a Slipstream package"
-            if result["kind"] == "package"
-            else f"Qwen3.8-Flash-Next GGUF ({result['files']} files; the MTP head from {result['mtp']})"
-        )
+        if result["kind"] == "package":
+            what = "a Slipstream package"
+        elif result.get("mtp"):
+            what = f"Qwen3.8-Flash-Next GGUF ({result['files']} files; the MTP head from {result['mtp']})"
+        else:
+            what = f"GGUF ({result['files']} files)"
         print(f"{args.model} can be pulled: {what}, {result['bytes'] / 1e9:.1f} GB.")
     else:
         print(f"{args.model} cannot be served: {result['reason']}", file=sys.stderr)

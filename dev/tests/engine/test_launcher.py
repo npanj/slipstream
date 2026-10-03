@@ -118,6 +118,34 @@ class LauncherTests(unittest.TestCase):
         with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
             launcher.parse_args(["pull", MODEL_ID, "--json"])
 
+    def test_serve_keep_gguf(self):
+        args = launcher.parse_args(["serve", "--model", MODEL_ID, "--keep-gguf"])
+        self.assertTrue(args.keep_gguf)
+
+    def test_detect_model_format_and_arch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            td = Path(temp_dir)
+            # 1. Package with manifest.json
+            (td / "manifest.json").write_text("{}")
+            self.assertEqual(launcher._detect_model_format_and_arch(td), ("package", None))
+            (td / "manifest.json").unlink()
+
+            # 2. Package with prepared/manifest.json
+            (td / "prepared").mkdir()
+            (td / "prepared/manifest.json").write_text("{}")
+            self.assertEqual(launcher._detect_model_format_and_arch(td), ("package", None))
+            (td / "prepared/manifest.json").unlink()
+            (td / "prepared").rmdir()
+
+            # 3. MLX with config.json (qwen38)
+            (td / "model.safetensors").write_bytes(b"\0" * 16)
+            (td / "config.json").write_text(json.dumps({"num_hidden_layers": 64}))
+            self.assertEqual(launcher._detect_model_format_and_arch(td), ("mlx", "qwen38"))
+
+            # 4. MLX with config.json (qwen4exp)
+            (td / "config.json").write_text(json.dumps({"model_type": "qwen4exp"}))
+            self.assertEqual(launcher._detect_model_format_and_arch(td), ("mlx", "qwen4exp"))
+
     def test_size_validation(self):
         for value in ("1G", "1GB", "1GiB", "1073741824"):
             self.assertEqual(launcher._parse_max_memory(value), 1024**3)
