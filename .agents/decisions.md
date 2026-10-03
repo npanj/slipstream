@@ -1,6 +1,15 @@
 # Decisions — qwen4exp port
 
+## Standard GGUF as Universal Model Format & Deprecation of Splash Packages (2026-10-03)
+
+Historically, Splash lacked GGUF ingestion and required proprietary, engine-specific binary package archives (`splash-packed-q4`, `splash-packed-q4-qwen4exp`) hosted on Hugging Face.
+- **Universal Standard**: GGUF is the universal, open standard adopted across llama.cpp, Ollama, LM Studio, and community model uploaders. Community users and developers should never be forced to download vendor-locked formats.
+- **In-Place Transparent Ingestion**: With native GGUF conversion and Darwin APFS hole-punching (`F_PUNCHHOLE`), Slipstream ingests standard multi-shard or single-file GGUF models directly, punching holes in the source file in-place to prevent disk duplication.
+- **Clean Deprecation**: Proprietary Splash packages on Hugging Face are officially deprecated and retired for downloads. User-facing documentation, CLI prompts, and guides exclusively direct users to standard GGUF repositories and files (e.g. `nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF` or standard 27B GGUFs).
+- **Zero-Copy Engine Cache**: The internal `prepared/` directory structure is treated strictly as an engine implementation detail for zero-copy memory mapping (`mmap`), entirely transparent to end users.
+
 ## Full Native Qwen3.8-27B Architecture Port & Multi-Format Support (2026-10-03)
+
 
 Ported complete native C++ and Metal support for 27B dense hybrid models (`Swift-Qwen3.8-27B` and `Qwen3.8-27B`):
 - Architecture layout in `models/qwen38/`: 64 layers (hybrid GDN recurrent + full attention every 4th layer), hidden dimension 5,120, intermediate FFN size 17,408, vocabulary 248,320.

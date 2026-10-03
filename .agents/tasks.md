@@ -212,3 +212,7 @@
 - [x] **CLI Flag Enhancements**: Added `--keep-gguf` to `serve` and `--check` / `--json` to `pull`. Added full test suite in `dev/tests/engine/test_launcher.py`.
 - [x] **Upstream Fixes**: Ported finite whole-number float support in `ModelDescriptor.mm`, zero-copy retry via `MetalAllocationError` in `MetalBackend.mm`, crash-trace dump isolation in `server/runtime.py`, and status cache tracking on engine restarts in `server/backend.py`.
 - [x] **Verification**: All 21 CPU engine tests pass (`make test-engine-cpu`), model execution plans pass (`model-execution-plans`), all 171 server tests pass (`test_server.py`), and all 17 launcher tests pass (`test_launcher.py`).
+- [x] **Community PRs Merged & Credited**: Cleanly reviewed, validated, and merged PRs #7, #8, #9, and #10 by @mzinner.
+- [x] **GGUF Standardization**: Deprecated proprietary Splash package distribution on Hugging Face; standardized documentation and launcher on universal GGUF format with in-place APFS hole punching.
+- [x] **Synchronized with Origin**: Pushed all 14 commits to `origin/main` with 100% green CI and unit test suite.
+

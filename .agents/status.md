@@ -1,11 +1,11 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-03 08:52 PDT by antigravity.
-**Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`).
+**Updated:** 2026-10-03 11:32 PDT by antigravity.
+**Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`, synced with `origin/main`).
 
 ## In one line
 
-Native 27B model architecture (`models/qwen38/`, `Qwen3_8Layout`, `Qwen3_8Q8Layout`) fully operational alongside Flash-Next, with auto-detection for GGUF and MLX models, in-place GGUF preparation using APFS hole-punching (`F_PUNCHHOLE`) that halves peak disk requirements, and upstream synchronization (whole-number float parsing, zero-copy retry, crash-trace dump isolation, status cache tracking). Full CPU engine test suite 21/21 targets, model execution plans, 171/171 Python server tests, and 17/17 launcher tests pass 100% green.
+All community pull requests (#7, #8, #9, #10) cleanly reviewed, merged, and pushed to `origin/main`. Native 27B model architecture (`models/qwen38/`, `Qwen3_8Layout`, `Qwen3_8Q8Layout`) and Flash-Next operational with standard GGUF and MLX ingestion, in-place GGUF preparation via APFS hole-punching (`F_PUNCHHOLE`), and repository pre-flight inspection (`pull --check`). Proprietary Splash packages deprecated in favor of standard GGUF. All 21 CPU engine tests, model execution plans, 171/171 server tests, 58/58 model tests, and 21/21 launcher tests pass 100% green.
 
 ---
 

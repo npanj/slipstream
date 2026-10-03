@@ -1,5 +1,15 @@
 # Journal — qwen4exp port
 
+## 2026-10-03 11:32 PDT — antigravity
+
+1. Thoroughly reviewed community PRs #7, #8, #9, and #10 by Mike Zinner (@mzinner): confirmed all 4 are high leverage, robust, and correctly solve local disk constraints via APFS hole punching (`F_PUNCHHOLE`) and safe model introspection (`pull --check`).
+2. Confirmed architectural strategy on Splash Pack vs. standard GGUF: completely deprecated external proprietary Splash packages in favor of standard GGUF repositories and local files; Slipstream transparently prepares standard GGUF models in-place without disk duplication.
+3. Cleanly integrated PRs #7–#10 alongside native 27B multi-architecture and multi-format support.
+4. Validated 100% green test passes across all suites: `make build/slipstream-v2 build/slipstream-v2.metallib`, `make architecture-check`, `make check-source`, `make test-engine-cpu` (21/21 targets PASS), `make check-python-engine` (171/171 server tests, 58/58 model tests, ruff clean), and 21/21 launcher tests.
+5. Pushed all 14 commits to `origin/main` and cleanly closed/merged PRs #7, #8, #9, and #10 on GitHub with full contributor attribution.
+Blocked on: nothing.
+
+
 ## 2026-10-03 08:50 PDT — antigravity
 
 1. Ported native 27B model architecture (`models/qwen38/`, `Qwen3_8Layout` and `Qwen3_8Q8Layout`), enabling Slipstream to run Qwen3.8-27B and Swift-Qwen3.8-27B alongside Flash-Next with zero regression to Flash-Next.
