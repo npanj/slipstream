@@ -57,6 +57,43 @@ cd slipstream
 make -j4
 ```
 
+#### Where Slipstream keeps things
+
+| What | Where | Override |
+| :--- | :--- | :--- |
+| Installed versions (the two newest are kept) | `~/.local/share/slipstream/<version>/` | `SLIPSTREAM_PREFIX` |
+| The `slipstream` command (a link to the newest version) | `~/.local/bin/slipstream` | `SLIPSTREAM_BINDIR` |
+| Models | `~/.slipstream/models/<owner>/<repo>/` | `SLIPSTREAM_MODELS` |
+| Downloaded packages (models link into it) | the Hugging Face cache, `~/.cache/huggingface/hub/` | `HF_HUB_CACHE` |
+| Runtime data, logs and caches of a release | `~/Library/Application Support/Slipstream-v2/` | |
+
+**Why `~/.local`:** the installer puts Slipstream in your home folder, so it needs no administrator
+rights, no `sudo` and no package manager, and removing it is deleting two paths. `~/.local/bin` and
+`~/.local/share` are the per-user locations of the XDG convention that command-line tools on macOS
+increasingly use: Claude Code's installer links `claude` into `~/.local/bin` the same way, the
+installer is modelled on MariaDB Shell's, and `pipx` and `uv` install tools there too. Versions sit
+side by side, so going back is relinking `~/.local/bin/slipstream`. If `~/.local/bin` is not on your
+`PATH`, the installer says how to add it.
+
+**Why `~/.slipstream/models`:** a model is ~100 GB and outlives any one installation. Every
+installation (a release, a source checkout, or a frontend that runs `slipstream pull`) uses the
+same store, so a model is downloaded once and survives upgrades, reinstalls and `git clean`. It is
+the convention of other local model servers: Ollama keeps models in `~/.ollama/models`, oMLX in
+`~/.omlx/models`. The store is excluded from Time Machine when it is created (`tmutil
+addexclusion`), since everything in it can be downloaded again.
+
+**Before this, models lived inside each installation:** a release kept them in
+`~/Library/Application Support/Slipstream-v2/models`, a source checkout in `install/models`. Nothing
+is moved automatically. Either move a model into the store, keeping its `<owner>/<repo>` folder:
+
+```zsh
+mkdir -p ~/.slipstream/models/nitinpanj
+mv ~/Library/Application\ Support/Slipstream-v2/models/nitinpanj/<repo> ~/.slipstream/models/nitinpanj/
+```
+
+or point `SLIPSTREAM_MODELS` at the old folder. A folder you downloaded yourself (e.g. with
+`huggingface-cli` into `~/models/…`) is served from where it is, by its path, and never changed.
+
 ---
 
 ### Step 2: Download or Pull the Model
