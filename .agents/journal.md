@@ -1,5 +1,14 @@
 # Journal — qwen4exp port
 
+## 2026-10-04 15:45 PDT — antigravity
+
+1. Implemented Layer-Ahead Prefill Prefetch in `models/qwen4exp/Qwen4ExpTarget.cpp` to eliminate prefill GPU idle bubbles during prompt evaluation.
+2. Added `encodePrefillPredictRoute` and `prefetchPrefillPredicted` to predict layer L+2 router scores during layer L+1 and overlap NVMe SSD expert reads with layer L+1 GPU execution (~50 ms overlap window).
+3. Added `prefetchLayerMisses` to launch concurrent GCD `dispatch_apply` reads directly into `expertCache` slots for exact router misses, ensuring Wave 0 hits and single-wave MoE GPU dispatch.
+4. Added wait duration timing into `totalStageMs` and environment fallback `SPLASH_NO_PREFILL_PREFETCH`.
+5. Verified 100% green passes: `build/slipstream` compiled with zero warnings under `-Wall -Wextra -Werror`, all 21 CPU engine tests passed (`make test-engine-cpu`), `make architecture-check` passed, and all 171 server tests passed (`dev/tests/test_server.py`).
+Blocked on: user restarting live server when ready to evaluate prefill tok/s.
+
 ## 2026-10-04 11:25 PDT — antigravity
 
 1. Prepared, validated, and submitted upstream Splash Pull Request #300 (`incoai/splash#300`) from Nitin's handle `npanj` on branch `feature/prompt-lookup-drafter`.

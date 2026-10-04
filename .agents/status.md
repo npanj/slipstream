@@ -1,11 +1,11 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-04 11:25 PDT by antigravity.
+**Updated:** 2026-10-04 15:45 PDT by antigravity.
 **Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`).
 
 ## In one line
 
-Submitted upstream Pull Request [incoai/splash#300](https://github.com/incoai/splash/pull/300) under Nitin's handle `npanj`, resolving Issue #186 and completing RFC #194 with the zero-allocation Prompt Lookup Drafter (PLD) engine delivering sub-50 ns query latency on Apple Silicon with 100% clean unit, sanitizer, and python test passes.
+Implemented Layer-Ahead Prefill Prefetch in `models/qwen4exp/Qwen4ExpTarget.cpp` with lookahead router prediction (`encodePrefillPredictRoute` / `prefetchPrefillPredicted`) and concurrent GCD SSD reads (`prefetchLayerMisses`), completely eliminating prefill GPU idle bubbles; verified 100% green across all 21 CPU engine tests and 171 server tests.
 
 ---
 

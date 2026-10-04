@@ -1,5 +1,19 @@
 # Decisions — qwen4exp port
 
+## Layer-Ahead Prefill Prefetch & Lookahead Routing in Qwen4Exp (2026-10-04)
+
+- **Context**: During prompt prefill in `models/qwen4exp/Qwen4ExpTarget.cpp`, each layer L previously encoded MoE experts, ran `stepGraph` synchronously (`.wait()`), and then only issued an `adviseMissedExperts` hint (`fcntl(F_RDADVISE)`). When layer L+1 began, `encodeLayerExpertsByExpert` blocked sequentially on `pread` to load missed experts while the GPU sat idle for 70–80 ms per layer, limiting Flash-Next prefill throughput on SSD streaming Macs to ~207 tok/s.
+- **Decision**:
+  - Implemented `encodePrefillPredictRoute` and `prefetchPrefillPredicted` in `Qwen4ExpTarget.cpp`: predicts layer L+2's router scores during layer L+1 and begins background SSD expert streaming via GCD `dispatch_async` across performance cores during layer L+1 GPU execution (~50 ms overlap window).
+  - Implemented `prefetchLayerMisses`: scans exact router selections from `buffers.selectedExperts`, allocates `expertCache` slots (with LRU eviction via `pickVictim`), and launches concurrent `readMissedExperts` via `dispatch_apply` directly into cache MTLBuffers.
+  - When all prefetched experts hit in cache, MoE dispatches as a single GPU wave (`waves.size() == 1`), eliminating wave pipeline event stalls and inter-wave GPU bubbles.
+  - Added timing instrumentation into `totalStageMs` and an environment fallback `SPLASH_NO_PREFILL_PREFETCH=1`.
+- **Measured Results**:
+  - Clean compilation under `-Wall -Wextra -Werror`.
+  - All 21 CPU engine tests passed (`make test-engine-cpu`).
+  - Architecture boundary check passed (`make architecture-check`).
+  - All 171 server tests passed (`dev/tests/test_server.py`).
+
 ## Upstream Contribution: Zero-Allocation Prompt Lookup Drafter (PR #300, 2026-10-04)
 
 - **Context**: Upstream Splash had open Issue #186 (`[perf] Prompt-lookup drafter alongside DFlash2`) and RFC scaffolding PR #194 by `@linson007`. PR #194 declared constants and static string matching functions, leaving the stateful C++ engine and tests as follow-up work.

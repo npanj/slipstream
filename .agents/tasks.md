@@ -232,3 +232,10 @@
 - [x] **Upstream Analysis**: Analyzed all 72 changed files (+4,673 lines) in Jan Hilgard's PR #253 (`incoai/splash#253`), identifying key architectural differences (PR #253 requires 118 GB unified memory for M3 Ultra, while Slipstream runs on 64 GB via SSD expert streaming).
 - [x] **4-Pass Radix Block Selection**: Replaced 32-pass bitwise search and sequential tie loop in `models/qwen4exp/kernels/qsa_select.metal` with 4-pass 8-bit radix histogram selection and parallel chunk-wise tie resolution. Benchmarked 4.52x speedup on heavy ties (779.1 µs vs 3,523.9 µs) and 2.05x speedup on production blocks (379.3 µs vs 776.3 µs).
 - [x] **Verification**: All 5 reference test cases pass exact match in `qsa-select`, all 21 CPU engine targets pass (`make test-engine-cpu`), and all 171 server tests pass (`test_server.py`).
+
+## Layer-Ahead Prefill Prefetch & Upstream Alignment (2026-10-04)
+
+- [x] **Layer-Ahead Prefill Prefetch**: Implemented in `models/qwen4exp/Qwen4ExpTarget.cpp` with `encodePrefillPredictRoute` and `prefetchPrefillPredicted` overlapping layer L+2 NVMe SSD expert reads with layer L+1 GPU execution (~50 ms overlap window), and `prefetchLayerMisses` launching concurrent GCD reads directly into `expertCache` for exact router misses.
+- [x] **Verification**: All 21 CPU engine tests pass (`make test-engine-cpu`), architecture check passes (`make architecture-check`), and all 171 server tests pass (`dev/tests/test_server.py`).
+- [ ] **GPU Live-Row Speculative Pruning (PR #283)**: Evaluate upstream PR #283 draft verify live rows kernel for pruning doomed draft candidates before target verification.
+
