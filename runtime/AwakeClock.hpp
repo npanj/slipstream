@@ -25,4 +25,8 @@ struct AwakeClock final {
   }
 };
 
+[[nodiscard]] inline double millisecondsSince(AwakeClock::time_point start) noexcept {
+  return std::chrono::duration<double, std::milli>(AwakeClock::now() - start).count();
+}
+
 } // namespace splash
