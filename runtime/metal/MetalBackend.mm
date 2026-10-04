@@ -1,4 +1,5 @@
 #import "MetalBackend.hpp"
+#include "AwakeClock.hpp"
 #include "CommandWatchdog.hpp"
 #include "DeviceQueries.hpp"
 #include "MetalEvent.hpp"
@@ -119,9 +120,9 @@ MTLSparsePageSize metalSparsePageSize(uint64_t bytes) {
     return kPlacementSparsePageSize;
 }
 
-double steadySeconds() noexcept {
+double awakeSeconds() noexcept {
     return std::chrono::duration<double>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+        AwakeClock::now().time_since_epoch()).count();
 }
 
 template <typename T>
@@ -265,7 +266,7 @@ struct BackendAsyncState {
     bool commitSubmission(uint64_t sequence, id<MTLCommandBuffer> command) {
         std::lock_guard lock(gateMutex);
         if (stopping.stop_requested()) return false;
-        commandWatchdog.start(sequence, steadySeconds());
+        commandWatchdog.start(sequence, awakeSeconds());
         [command commit];
         return true;
     }
@@ -284,7 +285,7 @@ struct BackendAsyncState {
     void checkCommandHealth() {
         {
             std::lock_guard lock(gateMutex);
-            if (commandWatchdog.expired(steadySeconds())) {
+            if (commandWatchdog.expired(awakeSeconds())) {
                 markUnhealthy("Metal command exceeded " +
                     std::to_string(commandWatchdog.timeoutSeconds()) +
                     " seconds without completing");
@@ -404,7 +405,7 @@ struct MetalBackend::Impl {
     struct PendingSparseUnmap {
         uint64_t eventValue = 0;
         SparseHeap heap;
-        std::chrono::steady_clock::time_point issued;
+        AwakeClock::time_point issued;
     };
     std::optional<PendingSparseUnmap> pendingUnmap;
     std::atomic<uint64_t> pendingUnmapCount{0};
@@ -434,7 +435,7 @@ struct MetalBackend::Impl {
         if (!pendingUnmap) return false;
         if (sparseEvent.signaledValue < pendingUnmap->eventValue) return false;
         const double seconds = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - pendingUnmap->issued).count();
+            AwakeClock::now() - pendingUnmap->issued).count();
         lastUnmapSeconds.store(seconds, std::memory_order_relaxed);
         raisePeak(maxUnmapSeconds, seconds);
         completedUnmaps.fetch_add(1, std::memory_order_relaxed);
@@ -1095,7 +1096,7 @@ void MetalBackend::unmapSparse(
     }
     const uint64_t eventValue = ++impl_->nextSparseEventValue;
     [impl_->sparseQueue signalEvent:impl_->sparseEvent value:eventValue];
-    const auto issued = std::chrono::steady_clock::now();
+    const auto issued = AwakeClock::now();
     impl_->pendingUnmap.emplace();
     impl_->pendingUnmap->eventValue = eventValue;
     impl_->pendingUnmap->heap = std::move(heap);
@@ -1122,8 +1123,7 @@ bool MetalBackend::sparseUnmapPending() noexcept {
     // replaces the engine.
     const double issued =
         impl_->pendingUnmapIssuedSeconds.load(std::memory_order_relaxed);
-    const double now = std::chrono::duration<double>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const double now = awakeSeconds();
     if (issued > 0.0 &&
         (now - issued) * 1000.0 > double(kSparseUnmapTimeoutMilliseconds)) {
         try {
@@ -1279,8 +1279,8 @@ bool MetalBackend::waitPipelineEvent(uint64_t value, uint64_t timeoutMs) {
     // Poll first: a pipeline hands off once per layer, and a blocking wait's
     // wake-up latency, paid 47 times a token, cost ~9 ms. Spinning costs one
     // core for the few hundred microseconds a stage takes.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
-    while (std::chrono::steady_clock::now() < deadline) {
+    const auto deadline = AwakeClock::now() + std::chrono::milliseconds(20);
+    while (AwakeClock::now() < deadline) {
         if (impl_->pipelineEvent.signaledValue >= value) return true;
     }
     return [impl_->pipelineEvent waitUntilSignaledValue:value timeoutMS:timeoutMs];
@@ -1289,8 +1289,8 @@ bool MetalBackend::waitPipelineEvent(uint64_t value, uint64_t timeoutMs) {
 bool MetalBackend::waitPipelineStageDone(uint64_t base, uint32_t stage,
                                          uint64_t timeoutMs) {
     const uint64_t value = base + 2ull * stage + 1;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
-    while (std::chrono::steady_clock::now() < deadline) {
+    const auto deadline = AwakeClock::now() + std::chrono::milliseconds(20);
+    while (AwakeClock::now() < deadline) {
         if (impl_->pipelineDoneEvent.signaledValue >= value) return true;
     }
     return [impl_->pipelineDoneEvent waitUntilSignaledValue:value timeoutMS:timeoutMs];
@@ -1521,7 +1521,7 @@ CommandTicket MetalBackend::submitCommandAsync(
         }
     }
 
-    auto wallStart = std::chrono::steady_clock::now();
+    auto wallStart = AwakeClock::now();
     const uint64_t sparseEventValue = impl_->pendingSparseEventValue;
 
     std::vector<id<MTLCommandBuffer>> commands;
@@ -1631,7 +1631,7 @@ CommandTicket MetalBackend::submitCommandAsync(
         id<MTLCommandBuffer> command = commands[c];
         [command addCompletedHandler:^(id<MTLCommandBuffer> completedCommand) {
           observer->sampleDeviceMemory();
-          auto wallEnd = std::chrono::steady_clock::now();
+          auto wallEnd = AwakeClock::now();
           CommandTiming timing;
           timing.gpuSeconds =
               completedCommand.GPUEndTime - completedCommand.GPUStartTime;
@@ -1678,7 +1678,7 @@ CommandTicket MetalBackend::submitCommandAsync(
     id<MTLSharedEvent> event = impl_->sparseEvent;
     const bool pendingMap =
         sparseEventValue && event.signaledValue < sparseEventValue;
-    const double mapWaitStart = steadySeconds();
+    const double mapWaitStart = awakeSeconds();
     if (pendingMap) {
         observer->mapWaitStarted.store(mapWaitStart, std::memory_order_relaxed);
         observer->mapWaitEvent.store(sparseEventValue, std::memory_order_release);
@@ -1687,7 +1687,7 @@ CommandTicket MetalBackend::submitCommandAsync(
         [commands, event, observer, ticketState, sparseEventValue,
          pendingMap, mapWaitStart, wallStart](bool signaled) {
             if (pendingMap) {
-                const double waited = steadySeconds() - mapWaitStart;
+                const double waited = awakeSeconds() - mapWaitStart;
                 observer->lastMapWaitSeconds.store(waited, std::memory_order_relaxed);
                 raisePeak(observer->maxMapWaitSeconds, waited);
                 observer->mapWaitEvent.store(0, std::memory_order_release);
@@ -1706,7 +1706,7 @@ CommandTicket MetalBackend::submitCommandAsync(
                             << kSparseMapTimeoutMilliseconds << " ms";
                 CommandTiming timing;
                 timing.wallSeconds = std::chrono::duration<double>(
-                    std::chrono::steady_clock::now() - wallStart).count();
+                    AwakeClock::now() - wallStart).count();
                 ticketState->finish(timing, message.str());
                 return;
             }
@@ -1751,13 +1751,13 @@ MetalMemoryStats MetalBackend::memoryStats() const noexcept {
         impl_->lastUnmapSeconds.load(std::memory_order_relaxed),
         impl_->maxUnmapSeconds.load(std::memory_order_relaxed),
         pendingUnmaps
-            ? std::max(0.0, steadySeconds() -
+            ? std::max(0.0, awakeSeconds() -
                                 impl_->pendingUnmapIssuedSeconds.load(
                                     std::memory_order_relaxed))
             : 0.0,
         impl_->asyncState->mapWaitEvent.load(std::memory_order_acquire),
         impl_->asyncState->mapWaitEvent.load(std::memory_order_acquire)
-            ? std::max(0.0, steadySeconds() -
+            ? std::max(0.0, awakeSeconds() -
                 impl_->asyncState->mapWaitStarted.load(std::memory_order_relaxed))
             : 0.0,
         impl_->asyncState->lastMapWaitSeconds.load(std::memory_order_relaxed),

@@ -1,4 +1,5 @@
 #include "engine/NativeRuntime.hpp"
+#include "AwakeClock.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -286,6 +287,9 @@ bool NativeRuntime::handleRequest(protocol::RequestFrame &request) {
     if (!inserted) {
       throw std::logic_error("accepted request already has native telemetry");
     }
+    if (telemetry_.size() == 1 && config_.holdingRequests) {
+      config_.holdingRequests(true);
+    }
   } catch (const std::exception &error) {
     // Core admission has already committed. Any failure in the matching
     // native registry is an engine invariant failure; treating
@@ -547,15 +551,13 @@ void NativeRuntime::completed(uint64_t requestId, EngineFinishReason reason,
       durationMicros(started, first),
       telemetry.firstTokenMilliseconds ? durationMicros(first, now) : 0,
       durationMicros(telemetry.arrivedMilliseconds, now)});
-  pendingMasks_.erase(requestId);
-  telemetry_.erase(requestId);
+  ended(requestId);
 }
 
 void NativeRuntime::failed(uint64_t requestId, std::string code,
                            std::string message, bool retryable) {
   requestError(requestId, std::move(code), std::move(message), retryable);
-  pendingMasks_.erase(requestId);
-  telemetry_.erase(requestId);
+  ended(requestId);
 }
 
 void NativeRuntime::capacityExhausted(uint64_t requestId,
@@ -567,8 +569,15 @@ void NativeRuntime::capacityExhausted(uint64_t requestId,
   if (config_.metrics) {
     config_.metrics->capacityFailed();
   }
+  ended(requestId);
+}
+
+void NativeRuntime::ended(uint64_t requestId) {
   pendingMasks_.erase(requestId);
   telemetry_.erase(requestId);
+  if (telemetry_.empty() && config_.holdingRequests) {
+    config_.holdingRequests(false);
+  }
 }
 
 NativeLoopClocks NativeRuntime::defaultClocks() {
@@ -579,7 +588,7 @@ NativeLoopClocks NativeRuntime::defaultClocks() {
             std::chrono::duration_cast<std::chrono::microseconds>(now).count());
       },
       [] {
-        auto now = std::chrono::steady_clock::now().time_since_epoch();
+        auto now = AwakeClock::now().time_since_epoch();
         return std::chrono::duration<double, std::milli>(now).count();
       }};
 }

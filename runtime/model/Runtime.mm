@@ -1,4 +1,5 @@
 #include "model/Runtime.hpp"
+#include "AwakeClock.hpp"
 #include "models/qwen4exp/Qwen4ExpTarget.hpp"
 #include "models/qwen4exp/Qwen4Exp.hpp"
 #include "model/QwenState.hpp"
@@ -1295,7 +1296,7 @@ struct Runtime::Impl {
         }
 
         mtpProposes_ = mtpProposes;
-        maskWaitStarted_ = std::chrono::steady_clock::now();
+        maskWaitStarted_ = AwakeClock::now();
         stage_ = Stage::WaitingMask;
         return requests;
       }
@@ -1309,7 +1310,7 @@ struct Runtime::Impl {
         if (masksReady) {
           if (maskWaitStarted_) {
             maskWaitSeconds_ +=
-                std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                std::chrono::duration<double>(AwakeClock::now() -
                                               *maskWaitStarted_)
                     .count();
             maskWaitStarted_.reset();
@@ -1472,7 +1473,7 @@ struct Runtime::Impl {
     bool mtpProposes_ = false;
     double targetForwardGpuSeconds_ = 0.0;
     double maskWaitSeconds_ = 0.0;
-    std::optional<std::chrono::steady_clock::time_point> maskWaitStarted_;
+    std::optional<AwakeClock::time_point> maskWaitStarted_;
     std::shared_ptr<std::function<void()>> wake_;
   };
 };
@@ -2164,7 +2165,7 @@ void Runtime::prepareWarmupDecode(uint64_t requestId, uint32_t anchor) {
 }
 
 WarmupStepResult Runtime::warmupPrefill(uint32_t rows) {
-  using Clock = std::chrono::steady_clock;
+  using Clock = AwakeClock;
   if (!rows || rows > kPrefillRows)
     throw std::invalid_argument("invalid prefill warmup row count");
   constexpr uint64_t id = std::numeric_limits<uint64_t>::max() - 100;
@@ -2206,7 +2207,7 @@ WarmupStepResult Runtime::warmupPrefill(uint32_t rows) {
 }
 
 WarmupStepResult Runtime::warmupDecodeBatch(uint32_t width) {
-  using Clock = std::chrono::steady_clock;
+  using Clock = AwakeClock;
   if (!width || width > kLaneCount) {
     throw std::invalid_argument("invalid decode warmup width");
   }

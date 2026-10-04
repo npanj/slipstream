@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <stop_token>
+#include "AwakeClock.hpp"
 
 namespace splash::metal {
 
@@ -24,12 +25,12 @@ inline void afterMetalEvent(id<MTLSharedEvent> event, uint64_t value,
   }
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     @autoreleasepool {
-      const auto deadline = std::chrono::steady_clock::now() +
+      const auto deadline = AwakeClock::now() +
           std::chrono::milliseconds(timeoutMilliseconds);
       bool signaled = false;
       while (!stop.stop_requested()) {
         const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
-            deadline - std::chrono::steady_clock::now()).count();
+            deadline - AwakeClock::now()).count();
         if (remaining <= 0) break;
         if ([event waitUntilSignaledValue:value
                                timeoutMS:std::min<int64_t>(remaining, 100)]) {

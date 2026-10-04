@@ -4,9 +4,12 @@
 #include "engine/Status.hpp"
 #include "model/Model.hpp"
 #include "model/ModelDescriptor.hpp"
+#include "AwakeClock.hpp"
 
+#include <IOKit/pwr_mgt/IOPMLib.h>
 #include <dispatch/dispatch.h>
 #include <mach-o/dyld.h>
+#include <mach/mach_error.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -16,6 +19,7 @@
 #include <csignal>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <iostream>
 #include <limits.h>
@@ -50,6 +54,51 @@ struct NativeArguments final {
   model::ModelDescriptor model;
   uint32_t maxContext = 0;
   uint64_t maxMemoryBytes = 0;
+  bool preventIdleSleep = true;
+};
+
+// Keeps the Mac from sleeping automatically while held, as `caffeinate -i`
+// does: the display may still sleep, and the lid, the Sleep command or a low
+// battery still sleep the Mac; requests continue when it wakes. Without the
+// assertion the engine serves on and says so once.
+class IdleSleepAssertion final {
+public:
+  IdleSleepAssertion() = default;
+  ~IdleSleepAssertion() { hold(false); }
+  IdleSleepAssertion(const IdleSleepAssertion &) = delete;
+  IdleSleepAssertion &operator=(const IdleSleepAssertion &) = delete;
+
+  void hold(bool held) noexcept {
+    if (held == (assertion_ != kIOPMNullAssertionID))
+      return;
+    if (!held) {
+      IOPMAssertionRelease(assertion_);
+      assertion_ = kIOPMNullAssertionID;
+      return;
+    }
+    const IOReturn result = IOPMAssertionCreateWithName(
+        kIOPMAssertPreventUserIdleSystemSleep, kIOPMAssertionLevelOn,
+        CFSTR("Slipstream is serving a request"), &assertion_);
+    if (result == kIOReturnSuccess)
+      return;
+    assertion_ = kIOPMNullAssertionID;
+    if (reported_)
+      return;
+    reported_ = true;
+    // Formatted without allocating: hold() must not throw.
+    char line[160];
+    int len = std::snprintf(line, sizeof line,
+                  "Slipstream cannot keep the Mac awake while requests run (%s); "
+                  "it may sleep during one.\n",
+                  mach_error_string(result));
+    if (len > 0) {
+      static_cast<void>(write(STDERR_FILENO, line, static_cast<size_t>(len)));
+    }
+  }
+
+private:
+  IOPMAssertionID assertion_ = kIOPMNullAssertionID;
+  bool reported_ = false;
 };
 
 // One observer spans bootstrap and serving. The dispatch queue only records
@@ -116,7 +165,8 @@ private:
 void printUsage(std::string_view executable) {
   std::cerr << "usage: " << executable
             << " serve-native TARGET_DIRECTORY DRAFT_DIRECTORY"
-               " MAX_CONTEXT|auto MAX_MEMORY_BYTES|auto\n";
+               " MAX_CONTEXT|auto MAX_MEMORY_BYTES|auto"
+               " [--idle-sleep prevent|allow]\n";
 }
 
 template <typename T>
@@ -175,7 +225,7 @@ std::filesystem::path requireModelRoot(std::string_view targetArgument,
 }
 
 NativeArguments parseArguments(int argc, char **argv) {
-  if (argc != 6 || std::string_view(argv[1]) != "serve-native") {
+  if (argc < 6 || std::string_view(argv[1]) != "serve-native") {
     throw UsageError("expected the serve-native command");
   }
   NativeArguments result;
@@ -183,6 +233,19 @@ NativeArguments parseArguments(int argc, char **argv) {
   result.model = model::inspectModelPackage(result.modelRoot);
   result.maxContext = parseMaxContext(argv[4], result.model.capabilities);
   result.maxMemoryBytes = parseMaxMemory(argv[5]);
+  for (int index = 6; index < argc; ++index) {
+    std::string_view option(argv[index]);
+    if (option == "--idle-sleep") {
+      if (++index >= argc)
+        throw UsageError("--idle-sleep requires prevent or allow");
+      std::string_view value(argv[index]);
+      if (value != "prevent" && value != "allow")
+        throw UsageError("--idle-sleep requires prevent or allow");
+      result.preventIdleSleep = (value == "prevent");
+    } else {
+      throw UsageError("unexpected argument " + std::string(option));
+    }
+  }
   return result;
 }
 
@@ -207,7 +270,7 @@ std::filesystem::path executablePath() {
 uint64_t engineInstanceId() {
   uint64_t process = static_cast<uint64_t>(getpid());
   uint64_t clock = static_cast<uint64_t>(
-      std::chrono::steady_clock::now().time_since_epoch().count());
+      AwakeClock::now().time_since_epoch().count());
   uint64_t result = (process << 32) ^ clock;
   return result ? result : 1;
 }
@@ -282,6 +345,7 @@ int runNative(const NativeArguments &arguments) {
   engine::FdTransport transport(STDIN_FILENO, STDOUT_FILENO);
   ShutdownSignals signals(transport);
   MemoryPressureMonitor pressureMonitor(transport.controlNotifier());
+  IdleSleepAssertion idleSleep;
   engine::RuntimeMetrics metrics;
   engine::RuntimeBootstrap *published = nullptr;
   auto statusProvider = [&]() -> std::string {
@@ -301,7 +365,7 @@ int runNative(const NativeArguments &arguments) {
   };
 
   const auto recoveryDeadline =
-      std::chrono::steady_clock::now() + kStartupMemoryRecoveryTimeout;
+      AwakeClock::now() + kStartupMemoryRecoveryTimeout;
   bool reportedRecoveryWait = false;
   std::unique_ptr<engine::RuntimeBootstrap> bootstrap;
   while (!bootstrap) {
@@ -311,13 +375,16 @@ int runNative(const NativeArguments &arguments) {
     config.resources.memoryPressure = [&] { return pressureMonitor.pressure(); };
     config.resources.cancelled = [&] { return transport.shutdownRequested(); };
     config.nativeLoop.metrics = &metrics;
+    if (arguments.preventIdleSleep) {
+      config.nativeLoop.holdingRequests = [&](bool held) { idleSleep.hold(held); };
+    }
     try {
       bootstrap = engine::RuntimeBootstrap::start(
           std::move(config), transport.outputSink(), statusProvider);
     } catch (const engine::RuntimeBootstrapError &error) {
       if (transport.shutdownRequested())
         return static_cast<int>(engine::NativeProcessExit::CleanEof);
-      const auto now = std::chrono::steady_clock::now();
+      const auto now = AwakeClock::now();
       const auto failure = error.report().resourceFailure;
       if ((failure != engine::RuntimeResourceFailure::HostCapacity &&
            failure != engine::RuntimeResourceFailure::DriverAllocation) ||
@@ -331,9 +398,8 @@ int runNative(const NativeArguments &arguments) {
         reportedRecoveryWait = true;
       }
       const auto resumeAt = std::min(
-          now + std::chrono::steady_clock::duration(kStartupMemoryRecoveryPoll),
-          recoveryDeadline);
-      while (std::chrono::steady_clock::now() < resumeAt &&
+          now + kStartupMemoryRecoveryPoll, recoveryDeadline);
+      while (AwakeClock::now() < resumeAt &&
              !transport.shutdownRequested()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
       }
@@ -355,7 +421,7 @@ int runNative(const NativeArguments &arguments) {
     engine::MemoryGovernor &governor = resources.memoryGovernor();
     governor.setPressure(pressure);
     const double now = std::chrono::duration<double, std::milli>(
-                           std::chrono::steady_clock::now().time_since_epoch())
+                           AwakeClock::now().time_since_epoch())
                            .count();
     static_cast<void>(resources.backend().refreshMemoryStats());
     const auto memory = governor.snapshot();

@@ -1602,6 +1602,13 @@ def parse_args(argv=None):
         ),
         help="clamp output token budget to remaining context window instead of rejecting with 400",
     )
+    parser.add_argument(
+        "--allow-idle-sleep",
+        action="store_true",
+        default=False,
+        help="let the Mac sleep automatically while requests run (default: it "
+        "stays awake until they finish; the display may still sleep)",
+    )
     args = parser.parse_args(argv)
     if args.api_key is not None:
         try:
@@ -1628,6 +1635,8 @@ def _native_command(args):
         "auto" if args.max_context is None else str(args.max_context),
         "auto" if args.max_memory is None else str(args.max_memory),
     ]
+    if getattr(args, "allow_idle_sleep", False):
+        command.extend(("--idle-sleep", "allow"))
     return command
 
 

@@ -2082,6 +2082,13 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(args.max_new_tokens, 32768)
         self.assertEqual(args.request_timeout, 1800)
         self.assertEqual(args.model, model)
+        self.assertFalse(args.allow_idle_sleep)
+        self.assertTrue(api.parse_args([*required, "--allow-idle-sleep"]).allow_idle_sleep)
+        self.assertNotIn("--idle-sleep", api._native_command(args))
+        sleep_args = api.parse_args([*required, "--allow-idle-sleep"])
+        self.assertEqual(
+            api._native_command(sleep_args)[-2:], ["--idle-sleep", "allow"]
+        )
         self.assertIn(Path(args.binary).name, ("slipstream-v2", "slipstream", "splash"))
         tokenizer = FakeTokenizer()
         backend = backend_api.NativeBackend(FakeRuntime(), tokenizer)
