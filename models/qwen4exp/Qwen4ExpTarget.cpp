@@ -1170,6 +1170,205 @@ void Qwen4ExpTarget::addPrefill(
     };
   };
 
+  double totalStageMs = 0.0;
+  double totalGpuMs = 0.0;
+
+  const bool lookahead = !std::getenv("SPLASH_NO_LOOKAHEAD") &&
+                         !std::getenv("SPLASH_NO_PREFILL_PREFETCH");
+
+  auto encodePrefillPredictRoute = [&](metal::CommandGraph &g, uint32_t target) {
+    const uint64_t neededScratch = std::max<uint64_t>(
+        buffers.groupedInput.sizeBytes(),
+        uint64_t{rows} * moePlan.shape().routerWidth() * sizeof(uint16_t));
+    if (!weights.predictScratch || weights.predictScratch.sizeBytes() < neededScratch) {
+      weights.predictScratch = backend.allocateBuffer(
+          neededScratch, metal::BufferStorage::Shared,
+          "qwen4exp-predict-scratch");
+    }
+    if (!weights.predictSelected || weights.predictSelected.sizeBytes() < buffers.selectedExperts.sizeBytes()) {
+      weights.predictSelected = backend.allocateBuffer(
+          buffers.selectedExperts.sizeBytes(), metal::BufferStorage::Shared,
+          "qwen4exp-predict-selected");
+    }
+    if (!weights.predictWeights || weights.predictWeights.sizeBytes() < buffers.routingWeights.sizeBytes()) {
+      weights.predictWeights = backend.allocateBuffer(
+          buffers.routingWeights.sizeBytes(), metal::BufferStorage::Shared,
+          "qwen4exp-predict-weights");
+    }
+    ops::MoE::addRouteScores(
+        g,
+        {buffers.hyperMixed, buffers.hyperMixed, buffers.gdnOutput,
+         weights.predictSelected, weights.predictWeights,
+         buffers.tileDescriptors, buffers.tileCount, buffers.groupedRoutes,
+         buffers.routeRows, weights.predictScratch, buffers.expertIntermediate,
+         buffers.expertOutput},
+        weights.layers[target].ffn, moePlan);
+  };
+
+  auto prefetchPrefillPredicted = [&](uint32_t layer) {
+    if (!weights.predictSelected || layer >= geometry.layers)
+      return;
+    auto &cache = weights.layers[layer].expertCache;
+    const auto *predictedScores =
+        static_cast<const uint16_t *>(weights.predictScratch.contents());
+    const uint32_t width = moePlan.shape().routerWidth();
+    struct Miss { uint32_t expert; uint32_t slot; };
+    std::vector<Miss> misses;
+    ++cache.clock;
+    constexpr uint32_t kMaxPredicted = 512;
+    std::bitset<kMaxPredicted> wanted;
+    std::vector<uint32_t> order;
+
+    const uint32_t perToken = weights.layout.expertsPerToken;
+    const uint32_t experts = weights.layout.experts;
+    uint32_t ids[16];
+    for (uint32_t r = 0; r < rows; ++r) {
+      topExperts(predictedScores + uint64_t{r} * width, experts,
+                 perToken, ids, nullptr);
+      for (uint32_t k = 0; k < perToken; ++k) {
+        const uint32_t exp = ids[k];
+        if (exp < experts && !wanted.test(exp)) {
+          wanted.set(exp);
+          order.push_back(exp);
+        }
+      }
+    }
+
+    for (const uint32_t expert : order) {
+      const int16_t existing = cache.expertToSlot[expert];
+      if (existing >= 0) {
+        cache.lruTime[existing] = cache.clock;
+        continue;
+      }
+      uint32_t slot = 0;
+      if (cache.numCached < cache.capacity) {
+        slot = cache.numCached++;
+      } else {
+        const int32_t victim = pickVictim(cache);
+        if (victim < 0)
+          break;
+        slot = static_cast<uint32_t>(victim);
+        if (cache.slotToExpert[slot] >= 0)
+          cache.expertToSlot[cache.slotToExpert[slot]] = -1;
+      }
+      cache.slotToExpert[slot] = static_cast<int16_t>(expert);
+      cache.expertToSlot[expert] = static_cast<int16_t>(slot);
+      cache.lruTime[slot] = cache.clock;
+      misses.push_back({expert, slot});
+    }
+
+    if (misses.empty())
+      return;
+
+    const auto &source = weights.layers[layer].expertSource;
+    const uint64_t stride = weights.layers[layer].ffn.expertGate.expertStrideBytes;
+
+    struct AdviseMiss { uint32_t expert; };
+    std::vector<AdviseMiss> advise;
+    advise.reserve(misses.size());
+    for (const auto &m : misses) advise.push_back({m.expert});
+    adviseMissedExperts(source, advise.data(), advise.size(), stride);
+
+    if (!cache.inflight)
+      cache.inflight = dispatch_group_create();
+    if (!cache.slotReads) {
+      cache.slotReads.reset(new std::atomic<uint32_t>[cache.capacity]);
+      for (uint32_t s = 0; s < cache.capacity; ++s) cache.slotReads[s] = 0;
+    }
+    for (const auto &miss : misses)
+      cache.slotReads[miss.slot].fetch_add(3 * readPieces(), std::memory_order_relaxed);
+
+    auto slotReads = cache.slotReads;
+    char *gate = static_cast<char *>(cache.cacheGate.contents());
+    char *up = static_cast<char *>(cache.cacheUp.contents());
+    char *down = static_cast<char *>(cache.cacheDown.contents());
+    auto owned = std::make_shared<std::vector<Miss>>(std::move(misses));
+    dispatch_group_async(cache.inflight,
+                         dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      readMissedExperts(source, owned->data(), owned->size(), stride,
+                        gate, up, down, slotReads.get());
+    });
+    cache.pending = true;
+  };
+
+  auto prefetchLayerMisses = [&](uint32_t targetLayer) -> bool {
+    if (targetLayer >= geometry.layers)
+      return false;
+    static const bool prefetchEnabled = !std::getenv("SPLASH_NO_PREFILL_PREFETCH");
+    if (!prefetchEnabled)
+      return false;
+    auto &cache = weights.layers[targetLayer].expertCache;
+    const auto &source = weights.layers[targetLayer].expertSource;
+    const uint64_t stride = weights.layers[targetLayer].ffn.expertGate.expertStrideBytes;
+    const auto *selPtr = static_cast<const uint32_t *>(buffers.selectedExperts.contents());
+    const uint32_t routesPerRow = moePlan.shape().routesPerToken();
+    const uint32_t perToken = weights.layout.expertsPerToken;
+    const uint32_t totalExperts = weights.layout.experts;
+
+    std::bitset<512> seen;
+    struct Miss { uint32_t expert; uint32_t slot; };
+    std::vector<Miss> toRead;
+    ++cache.clock;
+
+    for (uint32_t r = 0; r < rows; ++r) {
+      for (uint32_t k = 0; k < perToken; ++k) {
+        uint32_t exp = selPtr[r * routesPerRow + k];
+        if (exp < totalExperts && !seen.test(exp)) {
+          seen.set(exp);
+          if (cache.expertToSlot[exp] >= 0) {
+            cache.lruTime[cache.expertToSlot[exp]] = cache.clock;
+          } else {
+            uint32_t slot = 0;
+            if (cache.numCached < cache.capacity) {
+              slot = cache.numCached++;
+            } else {
+              const int32_t victim = pickVictim(cache);
+              if (victim < 0) break;
+              slot = static_cast<uint32_t>(victim);
+              if (cache.slotToExpert[slot] >= 0)
+                cache.expertToSlot[cache.slotToExpert[slot]] = -1;
+            }
+            cache.slotToExpert[slot] = static_cast<int16_t>(exp);
+            cache.expertToSlot[exp] = static_cast<int16_t>(slot);
+            cache.lruTime[slot] = cache.clock;
+            toRead.push_back({exp, slot});
+          }
+        }
+      }
+    }
+
+    if (toRead.empty())
+      return true;
+
+    struct AdviseMiss { uint32_t expert; };
+    std::vector<AdviseMiss> advise;
+    advise.reserve(toRead.size());
+    for (const auto &m : toRead) advise.push_back({m.expert});
+    adviseMissedExperts(source, advise.data(), advise.size(), stride);
+
+    if (!cache.inflight)
+      cache.inflight = dispatch_group_create();
+    if (!cache.slotReads) {
+      cache.slotReads.reset(new std::atomic<uint32_t>[cache.capacity]);
+      for (uint32_t s = 0; s < cache.capacity; ++s) cache.slotReads[s] = 0;
+    }
+    for (const auto &miss : toRead)
+      cache.slotReads[miss.slot].fetch_add(3 * readPieces(), std::memory_order_relaxed);
+
+    auto slotReads = cache.slotReads;
+    char *gate = static_cast<char *>(cache.cacheGate.contents());
+    char *up = static_cast<char *>(cache.cacheUp.contents());
+    char *down = static_cast<char *>(cache.cacheDown.contents());
+    auto owned = std::make_shared<std::vector<Miss>>(std::move(toRead));
+    dispatch_group_async(cache.inflight,
+                         dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      readMissedExperts(source, owned->data(), owned->size(), stride,
+                        gate, up, down, slotReads.get());
+    });
+    cache.pending = true;
+    return true;
+  };
+
   metal::CommandGraph residentGraph = std::move(graph);
   for (uint32_t layerIndex = 0; layerIndex < R; ++layerIndex) {
     encodeAttentionHC(residentGraph, layerIndex);
@@ -1193,6 +1392,9 @@ void Qwen4ExpTarget::addPrefill(
   encodeMixerUpdate(residentGraph, R, mixerOutR);
   encodeMlpHC(residentGraph, R);
   encodeMoERoute(residentGraph, R);
+  if (lookahead && R + 1 < geometry.layers) {
+    encodePrefillPredictRoute(residentGraph, R + 1);
+  }
 
   // Submit residentGraph and prefetch streaming experts in background
   auto t0 = AwakeClock::now();
@@ -1204,8 +1406,12 @@ void Qwen4ExpTarget::addPrefill(
   auto t1 = AwakeClock::now();
   double residentMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-  double totalStageMs = 0.0;
-  double totalGpuMs = 0.0;
+  if (R < geometry.layers) {
+    prefetchLayerMisses(R);
+  }
+  if (lookahead && R + 1 < geometry.layers) {
+    prefetchPrefillPredicted(R + 1);
+  }
 
   // Loop through streaming layers R .. geometry.layers - 2
   // Every range but the last runs now, each after its experts are loaded
@@ -1222,7 +1428,10 @@ void Qwen4ExpTarget::addPrefill(
   auto encodeLayerExpertsByExpert = [&](metal::CommandGraph &g, uint32_t L) {
     auto &cache = weights.layers[L].expertCache;
     if (cache.pending) {
+      const auto waitStart = AwakeClock::now();
       dispatch_group_wait(cache.inflight, DISPATCH_TIME_FOREVER);
+      totalStageMs += std::chrono::duration<double, std::milli>(
+                          AwakeClock::now() - waitStart).count();
       cache.pending = false;
     }
     const auto ts0 = AwakeClock::now();
@@ -1518,35 +1727,44 @@ void Qwen4ExpTarget::addPrefill(
     encodeMixerUpdate(stepGraph, L + 1, mixerOutNext);
     encodeMlpHC(stepGraph, L + 1);
     encodeMoERoute(stepGraph, L + 1);
+    if (lookahead && L + 2 < geometry.layers) {
+      encodePrefillPredictRoute(stepGraph, L + 2);
+    }
 
     auto tg0 = AwakeClock::now();
     (void)backend.submitCommandAsync(stepGraph.dispatches()).wait();
     auto tg1 = AwakeClock::now();
     totalGpuMs += std::chrono::duration<double, std::milli>(tg1 - tg0).count();
 
-    // Layer L + 1 router has completed on the GPU; advise kernel of its missed experts early
+    // Layer L + 1 router has completed on the GPU; prefetch missed experts early
     if (L + 1 < geometry.layers) {
-      const auto &nextSource = weights.layers[L + 1].expertSource;
-      const auto &nextCache = weights.layers[L + 1].expertCache;
-      const uint64_t nextStride = weights.layers[L + 1].ffn.expertGate.expertStrideBytes;
-      const auto *selPtr = static_cast<const uint32_t *>(buffers.selectedExperts.contents());
-      const uint32_t routesPerRow = moePlan.shape().routesPerToken();
-      const uint32_t perToken = weights.layout.expertsPerToken;
-      std::bitset<512> nextSeen;
-      struct AdviseMiss { uint32_t expert; };
-      std::vector<AdviseMiss> nextMisses;
-      for (uint32_t r = 0; r < rows; ++r) {
-        for (uint32_t k = 0; k < perToken; ++k) {
-          uint32_t exp = selPtr[r * routesPerRow + k];
-          if (exp < weights.layout.experts && !nextSeen.test(exp)) {
-            nextSeen.set(exp);
-            if (nextCache.expertToSlot[exp] < 0) {
-              nextMisses.push_back({exp});
+      if (!prefetchLayerMisses(L + 1)) {
+        const auto &nextSource = weights.layers[L + 1].expertSource;
+        const auto &nextCache = weights.layers[L + 1].expertCache;
+        const uint64_t nextStride = weights.layers[L + 1].ffn.expertGate.expertStrideBytes;
+        const auto *selPtr = static_cast<const uint32_t *>(buffers.selectedExperts.contents());
+        const uint32_t routesPerRow = moePlan.shape().routesPerToken();
+        const uint32_t perToken = weights.layout.expertsPerToken;
+        std::bitset<512> nextSeen;
+        struct AdviseMiss { uint32_t expert; };
+        std::vector<AdviseMiss> nextMisses;
+        for (uint32_t r = 0; r < rows; ++r) {
+          for (uint32_t k = 0; k < perToken; ++k) {
+            uint32_t exp = selPtr[r * routesPerRow + k];
+            if (exp < weights.layout.experts && !nextSeen.test(exp)) {
+              nextSeen.set(exp);
+              if (nextCache.expertToSlot[exp] < 0) {
+                nextMisses.push_back({exp});
+              }
             }
           }
         }
+        adviseMissedExperts(nextSource, nextMisses.data(), nextMisses.size(), nextStride);
       }
-      adviseMissedExperts(nextSource, nextMisses.data(), nextMisses.size(), nextStride);
+    }
+    // Launch lookahead prediction reads for layer L + 2 while layer L + 1 prepares to run
+    if (lookahead && L + 2 < geometry.layers) {
+      prefetchPrefillPredicted(L + 2);
     }
   }
 
