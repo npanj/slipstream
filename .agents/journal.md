@@ -1,5 +1,14 @@
 # Journal — qwen4exp port
 
+## 2026-10-04 11:25 PDT — antigravity
+
+1. Prepared, validated, and submitted upstream Splash Pull Request #300 (`incoai/splash#300`) from Nitin's handle `npanj` on branch `feature/prompt-lookup-drafter`.
+2. Resolves open Issue #186 and completes RFC #194, retaining commits and author credit from `@linson007` while implementing the full zero-allocation C++ Prompt Lookup Decoding (PLD) engine (`runtime/ops/PromptLookup.{hpp,cpp}`).
+3. Added comprehensive native unit and latency test suite (`dev/tests/engine/prompt_lookup_test.cpp`) wired into `dev/native.mk` (`test-engine-cpu` and `test-sanitizers`); verified 100% clean passes under ASAN, UBSAN, and TSAN.
+4. Expanded Python test suite (`dev/tests/test_rfc_186_prompt_lookup.py`) clean under `ruff format` and `ruff check`.
+5. Confirmed sub-50 ns query latency on Apple Silicon (~49.1 ns) with zero heap allocations during decode.
+Blocked on: upstream maintainer review.
+
 ## 2026-10-04 11:05 PDT — antigravity
 
 1. Ported high-leverage Metal host dispatch optimizations from upstream commit `143f8e4` into `runtime/metal/MetalBackend.mm`.

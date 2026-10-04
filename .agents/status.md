@@ -1,11 +1,11 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-04 11:05 PDT by antigravity.
+**Updated:** 2026-10-04 11:25 PDT by antigravity.
 **Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`).
 
 ## In one line
 
-Ported Metal host dispatch optimizations from upstream `143f8e4` (removed submission-time driver sync stall, precomputed argument bitmasks, vector-sorted allocation tracking), saving ~50–150 µs CPU overhead per decode step across all models while maintaining 100% test pass rates.
+Submitted upstream Pull Request [incoai/splash#300](https://github.com/incoai/splash/pull/300) under Nitin's handle `npanj`, resolving Issue #186 and completing RFC #194 with the zero-allocation Prompt Lookup Drafter (PLD) engine delivering sub-50 ns query latency on Apple Silicon with 100% clean unit, sanitizer, and python test passes.
 
 ---
 

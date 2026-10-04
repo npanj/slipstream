@@ -58,6 +58,7 @@
 - [x] Standalone CPU Prompt Lookup engine (`runtime/ops/PromptLookup.hpp`, 49.1 ns/query, 0 allocations)
 - [x] Hybrid MTP + Prompt Lookup fallback for Swift-V3 on low-confidence tokens (integrated in `Qwen4ExpTarget.cpp`)
 - [x] Full CPU test suite verification (`make test-engine-cpu` 18/18 targets PASS)
+- [x] Upstream Contribution: Zero-Allocation Prompt Lookup Drafter submitted as PR incoai/splash#300 (resolves #186, builds on #194; 49.1 ns/query, 0 heap allocations, ASAN/UBSAN/TSAN clean)
 - [x] Prompt Lookup Decoding engine integrated into Swift-27B (`splash2/runtime/model/Runtime.mm`, bypasses DFlash on n-gram match >= 2 tokens; installed to Splash-Q8 and pushed to `fork/q8`)
 - [x] Updated Work Hub (`~/Documents/shared-with-google-drive/INDEX.html`) and `~/.omp/agent/models.yml` to minimum medium thinking (`--thinking=medium`) for Swift-27B and Swift-V3
 - [x] Grammar-Pruned Speculative Verification in constrained decoding (`Runtime.mm`, 8.5x tool-calling speedup: 5.6 -> 49.6 tok/s)

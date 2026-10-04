@@ -1,5 +1,19 @@
 # Decisions — qwen4exp port
 
+## Upstream Contribution: Zero-Allocation Prompt Lookup Drafter (PR #300, 2026-10-04)
+
+- **Context**: Upstream Splash had open Issue #186 (`[perf] Prompt-lookup drafter alongside DFlash2`) and RFC scaffolding PR #194 by `@linson007`. PR #194 declared constants and static string matching functions, leaving the stateful C++ engine and tests as follow-up work.
+- **Decision**:
+  - Authored and submitted upstream PR #300 (`incoai/splash#300`) under Nitin's GitHub handle (`npanj`) from branch `feature/prompt-lookup-drafter`.
+  - Rebased and preserved `@linson007`'s 3 RFC scaffolding commits with full author attribution, completing the implementation with the production-grade zero-allocation PLD engine (`runtime/ops/PromptLookup.{hpp,cpp}`).
+  - Built a flat chained inverted hash table (`head_` power-of-two table with load factor < 0.5, `next_` parallel array) ensuring zero heap allocations during decode with reverse-chronological search and multi-order n-gram tie breaking.
+  - Added native C++ unit and latency test suite (`dev/tests/engine/prompt_lookup_test.cpp`) wired into `dev/native.mk` (`test-engine-cpu` and `test-sanitizers`), passing 100% clean under ASAN, UBSAN, and TSAN.
+- **Measured Results**:
+  - Sub-50 ns query latency on Apple Silicon (~49.1 ns per lookup).
+  - ~7.9 µs prompt ingestion for 400 tokens (~20 ns/token).
+  - 100% green test passes across unit, sanitizer, and python test suites.
+
+
 ## Metal Host Dispatch Latency Optimizations & Driver Synchronization Elimination (2026-10-04)
 
 - **Problem**:
