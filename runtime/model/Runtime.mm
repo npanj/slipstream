@@ -885,6 +885,7 @@ struct Runtime::Impl {
     buffers.mtpProposedOut = &mtpProposed;
     buffers.mtpDraftOnly = mtpPhase == MtpPhase::DraftOnly;
     buffers.mtpDrafted = mtpPhase == MtpPhase::AlreadyDrafted;
+    buffers.mtpEnabled = mtpDrafting();
     const bool isProposing =
         lanes == 1 && (mtpProposing(laneEntry(entries, 0)) ||
                        promptLookupProposing(laneEntry(entries, 0)));
