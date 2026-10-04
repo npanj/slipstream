@@ -1,11 +1,11 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-03 11:32 PDT by antigravity.
+**Updated:** 2026-10-04 09:55 PDT by antigravity.
 **Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`, synced with `origin/main`).
 
 ## In one line
 
-All community pull requests (#7, #8, #9, #10) cleanly reviewed, merged, and pushed to `origin/main`. Native 27B model architecture (`models/qwen38/`, `Qwen3_8Layout`, `Qwen3_8Q8Layout`) and Flash-Next operational with standard GGUF and MLX ingestion, in-place GGUF preparation via APFS hole-punching (`F_PUNCHHOLE`), and repository pre-flight inspection (`pull --check`). Proprietary Splash packages deprecated in favor of standard GGUF. All 21 CPU engine tests, model execution plans, 171/171 server tests, 58/58 model tests, and 21/21 launcher tests pass 100% green.
+Standardized repository to canonical Slipstream, restored Flash-Next MTP speculative drafting, and updated documentation (`README.md`, `docs/architecture.md`, `docs/swift-v3-usage.md`) with comprehensive usage, serving commands, and selection guidance for both Qwen3.8-Flash-Next V3 (125.7B MoE) and Qwen3.8-27B (Dense Hybrid). All test suites pass 100% green.
 
 ---
 

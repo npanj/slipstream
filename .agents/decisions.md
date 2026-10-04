@@ -1,6 +1,18 @@
 # Decisions — qwen4exp port
 
-## Standard GGUF as Universal Model Format & Deprecation of Splash Packages (2026-10-03)
+## Canonical Naming Standardization to Slipstream (2026-10-04)
+
+- **Universal Naming**: Standardized the project and binary names universally from `slipstream-v2` and `splash` to canonical **Slipstream** (matching the GitHub repository `npanj/slipstream`).
+- **Primary Artifacts**:
+  - Main binary: `build/slipstream` (built by `make` / `make all` / `make build/slipstream`).
+  - Metal library: `build/slipstream.metallib`.
+  - Root CLI launcher: `./slipstream`.
+- **Backward Compatibility**:
+  - Scripts `./slipstream-v2` and `./splash` serve as backward-compatibility forwarders delegating directly to `./slipstream`.
+  - `Makefile` maintains symlink aliases `build/slipstream-v2 -> slipstream` and `build/slipstream-v2.metallib -> slipstream.metallib` so existing pipelines and scripts remain uninterrupted.
+  - Server reports `"owned_by": "slipstream"` in `/v1/models` (with client and test harnesses accepting both `"slipstream"` and `"slipstream-v2"`).
+  - SSE heartbeats emit `: slipstream-keepalive` (with test harnesses accepting legacy format).
+
 
 Historically, Splash lacked GGUF ingestion and required proprietary, engine-specific binary package archives (`splash-packed-q4`, `splash-packed-q4-qwen4exp`) hosted on Hugging Face.
 - **Universal Standard**: GGUF is the universal, open standard adopted across llama.cpp, Ollama, LM Studio, and community model uploaders. Community users and developers should never be forced to download vendor-locked formats.
@@ -590,3 +602,10 @@ To create a Swift version of Nitin's V3 model (`Swift-Qwen3.8-Flash-Next-V3`) de
    - Public model distribution paths clarified: base Flash-Next V3 (`nitinpanj/Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF`) and Swift KV-sparse variant (`nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF`).
 2. **Upstream Contribution Stance**:
    - Package Flash-Next architectural extensions, SSD expert streaming, and PLD speculative drafting as an upstream PR/patch to Incoai Splash.
+
+## 2026-10-04 — Restore Flash-Next MTP Speculative Drafting (`buffers.mtpEnabled`)
+
+1. **Restoration of `buffers.mtpEnabled`**:
+   - In `runtime/model/Runtime.mm`, restored `buffers.mtpEnabled = mtpDrafting()` in `encodeTargetVerifyBatchForward()`.
+   - In multi-architecture merge `cf4f91c`, the assignment had been omitted when introducing `isProposing`. Because `mtpEnabled` defaulted to `false`, `Qwen4ExpTarget::addVerify()` skipped both MTP draft passes and Prompt Lookup Decoding, dropping throughput to ~15 tok/s (0% acceptance rate).
+   - Restoring the flag re-engages the MTP draft head and Prompt Lookup engine for Flash-Next, returning decode speed to ~40–50+ tok/s.

@@ -1,5 +1,24 @@
 # Journal — qwen4exp port
 
+## 2026-10-04 09:55 PDT — antigravity
+
+1. Updated documentation across `README.md`, `docs/architecture.md`, and `docs/swift-v3-usage.md` to comprehensively cover both supported model families: Qwen3.8-Flash-Next V3 (125.7B MoE) and Qwen3.8-27B (Dense Hybrid).
+2. Added step-by-step instructions for downloading and serving both models (via local paths, single GGUF files, multi-shard GGUFs with APFS hole punching, MLX safetensors folders, and Hugging Face Hub IDs).
+3. Documented head-to-head comparison trade-offs (reasoning scorecards, memory footprints, TTFT differences, and context limits) to guide model selection.
+Blocked on: nothing.
+
+
+1. Standardized project and artifact naming from `slipstream-v2` / `splash` strictly to `Slipstream` / `slipstream` across root CLI launchers, Makefile targets (`build/slipstream`, `build/slipstream.metallib`), server models `owned_by`, and thread identifiers, while preserving backward-compatibility forwarders and symlinks.
+2. Updated all unit test assertions across `dev/tests/test_server.py`, `dev/tests/engine/test_clients.py`, `dev/tests/engine/test_launcher.py`, `dev/tests/engine/test_native_backend.py`, `dev/tests/engine/test_package.py`, `dev/tests/engine/test_server_access.py`, and `dev/tests/engine/test_build_identity.py`.
+3. Verified 100% green test passes across both suites: all 21 CPU engine targets pass (`make test-engine-cpu`), all 417 engine discovery tests pass, and all 171 server tests pass (`test_server.py`).
+Blocked on: nothing.
+
+
+1. Diagnosed 14.6–15.9 tok/s decode degradation on Flash-Next: commit `cf4f91c` had dropped `buffers.mtpEnabled = mtpDrafting()` in `runtime/model/Runtime.mm`, leaving `mtpEnabled` defaulted to `false` and causing `Qwen4ExpTarget.cpp` to skip all MTP and PLD speculative drafting (confirmed by `/status` showing 0% draft acceptance across 24,530 drafted tokens).
+2. Restored `buffers.mtpEnabled = mtpDrafting()` in `runtime/model/Runtime.mm` and recompiled `build/slipstream-v2`.
+3. Verified all 21 CPU engine tests pass (`make test-engine-cpu`) and all 171/171 server tests pass (`test_server.py`).
+Blocked on: user restarting the live server when ready to pick up the updated binary.
+
 ## 2026-10-03 11:32 PDT — antigravity
 
 1. Thoroughly reviewed community PRs #7, #8, #9, and #10 by Mike Zinner (@mzinner): confirmed all 4 are high leverage, robust, and correctly solve local disk constraints via APFS hole punching (`F_PUNCHHOLE`) and safe model introspection (`pull --check`).

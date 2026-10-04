@@ -88,28 +88,44 @@ the Q4_0-Q8out shards and is not on the hub.
 
 ## 2. Serve it
 
-One command; `--model` takes a **directory**, not a repo id, when local.
+One command; `--model` takes a **directory** or single **`.gguf` file**, or HF repo id.
+
+### Flash-Next V3 (125.7B MoE)
 
 ```zsh
-cd ~/Documents/shared-with-google-drive/model-serving/slipstream-gguf
+cd ~/Documents/shared-with-google-drive/model-serving/slipstream
 
 # WITH Swift (KV-sparse)
-./splash serve --model ~/models/swift-qwen38-flash-next-v3 --port 8090
+./slipstream serve --model ~/models/swift-qwen38-flash-next-v3 --port 8090
 
 # WITHOUT Swift (plain base)
-./splash serve --model ~/models/qwen38-flash-next-v3 --port 8090
+./slipstream serve --model ~/models/qwen38-flash-next-v3 --port 8090
 ```
 
-Three equivalent ways to point at a model (`install/launcher.py` `serve()`):
+### Swift-Qwen3.8-27B (Dense Hybrid)
+
+```zsh
+# Prepared 27B package (resident in RAM, ultra-fast 570–660 ms TTFT):
+./slipstream serve --model ~/models/swift-qwen38-27b-splash-hq --port 8090
+
+# Or serve a single 27B .gguf file directly:
+./slipstream serve --model ~/models/qwen38-27b/qwen3.8-27b-q4_0.gguf --port 8090
+
+# Or serve an MLX directory:
+./slipstream serve --model ~/models/mlx-qwen38-27b --port 8090
+```
+
+Ways to point at a model (`install/launcher.py` `serve()`):
 
 | `--model` value | What the launcher does |
 |---|---|
-| dir containing `*.gguf` | converts to `<dir>/prepared/` if `prepared/manifest.json` is missing, then serves it |
-| dir containing `manifest.json` | serves it directly (this is what a prepared download gives you) |
-| HF repo id (no `/`-prefixed path) | downloads via `install/models.py`, installs, serves |
+| single `.gguf` file or dir with `*.gguf` | converts to `<dir>/prepared/` with APFS hole punching if missing, then serves it |
+| dir containing `manifest.json` | serves it directly (pre-converted package) |
+| dir containing `config.json` + `*.safetensors` | converts MLX checkpoint to package format and serves it |
+| HF repo id (e.g. `nitinpanj/...`) | downloads via `install/models.py`, prepares in-place, serves |
 
-Model id the server advertises is `local/<dir-name>` — `local/swift-qwen38-flash-next-v3`
-for the Swift dir. The server speaks OpenAI **and** Anthropic APIs on that port.
+Model id the server advertises is `local/<dir-name>` — e.g. `local/swift-qwen38-flash-next-v3`
+or `local/swift-qwen38-27b-splash-hq`. The server speaks OpenAI **and** Anthropic APIs on that port.
 
 `--max-memory`, `--max-context`, `--api-key`, `--no-webui`, `--allowed-host`,
 `--max-image-pixels` are the other real `serve` flags. Env knobs that matter

@@ -1,36 +1,44 @@
 # Slipstream
 
-**Run 95.5 GiB Qwen3.8-Flash-Next on a single 64 GB Mac at 41–52 tok/s.**
+**High-performance Apple Silicon inference for Qwen3.8-Flash-Next (125.7B) and Qwen3.8-27B.**
 
-Slipstream is a lean, high-performance C++ and Metal inference engine built specifically for Apple Silicon. It combines **SSD expert streaming** with **predictive read-ahead** and **Prompt Lookup + MTP speculative drafting** to serve frontier-scale models that exceed your Mac's physical RAM.
+Slipstream is a lean C++ and Metal inference engine built specifically for Apple Silicon. It pairs **SSD expert streaming** and **predictive read-ahead** with **Prompt Lookup + MTP speculative drafting** to serve frontier-scale models on Mac hardware.
 
-It serves **Qwen3.8-Flash-Next V3** (125.7B parameters, 512 routed experts, 7.3B active per token) and its **Swift KV-sparse variant** at **1.76x the speed of llama.cpp**, with context scaling tested all the way out to **130,000 tokens without decode collapse**.
+It natively supports two model families:
+1. **Qwen3.8-Flash-Next V3** (125.7B parameters, 512 routed experts, 7.3B active per token) and its **Swift KV-sparse variant** at **41–52 tok/s** on a 64 GB Mac, with context scaling tested to **130,000 tokens without decode collapse**.
+2. **Qwen3.8-27B & Swift-Qwen3.8-27B** (27B dense hybrid, 64 layers) at **42–46 tok/s** with ultra-fast Time-to-First-Token (**659 ms**, 1.70x faster than MoE) and a compact RAM-resident footprint (~16.9–27 GB).
 
 Everything is open source under Apache-2.0.
 
 ---
 
-## Why Qwen3.8-Flash-Next V3?
+## Supported Models
 
-| Model Variant | HF Checkpoint (GGUF) | Active / Total Weights | Reasoning (Scorecard) | Peak Speed | RAM Needed |
-|---|---|---:|---:|---:|---:|
-| **Swift-Flash-Next V3** *(New KV-Sparse)* | [nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF](https://huggingface.co/nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF) | 7.3B / 125.7B | **70.3%** (GPQA 54.3%, MATH 62.9%) | **41–52 tok/s** | 64 GB Mac |
-| **Qwen3.8-Flash-Next V3** *(34k+ Downloads)* | [nitinpanj/qwen38-flash-next-v3](https://huggingface.co/nitinpanj/qwen38-flash-next-v3) | 7.3B / 125.7B | **67.6%** (GPQA 45.7%, MATH 60.0%) | **40–48 tok/s** | 64 GB Mac |
+| Architecture | Model Variant | Checkpoint / Format | Active / Total | Reasoning Scorecard | TTFT | Decode Speed | Memory Footprint |
+|---|---|---|---:|---:|---:|---:|---:|
+| **125.7B MoE** | **Swift-Flash-Next V3** *(KV-Sparse)* | [nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF](https://huggingface.co/nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF) | 7.3B / 125.7B | **70.3%** (GPQA 54.3%, MATH 62.9%) | 1,119 ms | **41–52 tok/s** | 64 GB Mac (SSD Streamed) |
+| **125.7B MoE** | **Qwen3.8-Flash-Next V3** *(Base)* | [nitinpanj/qwen38-flash-next-v3](https://huggingface.co/nitinpanj/qwen38-flash-next-v3) | 7.3B / 125.7B | **67.6%** (GPQA 45.7%, MATH 60.0%) | 1,290 ms | **40–48 tok/s** | 64 GB Mac (SSD Streamed) |
+| **27B Dense** | **Swift-Qwen3.8-27B-Splash-HQ** | Prepared Package / GGUF / MLX | 27B / 27B | **67.6%** (AIME 45.0%, GSM8K 96.0%) | **659 ms** *(1.7x faster)* | **42–46 tok/s** | 32–64 GB Mac (RAM Resident) |
+| **27B Dense** | **Qwen3.8-27B** *(Base)* | Standard GGUF / MLX safetensors | 27B / 27B | Frontier 27B baseline | **670 ms** | **40–45 tok/s** | 32–64 GB Mac (RAM Resident) |
 
-- **Frontier Reasoning on a Laptop:** Outperforms standard 27B dense models on GPQA Diamond (54.3% vs 45.7%) and MATH-500 (62.9% vs 60.0%), with 92% on HumanEval and 96% on GSM8K.
-- **Fast Generation:** 41–52 tok/s sustained decode on an M5 Pro (64 GB).
-- **No Context Collapse:** Maintains 32–43 tok/s out to 130,000 tokens thanks to 48 recurrent linear DeltaNet layers ($O(1)$ state growth) and only 16 full-attention layers.
-- **KV-Sparsity (Swift):** The Swift variant incorporates KV-sparse attention distilled from Swift-1.5 with spliced Q8 donor backbones, minimizing RAM growth in long agent sessions.
+### Key Highlights
+- **Frontier Reasoning on a Laptop:** Flash-Next V3 reaches 70.3% composite accuracy across 145 benchmark items (54.3% GPQA Diamond, 62.9% MATH-500, 92.0% HumanEval, 96.0% GSM8K).
+- **Fast Generation:** 41–52 tok/s sustained decode on an M5 Pro for both architectures.
+- **Ultra-Fast TTFT on 27B:** Dense 27B achieves sub-second prompt evaluation (570–659 ms), 1.7x faster than large MoE.
+- **No Context Collapse:** Flash-Next maintains 32–43 tok/s out to 130,000 tokens through 48 recurrent linear DeltaNet layers ($O(1)$ state growth) and only 16 full-attention layers.
+- **In-Place GGUF Preparation:** Automatic Darwin APFS hole-punching (`F_PUNCHHOLE`) converts standard multi-shard GGUFs without doubling disk consumption.
 
 ---
 
 ## Quickstart (Step-by-Step)
 
 ### Prerequisites
-- **Hardware:** Apple Silicon Mac with **64 GB Unified Memory** (M2/M3/M4/M5 Pro/Max).
-- **Disk:** ~100 GB for a model served by its Hugging Face id: its GGUF files are converted in
-  place on the first start, so preparing needs only a few GB more. A model in a folder of your own
-  (or with `--keep-gguf`) keeps its GGUF files, and preparing it needs ~100 GB more.
+- **Hardware:**
+  - **Flash-Next V3 (125.7B MoE):** Apple Silicon Mac with **64 GB Unified Memory** (M2/M3/M4/M5 Pro/Max).
+  - **Qwen3.8-27B (Dense):** Apple Silicon Mac with **32 GB or 64 GB Unified Memory**.
+- **Disk:**
+  - Flash-Next V3: ~100 GB. Slices of GGUFs are freed in place via APFS hole punching (`F_PUNCHHOLE`) during preparation.
+  - 27B Dense: ~17–27 GB depending on quantization (Q4 / Q8).
 - **macOS:** macOS 15.0+ (macOS 26.4+ SDK).
 
 ---
@@ -65,7 +73,7 @@ make -j4
 | The `slipstream` command (a link to the newest version) | `~/.local/bin/slipstream` | `SLIPSTREAM_BINDIR` |
 | Models | `~/.slipstream/models/<owner>/<repo>/` | `SLIPSTREAM_MODELS` |
 | Downloaded packages (models link into it) | the Hugging Face cache, `~/.cache/huggingface/hub/` | `HF_HUB_CACHE` |
-| Runtime data, logs and caches of a release | `~/Library/Application Support/Slipstream-v2/` | |
+| Runtime data, logs and caches of a release | `~/Library/Application Support/Slipstream/` | |
 
 **Why `~/.local`:** the installer puts Slipstream in your home folder, so it needs no administrator
 rights, no `sudo` and no package manager, and removing it is deleting two paths. `~/.local/bin` and
@@ -75,7 +83,7 @@ installer is modelled on MariaDB Shell's, and `pipx` and `uv` install tools ther
 side by side, so going back is relinking `~/.local/bin/slipstream`. If `~/.local/bin` is not on your
 `PATH`, the installer says how to add it.
 
-**Why `~/.slipstream/models`:** a model is ~100 GB and outlives any one installation. Every
+**Why `~/.slipstream/models`:** a model outlives any one installation. Every
 installation (a release, a source checkout, or a frontend that runs `slipstream pull`) uses the
 same store, so a model is downloaded once and survives upgrades, reinstalls and `git clean`. It is
 the convention of other local model servers: Ollama keeps models in `~/.ollama/models`, oMLX in
@@ -83,7 +91,7 @@ the convention of other local model servers: Ollama keeps models in `~/.ollama/m
 addexclusion`), since everything in it can be downloaded again.
 
 **Before this, models lived inside each installation:** a release kept them in
-`~/Library/Application Support/Slipstream-v2/models`, a source checkout in `install/models`. Nothing
+`~/Library/Application Support/Slipstream/models`, a source checkout in `install/models`. Nothing
 is moved automatically. Either move a model into the store, keeping its `<owner>/<repo>` folder:
 
 ```zsh
@@ -98,7 +106,9 @@ or point `SLIPSTREAM_MODELS` at the old folder. A folder you downloaded yourself
 
 ### Step 2: Download or Pull the Model
 
-You can serve directly by Hugging Face repo ID (Slipstream will download and set up weights and MTP sidecars automatically):
+#### Model 1: Qwen3.8-Flash-Next V3 (125.7B MoE — Frontier Reasoning)
+
+Serve directly by Hugging Face repo ID (Slipstream downloads and sets up weights and MTP sidecars automatically):
 
 ```zsh
 # Download without serving:
@@ -107,11 +117,6 @@ slipstream pull nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF
 # Only check whether a repository can be served, and its size (downloads nothing):
 slipstream pull nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF --check
 ```
-
-`--check` (add `--json` for scripts and frontends) accepts a ready-to-run Slipstream package, or one
-Qwen3.8-Flash-Next (`qwen4exp`) model's GGUF files: a single file or one complete set of split files
-at the top of the repository. It reads the first file's header from the Hub to check the
-architecture. `pull` and `serve` refuse anything else before downloading.
 
 Or download manually using the Hugging Face CLI:
 
@@ -123,6 +128,20 @@ huggingface-cli download nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF \
 # Or download the plain base model:
 huggingface-cli download nitinpanj/qwen38-flash-next-v3 \
     --local-dir ~/models/qwen38-flash-next-v3
+```
+
+#### Model 2: Qwen3.8-27B & Swift-Qwen3.8-27B (Dense Hybrid — Ultra-Fast TTFT)
+
+Slipstream natively ingests standard GGUF files, MLX safetensors checkpoints, or pre-converted packages:
+
+```zsh
+# Download any standard 27B GGUF:
+huggingface-cli download Qwen/Qwen3.8-27B-GGUF qwen3.8-27b-q4_0.gguf \
+    --local-dir ~/models/qwen38-27b
+
+# Or download an MLX 4-bit checkpoint:
+huggingface-cli download mlx-community/Qwen3.8-27B-4bit \
+    --local-dir ~/models/mlx-qwen38-27b
 ```
 
 ---
@@ -139,7 +158,9 @@ sudo sysctl iogpu.wired_limit_mb=59392
 
 ### Step 4: Serve the Model
 
-Run `slipstream serve` pointing at a local folder or directly at a Hugging Face repo ID:
+Run `slipstream serve` pointing at your model path or Hugging Face repo ID:
+
+#### Serving Flash-Next V3 (125.7B MoE)
 
 ```zsh
 # Serve local model directory:
@@ -148,13 +169,26 @@ slipstream serve --model ~/models/swift-qwen38-flash-next-v3 --port 8090
 # Or serve directly by Hugging Face repo ID (downloads & sets up automatically):
 slipstream serve --model nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF --port 8090
 
-# Or serve on your local network (e.g. for other devices or web UIs):
+# Or serve on your local network:
 slipstream serve --model ~/models/swift-qwen38-flash-next-v3 --host 0.0.0.0 --port 8090 --api-key YOUR_KEY
 ```
 
-> **First Run Note:** On first launch, Slipstream detects multi-shard GGUF files and prepares optimized streaming package files into `<model-dir>/prepared/` (~4–7 minutes). Subsequent launches load in **~10–15 seconds**.
+#### Serving Qwen3.8-27B (Dense Hybrid)
+
+```zsh
+# Serve a prepared 27B package:
+slipstream serve --model ~/models/swift-qwen38-27b-splash-hq --port 8090
+
+# Or serve a single .gguf file directly:
+slipstream serve --model ~/models/qwen38-27b/qwen3.8-27b-q4_0.gguf --port 8090
+
+# Or serve an MLX directory:
+slipstream serve --model ~/models/mlx-qwen38-27b --port 8090
+```
+
+> **Memory Rule — One Model at a Time:** Only run one inference engine at a time on Apple Silicon. Stop any active server (`Ctrl+C`) before switching models.
 >
-> For a model served by its Hugging Face id, preparing uses the downloaded GGUF files up as it converts them, and deletes them once the package is complete: the package replaces them, and the model needs about its own size on disk instead of twice that. Add `--keep-gguf` to keep them (e.g. to use them with llama.cpp as well). A folder of your own is never changed. An interrupted preparation resumes where it stopped; if the GGUF data it still needs was already freed, it says which files to download again.
+> **Automatic Format & Architecture Detection:** Slipstream detects whether a model is 27B (`qwen38`) or Flash-Next (`qwen4exp`), and whether it is in GGUF, MLX, or prepared package format. On first launch, multi-shard GGUFs are prepared into `<model-dir>/prepared/` using APFS hole-punching (`F_PUNCHHOLE`) to prevent disk duplication. Subsequent loads take **~10–15 seconds**. Add `--keep-gguf` if you wish to retain original GGUF files for other tools.
 
 ---
 
@@ -196,6 +230,20 @@ omp --model splash-flashnext/local/swift-qwen38-flash-next-v3 \
     --tools=read,write,edit,bash,grep,glob,todo \
     --thinking=low --approval-mode=yolo
 ```
+
+---
+
+## Choosing Between Flash-Next V3 and Qwen3.8-27B
+
+| Dimension | Qwen3.8-Flash-Next V3 (125.7B MoE) | Qwen3.8-27B & Swift-27B (Dense Hybrid) |
+|---|---|---|
+| **Architecture** | 512 routed experts (7.3B active/token) + GDN recurrence | 64-layer dense hybrid (full attention every 4th layer + GDN) |
+| **Reasoning Scorecard** | **70.3% composite** (leads GPQA Diamond by +8.6%, MATH-500 by +2.9%) | **67.6% composite** (AIME 45.0%, GSM8K 96.0%, HumanEval 92.0%) |
+| **Decode Throughput** | 41–52 tok/s | 42–46 tok/s |
+| **Time-to-First-Token** | ~1,100–1,300 ms | **570–659 ms (1.70x faster)** |
+| **Memory Footprint** | ~34 GB expert cache + SSD streaming (requires 64 GB Mac) | **16.9–27 GB completely RAM-resident** (runs on 32 GB or 64 GB Macs) |
+| **Context Horizon** | Scaled to **130,000 tokens** without decode collapse | Standard 32k–131k context window |
+| **When to Use** | Deep analytical reasoning, coding agents, math proofs, massive documents | Fast conversational turns, latency-critical tasks, lighter memory environments |
 
 ---
 

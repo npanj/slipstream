@@ -215,3 +215,14 @@
 - [x] **Community PRs Merged & Credited**: Cleanly reviewed, validated, and merged PRs #7, #8, #9, and #10 by @mzinner.
 - [x] **GGUF Standardization**: Deprecated proprietary Splash package distribution on Hugging Face; standardized documentation and launcher on universal GGUF format with in-place APFS hole punching.
 - [x] **Synchronized with Origin**: Pushed all 14 commits to `origin/main` with 100% green CI and unit test suite.
+
+## MTP Restoration & Canonical Slipstream Naming Standardization (2026-10-04)
+
+- [x] **Flash-Next MTP Restore**: Restored `buffers.mtpEnabled = mtpDrafting()` in `runtime/model/Runtime.mm`, restoring 40–50+ tok/s decode performance (from 15 tok/s with 0% acceptance rate).
+- [x] **Canonical Naming Standardization**:
+  - [x] Converted `./slipstream` into the primary CLI executable launcher; made `./slipstream-v2` and `./splash` forwarders.
+  - [x] Updated Makefile targets: `TARGET := $(BUILD)/slipstream`, `LIB := $(BUILD)/slipstream.metallib`, with backward-compatibility alias rules and symlinks.
+  - [x] Updated C++ runtime: queue name `com.slipstream.memory-pressure`, metallib search order, usage string.
+  - [x] Standardized server internals: thread names, crash trace dumps, chat UI localStorage keys, model `"owned_by": "slipstream"`, keepalive string.
+  - [x] Updated all test assertions across `dev/tests/test_server.py` and `dev/tests/engine/` (417/417 tests pass; 171/171 server tests pass; 21/21 CPU engine targets pass).
+
