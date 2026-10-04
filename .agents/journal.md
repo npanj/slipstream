@@ -1,5 +1,15 @@
 # Journal — qwen4exp port
 
+## 2026-10-04 11:05 PDT — antigravity
+
+1. Ported high-leverage Metal host dispatch optimizations from upstream commit `143f8e4` into `runtime/metal/MetalBackend.mm`.
+2. Removed submission-time `sampleDeviceMemory()` call right after `[command commit]`, eliminating an unnecessary Metal driver synchronization barrier that previously stalled the CPU host thread on every decode forward step.
+3. Added precomputed `bufferIndices` bitmask to `PreparedDispatch` during command preparation, moved stack argument arrays (`mtlBuffers`, `mtlOffsets`) outside the dispatch loop, and bound contiguous argument table runs via `std::countr_zero` / `std::countr_one`.
+4. Replaced linear search in `retainedAllocations` tracking with pre-allocated vector collection and `std::ranges::sort` / `std::ranges::unique` deduplication.
+5. Recompiled `build/slipstream`; verified 100% green pass rate across all 21 CPU engine tests (`make test-engine-cpu`) and all 171 server tests (`dev/tests/test_server.py`).
+Blocked on: nothing.
+
+
 ## 2026-10-04 10:25 PDT — antigravity
 
 1. Evaluated upstream Splash PR #253 (`Add Qwen3.8-Flash-Next (qwen4exp) GGUF support with MTP drafting` by Jan Hilgard) across all 72 changed files.

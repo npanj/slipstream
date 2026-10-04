@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -1358,6 +1359,7 @@ CommandTicket MetalBackend::submitCommandAsync(
         MTLSize groups{};
         MTLSize threads{};
         uint64_t threadCount = 0;
+        uint32_t bufferIndices = 0;
         __strong id<MTLComputePipelineState> pipeline = nil;
     };
     std::vector<PreparedDispatch> prepared;
@@ -1399,6 +1401,9 @@ CommandTicket MetalBackend::submitCommandAsync(
                 }
                 seenIndices |= (1ULL << binding.index);
             }
+            if (binding.index < 31) {
+                item.bufferIndices |= (1U << binding.index);
+            }
         }
         for (const BytesBinding &binding : dispatch.bytes) {
             if (!binding.data || !binding.sizeBytes) {
@@ -1430,17 +1435,22 @@ CommandTicket MetalBackend::submitCommandAsync(
     auto ticketState = std::make_shared<CommandTicket::State>();
     ticketState->backend = impl_->asyncState;
     ticketState->completion = std::move(completion);
-    std::vector<const MetalAllocation *> retained;
-    retained.reserve(32);
+    std::vector<const std::shared_ptr<MetalAllocation> *> bound;
+    bound.reserve(dispatches.size() * 4);
     for (const ComputeDispatch &dispatch : dispatches) {
         for (const BufferBinding &binding : dispatch.buffers) {
-            const auto &allocation = binding.buffer.impl_->allocation;
-            const MetalAllocation *alloc = allocation.get();
-            if (std::find(retained.begin(), retained.end(), alloc) == retained.end()) {
-                retained.push_back(alloc);
-                ticketState->retainedAllocations.push_back(allocation);
-            }
+            bound.push_back(&binding.buffer.impl_->allocation);
         }
+    }
+    const auto allocation = [](const std::shared_ptr<MetalAllocation> *owner) {
+        return owner->get();
+    };
+    std::ranges::sort(bound, {}, allocation);
+    const auto repeated = std::ranges::unique(bound, {}, allocation);
+    bound.erase(repeated.begin(), repeated.end());
+    ticketState->retainedAllocations.reserve(bound.size());
+    for (const std::shared_ptr<MetalAllocation> *owner : bound) {
+        ticketState->retainedAllocations.push_back(*owner);
     }
     ticketState->sequence = impl_->asyncState->beginSubmission();
 
@@ -1550,47 +1560,45 @@ CommandTicket MetalBackend::submitCommandAsync(
                     }
                     return parts;
                 }();
-                for (const PreparedDispatch &item : chunks[c]) {
-                    const ComputeDispatch &dispatch = *item.source;
-                    if (!skipped.empty() &&
-                        std::any_of(skipped.begin(), skipped.end(), [&](const std::string &part) {
-                            return dispatch.pipelineName.find(part) != std::string::npos;
-                        }))
-                        continue;
-                    [encoder setComputePipelineState:item.pipeline];
-                    constexpr uint32_t kMaxBufferEntries = 31;
-                    __unsafe_unretained id<MTLBuffer> mtlBuffers[kMaxBufferEntries];
-                    NSUInteger mtlOffsets[kMaxBufferEntries];
-                    uint32_t bufferIndices = 0;
-                    for (const BufferBinding &binding : dispatch.buffers) {
-                        const MetalBuffer::Impl &buffer = *binding.buffer.impl_;
-                        if (binding.index < kMaxBufferEntries) {
-                            mtlBuffers[binding.index] = buffer.allocation->buffer;
-                            mtlOffsets[binding.index] = static_cast<NSUInteger>(buffer.offsetBytes);
-                            bufferIndices |= (1U << binding.index);
-                        } else {
-                            [encoder setBuffer:buffer.allocation->buffer
-                                        offset:static_cast<NSUInteger>(buffer.offsetBytes)
-                                       atIndex:binding.index];
-                        }
+            constexpr uint32_t kMaxBufferEntries = 31;
+            __unsafe_unretained id<MTLBuffer> mtlBuffers[kMaxBufferEntries];
+            NSUInteger mtlOffsets[kMaxBufferEntries];
+            for (const PreparedDispatch &item : chunks[c]) {
+                const ComputeDispatch &dispatch = *item.source;
+                if (!skipped.empty() &&
+                    std::any_of(skipped.begin(), skipped.end(), [&](const std::string &part) {
+                        return dispatch.pipelineName.find(part) != std::string::npos;
+                    }))
+                    continue;
+                [encoder setComputePipelineState:item.pipeline];
+                for (const BufferBinding &binding : dispatch.buffers) {
+                    const MetalBuffer::Impl &buffer = *binding.buffer.impl_;
+                    if (binding.index < kMaxBufferEntries) {
+                        mtlBuffers[binding.index] = buffer.allocation->buffer;
+                        mtlOffsets[binding.index] = static_cast<NSUInteger>(buffer.offsetBytes);
+                    } else {
+                        [encoder setBuffer:buffer.allocation->buffer
+                                    offset:static_cast<NSUInteger>(buffer.offsetBytes)
+                                   atIndex:binding.index];
                     }
-                    while (bufferIndices) {
-                        const uint32_t first = __builtin_ctz(bufferIndices);
-                        const uint32_t count = __builtin_ctz(~(bufferIndices >> first));
-                        [encoder setBuffers:mtlBuffers + first
-                                    offsets:mtlOffsets + first
-                                  withRange:NSMakeRange(first, count)];
-                        bufferIndices &= ~(((1U << count) - 1U) << first);
-                    }
-                    for (const BytesBinding &binding : dispatch.bytes) {
-                        [encoder setBytes:binding.data
-                                   length:checkedNSUInteger(binding.sizeBytes,
-                                                            "byte binding size")
-                                  atIndex:binding.index];
-                    }
-                    [encoder dispatchThreadgroups:item.groups
-                             threadsPerThreadgroup:item.threads];
                 }
+                for (uint32_t unbound = item.bufferIndices; unbound;) {
+                    const uint32_t first = std::countr_zero(unbound);
+                    const uint32_t count = std::countr_one(unbound >> first);
+                    [encoder setBuffers:mtlBuffers + first
+                                offsets:mtlOffsets + first
+                              withRange:NSMakeRange(first, count)];
+                    unbound &= ~(((uint32_t{1} << count) - 1U) << first);
+                }
+                for (const BytesBinding &binding : dispatch.bytes) {
+                    [encoder setBytes:binding.data
+                               length:checkedNSUInteger(binding.sizeBytes,
+                                                        "byte binding size")
+                              atIndex:binding.index];
+                }
+                [encoder dispatchThreadgroups:item.groups
+                         threadsPerThreadgroup:item.threads];
+            }
                 [encoder endEncoding];
             } catch (...) {
                 impl_->asyncState->releaseSubmission(ticketState->sequence);
@@ -1667,7 +1675,6 @@ CommandTicket MetalBackend::submitCommandAsync(
           }
         }];
     }
-    impl_->sampleDeviceMemory();
     id<MTLSharedEvent> event = impl_->sparseEvent;
     const bool pendingMap =
         sparseEventValue && event.signaledValue < sparseEventValue;

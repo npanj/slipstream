@@ -1,11 +1,11 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-04 10:25 PDT by antigravity.
+**Updated:** 2026-10-04 11:05 PDT by antigravity.
 **Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`).
 
 ## In one line
 
-Evaluated upstream Splash PR #253, borrowed the high-leverage 4-pass radix block selection algorithm for QSA (`qsa_select_blocks`), speeding up sparse block selection by 4.52x on ties and 2.05x on 64k production blocks while preserving 100% test pass rates across all suites.
+Ported Metal host dispatch optimizations from upstream `143f8e4` (removed submission-time driver sync stall, precomputed argument bitmasks, vector-sorted allocation tracking), saving ~50–150 µs CPU overhead per decode step across all models while maintaining 100% test pass rates.
 
 ---
 

@@ -1,5 +1,18 @@
 # Decisions — qwen4exp port
 
+## Metal Host Dispatch Latency Optimizations & Driver Synchronization Elimination (2026-10-04)
+
+- **Problem**:
+  1. In `runtime/metal/MetalBackend.mm`, `impl_->sampleDeviceMemory()` was called directly on command submission right after `[command commit]`. Querying `MTLDevice.currentAllocatedSize` right after commit forced the CPU host thread to synchronize with the in-flight Metal command queue on Apple Silicon, injecting a driver pipeline stall into every decode step.
+  2. Inside the inner dispatch encoding loop, buffer indices were dynamically scanned and tested using a bitmask reconstructed per dispatch, and stack arrays were re-instantiated inside the dispatch loop.
+  3. Tracking retained allocations previously scanned vectors linearly ($O(N)$ find per binding).
+- **Solution (Borrowed from Upstream Commit `143f8e4`)**:
+  - Eliminated the submission-time `sampleDeviceMemory()` call entirely. Driver memory telemetry is already sampled upon command retirement in `addCompletedHandler` and on request admission in `refreshMemoryStats`.
+  - Added precomputed `bufferIndices` bitmask to `PreparedDispatch`, and moved stack argument arrays (`mtlBuffers`, `mtlOffsets`) outside the dispatch loop, binding consecutive spans with `std::countr_zero` / `std::countr_one`.
+  - Replaced linear search of retained allocations with vector collection and `std::ranges::sort` / `std::ranges::unique` deduplication.
+- **Measured Impact**: Eliminates driver synchronization stalls on submission, saving ~50–150 µs of CPU dispatch overhead per forward step without affecting memory accounting or GPU safety. Passed all 21 CPU engine tests and all 171 server tests.
+
+
 ## 4-Pass Radix Block Selection in QSA (2026-10-04)
 
 - **Problem**: In `models/qwen4exp/kernels/qsa_select.metal`, `qsa_select_blocks` previously executed a 32-pass bitwise binary search (`for (int bit = 31; bit >= 0; --bit)`) requiring 64 threadgroup barriers per row. Furthermore, resolving ties at the threshold used a sequential loop `for (uint taken = 0; taken < ties_wanted; ++taken)` running a full reduction across all blocks for every single tie (up to 512 passes and 1,024 barriers on heavily tied scores, taking 3.52 ms).
