@@ -451,7 +451,7 @@ class MultiplexedRuntime:
         self._mask_slots = threading.BoundedSemaphore(pending_limit)
         self._mask_executor = ThreadPoolExecutor(
             max_workers=mask_workers,
-            thread_name_prefix="slipstream-v2-mask",
+            thread_name_prefix="slipstream-mask",
         )
 
         self._state_lock = threading.RLock()
@@ -731,7 +731,7 @@ class MultiplexedRuntime:
                 threading.Thread(
                     target=self._run_startup_attempt,
                     args=(attempt, old_process, old_reader),
-                    name="slipstream-v2-native-startup",
+                    name="slipstream-native-startup",
                     daemon=True,
                 ).start()
             deadline = min(attempt.deadline, caller_deadline or attempt.deadline)
@@ -842,7 +842,7 @@ class MultiplexedRuntime:
                 reader = threading.Thread(
                     target=self._reader_loop,
                     args=(process, generation),
-                    name=f"slipstream-v2-native-reader-{generation}",
+                    name=f"slipstream-native-reader-{generation}",
                     daemon=True,
                 )
                 self._reader_thread = reader

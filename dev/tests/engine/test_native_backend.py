@@ -719,7 +719,7 @@ class NativeBackendContractTests(unittest.TestCase):
         start = threading.Thread.start
 
         def gated_start(thread):
-            if thread.name == "slipstream-v2-status-refresh":
+            if thread.name in ("slipstream-status-refresh", "slipstream-v2-status-refresh"):
                 starting.set()
                 if not release_start.wait(2.0):
                     raise TimeoutError("test did not release status thread start")

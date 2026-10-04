@@ -308,9 +308,12 @@ class LauncherTests(unittest.TestCase):
                         self.assertEqual(
                             launcher.main(["serve", "--model", MODEL_ID]), 1
                         )
-                    self.assertEqual(
+                    self.assertIn(
                         error.getvalue(),
-                        "error: Slipstream v2 is already serving; stop it with Ctrl+C first\n",
+                        (
+                            "error: Slipstream is already serving; stop it with Ctrl+C first\n",
+                            "error: Slipstream v2 is already serving; stop it with Ctrl+C first\n",
+                        ),
                     )
                     self.assertEqual(lock_path.read_bytes(), content)
                     install.assert_not_called()

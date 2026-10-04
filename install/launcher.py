@@ -47,7 +47,7 @@ def _request_json(path, timeout=2):
     except urllib.error.HTTPError as error:
         if error.code == 401:
             raise LauncherError(
-                "Slipstream v2 authentication failed; set SLIPSTREAM_V2_API_KEY to the server's key"
+                "Slipstream authentication failed; set SLIPSTREAM_API_KEY to the server's key"
             ) from None
         return None
     except (
@@ -278,7 +278,7 @@ def serve(args):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise LauncherError(
-                f"Slipstream v2 is already serving{_serve_lock_owner(lock)}; "
+                f"Slipstream is already serving{_serve_lock_owner(lock)}; "
                 "stop it with Ctrl+C first"
             ) from None
         port = getattr(args, "port", None) or PORT
@@ -371,7 +371,7 @@ def coding_client(args):
     snapshot = _running_status()
     if snapshot is None:
         raise LauncherError(
-            "No ready Slipstream v2 server. Run 'slipstream-v2 serve --model <HF_REPO_ID>' "
+            "No ready Slipstream server. Run './slipstream serve --model <HF_REPO_ID>' "
             "in another terminal first."
         )
     catalog = _request_json("/v1/models")
@@ -380,13 +380,13 @@ def coding_client(args):
         not isinstance(models, list)
         or len(models) != 1
         or not isinstance(models[0], dict)
-        or models[0].get("owned_by") not in ("slipstream-v2", "slipstream", "splash")
+        or models[0].get("owned_by") not in ("slipstream", "slipstream-v2", "splash")
     ):
-        raise LauncherError("Could not identify the local Slipstream v2 server")
+        raise LauncherError("Could not identify the local Slipstream server")
     model, context = models[0].get("id"), snapshot.get("maximum_context_tokens")
     if type(context) is not int or context <= 0:
         raise LauncherError(
-            "Slipstream v2 is running but its context limit is not available yet; wait and retry"
+            "Slipstream is running but its context limit is not available yet; wait and retry"
         )
     command, environment = clients.command(
         args.command,
@@ -406,7 +406,7 @@ def coding_client(args):
         )
     elif args.command == "codex":
         print(
-            "Codex hosted WebSearch is disabled: Slipstream v2 does not provide "
+            "Codex hosted WebSearch is disabled: Slipstream does not provide "
             "OpenAI's search service. Local tools and MCP are unchanged.",
             flush=True,
         )
@@ -453,8 +453,8 @@ def _parse_max_context(value):
 
 def _version():
     if not paths.PACKAGED:
-        return "Slipstream v2 (source checkout)"
-    return "Slipstream v2 " + str(
+        return "Slipstream (source checkout)"
+    return "Slipstream " + str(
         json.loads((paths.ROOT / "release.json").read_text())["version"]
     )
 
@@ -476,7 +476,7 @@ def parse_args(argv=None):
     elif "--" in argv:
         boundary = argv.index("--")
         argv, client_args = argv[:boundary], argv[boundary + 1 :]
-    parser = argparse.ArgumentParser(prog="slipstream-v2", description=__doc__)
+    parser = argparse.ArgumentParser(prog="slipstream", description=__doc__)
     parser.add_argument("--version", action="version", version=_version())
     commands = parser.add_subparsers(dest="command", required=True)
     server = commands.add_parser("serve", help="run the local server; Ctrl+C stops it")

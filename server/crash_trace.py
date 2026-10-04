@@ -151,7 +151,7 @@ class CrashTraceRing:
             DEFAULT_TRACE_DIRECTORY.mkdir(parents=True, exist_ok=True, mode=0o700)
             timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
             target = DEFAULT_TRACE_DIRECTORY / (
-                f"slipstream-v2-crash-g{generation}-{timestamp}.json"
+                f"slipstream-crash-g{generation}-{timestamp}.json"
             )
             descriptor, temporary = tempfile.mkstemp(
                 prefix=f".{target.name}.", dir=DEFAULT_TRACE_DIRECTORY
@@ -278,7 +278,7 @@ def replay(path: Path) -> int:
                 raise RuntimeError(eof_message + suffix)
 
         reader = threading.Thread(
-            target=drain, name="slipstream-v2-trace-replay", daemon=True
+            target=drain, name="slipstream-trace-replay", daemon=True
         )
         reader.start()
         with changed:

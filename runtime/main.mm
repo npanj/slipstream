@@ -60,7 +60,7 @@ public:
   explicit MemoryPressureMonitor(std::function<void()> notify)
       : pending_(std::make_shared<std::atomic<engine::MemoryPressure>>(
             engine::MemoryPressure::Normal)),
-        queue_(dispatch_queue_create("com.slipstream-v2.memory-pressure",
+        queue_(dispatch_queue_create("com.slipstream.memory-pressure",
                                      DISPATCH_QUEUE_SERIAL)) {
     source_ = dispatch_source_create(
         DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0,
@@ -219,9 +219,9 @@ bootstrapConfig(const NativeArguments &arguments) {
       (capabilities.vocabularySize + 31) / 32;
   engine::RuntimeBootstrapConfig config;
   auto metallibDir = executablePath().parent_path();
-  auto metallib = metallibDir / "slipstream-v2.metallib";
+  auto metallib = metallibDir / "slipstream.metallib";
   if (!std::filesystem::exists(metallib)) {
-    metallib = metallibDir / "slipstream.metallib";
+    metallib = metallibDir / "slipstream-v2.metallib";
     if (!std::filesystem::exists(metallib)) {
       metallib = metallibDir / "splash.metallib";
     }
@@ -408,7 +408,7 @@ int main(int argc, char **argv) {
       return splash::runNative(arguments);
     } catch (const splash::UsageError &error) {
       std::cerr << "error: " << error.what() << '\n';
-      splash::printUsage(argc > 0 ? argv[0] : "slipstream-v2");
+      splash::printUsage(argc > 0 ? argv[0] : "slipstream");
       return static_cast<int>(
           splash::engine::NativeProcessExit::ProtocolFailure);
     } catch (const splash::engine::RuntimeBootstrapError &error) {

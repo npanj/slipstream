@@ -19,7 +19,7 @@ MODEL ?=
 MODEL_ROOT := $(or $(SLIPSTREAM_MODELS),$(HOME)/.slipstream/models)/$(MODEL)
 
 BUILD := build
-TARGET := $(BUILD)/slipstream-v2
+TARGET := $(BUILD)/slipstream
 METAL_BUILD := $(BUILD)/metal
 # Shared kernels are grouped by execution phase under
 # runtime/metal/kernels/{prefill,decode,shared}; each model's own kernels live
@@ -49,7 +49,7 @@ PROD_METALFLAGS := -std=metal4.0 -O3 -Wall -Wextra -Werror -Iruntime -I. \
 ENGINE_CXXFLAGS := -std=c++20 -O3 -Wall -Wextra -Werror -Iruntime -I. \
 	$(MACOS_TARGET_FLAG)
 ENGINE_OBJCXXFLAGS := $(ENGINE_CXXFLAGS) -fobjc-arc
-LIB := $(BUILD)/slipstream-v2.metallib
+LIB := $(BUILD)/slipstream.metallib
 .PHONY: all clean force-build-identity install _install \
 	install-environment _install-environment \
 	platform-check model-selection preflight serve verify-models
@@ -152,7 +152,7 @@ verify-models: preflight
 	@$(MODEL_INSTALL) --model "$(MODEL)" verify --full
 
 serve: preflight $(TARGET)
-	./slipstream-v2 serve --model "$(MODEL)"
+	./slipstream serve --model "$(MODEL)"
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -172,8 +172,14 @@ $(METAL_BUILD)/models/%.air: models/%.metal $(KERNEL_HEADERS) \
 
 $(LIB): $(PRODUCTION_AIRS)
 	$(RUN_CONFIGURED) $(METALLIB) $(BUILD_INPUTS) -o $@
-	@ln -sf $(notdir $@) $(BUILD)/slipstream.metallib
+	@ln -sf $(notdir $@) $(BUILD)/slipstream-v2.metallib
 	@ln -sf $(notdir $@) $(BUILD)/splash.metallib
+
+$(BUILD)/slipstream-v2.metallib: $(LIB)
+	@ln -sf $(notdir $<) $@
+
+$(BUILD)/splash.metallib: $(LIB)
+	@ln -sf $(notdir $<) $@
 
 ENGINE_BUILD := $(BUILD)/engine
 ENGINE_LIBRARY := $(ENGINE_BUILD)/libslipstream.a
@@ -305,8 +311,14 @@ $(TARGET): $(ENGINE_MAIN_OBJECT) $(ENGINE_LIBRARY) $(LIB) \
 		| $(BUILD)
 	$(RUN_CONFIGURED) $(CXX) $(ENGINE_OBJCXXFLAGS) $(ENGINE_MAIN_OBJECT) $(ENGINE_LIBRARY) \
 		$(ENGINE_LINKFLAGS) -o $@
-	@ln -sf $(notdir $@) $(BUILD)/slipstream
+	@ln -sf $(notdir $@) $(BUILD)/slipstream-v2
 	@ln -sf $(notdir $@) $(BUILD)/splash
+
+$(BUILD)/slipstream-v2: $(TARGET)
+	@ln -sf $(notdir $<) $@
+
+$(BUILD)/splash: $(TARGET)
+	@ln -sf $(notdir $<) $@
 
 clean:
 	rm -rf $(BUILD)

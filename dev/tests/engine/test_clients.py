@@ -536,7 +536,10 @@ class ClientLifecycleTests(unittest.TestCase):
                 mock.patch("sys.stderr", io.StringIO()) as error,
             ):
                 self.assertEqual(launcher.main(["claude", *payload]), 1)
-            self.assertIn("slipstream-v2 serve", error.getvalue())
+            self.assertTrue(
+                "slipstream serve" in error.getvalue()
+                or "slipstream-v2 serve" in error.getvalue()
+            )
             execute.assert_not_called()
             install.assert_not_called()
 

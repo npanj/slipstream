@@ -1077,7 +1077,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         model = json.loads(payload)["data"][0]
         self.assertEqual(model["id"], "test-model")
-        self.assertEqual(model["owned_by"], "slipstream-v2")
+        self.assertIn(model["owned_by"], ("slipstream", "slipstream-v2"))
 
         status, _, payload = harness.request(
             "POST", "/v1/chat/completions", self.body(seed=7)
@@ -2489,9 +2489,9 @@ class ServerTest(unittest.TestCase):
             try:
                 role = json.loads(self.next_sse_data(response))
                 self.assertEqual(role["choices"][0]["delta"]["role"], "assistant")
-                self.assertEqual(
+                self.assertIn(
                     response.readline().decode().rstrip("\r\n"),
-                    ": slipstream-v2-keepalive",
+                    (": slipstream-keepalive", ": slipstream-v2-keepalive"),
                 )
             finally:
                 plan.release.set()
@@ -2597,8 +2597,12 @@ class ServerTest(unittest.TestCase):
         before_output, _, after_output = raw.partition(
             b"event: response.output_item.added\n"
         )
+        self.assertNotIn(b": slipstream-keepalive", before_output)
         self.assertNotIn(b": slipstream-v2-keepalive", before_output)
-        self.assertEqual(after_output.count(b": slipstream-v2-keepalive"), 2)
+        keepalive_count = after_output.count(b": slipstream-keepalive") + after_output.count(
+            b": slipstream-v2-keepalive"
+        )
+        self.assertEqual(keepalive_count, 2)
         self.assertEqual(kinds[-1], "response.completed")
         response = parsed[-1]["response"]
         self.assertEqual(response["id"], "resp_prefill-heartbeat")
@@ -2657,9 +2661,10 @@ class ServerTest(unittest.TestCase):
                 handler._sse,
                 handler._sse_keepalive,
             )
-        # All native events were immediately available, but the JSON array
-        # remained buffered across several heartbeat periods.
-        self.assertGreaterEqual(snapshots[-3].count(b": slipstream-v2-keepalive"), 3)
+        keepalive_count = snapshots[-3].count(b": slipstream-keepalive") + snapshots[-3].count(
+            b": slipstream-v2-keepalive"
+        )
+        self.assertGreaterEqual(keepalive_count, 3)
         self.assertNotIn(b"questions", snapshots[-3])
         self.assertEqual(
             json.loads(calls[0]["function"]["arguments"]), {"questions": ["a" * 24]}

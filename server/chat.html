@@ -168,8 +168,8 @@
   const apiKey = $('#api-key');
   const send = $('#send');
   const recents = $('#recents');
-  const storeKey = 'slipstream-v2-chats';
-  const effortKey = 'slipstream-v2-thinking-effort';
+  const storeKey = 'slipstream-chats';
+  const effortKey = 'slipstream-thinking-effort';
   const allowedEfforts = new Set([...effort.options].map(option => option.value));
   let conversations = load();
   let activeId = null;
@@ -177,7 +177,7 @@
   let attachments = [];
   let controller;
 
-  const savedEffort = storageGet(effortKey) || storageGet('slipstream-thinking-effort') || storageGet('splash-thinking-effort');
+  const savedEffort = storageGet(effortKey) || storageGet('slipstream-v2-thinking-effort') || storageGet('splash-thinking-effort');
   effort.value = allowedEfforts.has(savedEffort) ? savedEffort : 'xhigh';
 
   function storageGet(key) {
@@ -217,7 +217,7 @@
     try {
       const stored = JSON.parse(
         storageGet(storeKey) ||
-        storageGet('slipstream-chats') ||
+        storageGet('slipstream-v2-chats') ||
         storageGet('splash-chats')
       );
       if (!Array.isArray(stored)) return [];

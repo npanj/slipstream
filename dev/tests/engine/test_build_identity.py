@@ -262,7 +262,7 @@ class CompileConfigurationTests(unittest.TestCase):
                 return log.read_text().splitlines()
 
             outputs = (
-                "slipstream-v2",
+                "slipstream",
                 "engine-tests/qwen4exp-package",
                 "engine-tests/attention-sweep",
                 "engine-tests/metal-backend.metallib",
@@ -303,7 +303,7 @@ class CompileConfigurationTests(unittest.TestCase):
                                 str(build / "engine/libslipstream.a"), calls()[start:]
                             )
                             self.assertIn(
-                                str(build / "slipstream-v2.metallib"), calls()[start:]
+                                str(build / "slipstream.metallib"), calls()[start:]
                             )
                         if linked == targets[3]:
                             self.assertIn(
@@ -353,7 +353,7 @@ class CompileConfigurationTests(unittest.TestCase):
                 f"{name}={sys.executable} {compiler}"
                 for name in ("CXX", "METAL", "METALLIB", "AR")
             ]
-            library = str(build / "slipstream-v2.metallib")
+            library = str(build / "slipstream.metallib")
             attention = str(build / "engine-tests/q8-attention.metallib")
             native = str(build / "engine/engine/Status.o")
             unrelated = str(build / "engine-tests/metal-backend.metallib")

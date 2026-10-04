@@ -324,7 +324,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
                 "id": self.app.model,
                 "object": "model",
                 "created": 0,
-                "owned_by": "slipstream-v2",
+                "owned_by": "slipstream",
             }
             if path == "/v1/models":
                 self._json(200, {"object": "list", "data": [model]})
@@ -926,7 +926,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
         # transport progress. Long prefill and resource waits must not look
         # like dead connections to strict local-agent idle timers.
         self._start_event_stream()
-        self.wfile.write(b": slipstream-v2-keepalive\n\n")
+        self.wfile.write(b": slipstream-keepalive\n\n")
         self.wfile.flush()
         self._last_sse_write = time.monotonic()
 
@@ -1577,17 +1577,17 @@ def parse_args(argv=None):
     )
     parser.add_argument("--no-webui", action="store_true")
     parser.add_argument("--port", type=int, default=8000)
+    _bin = ROOT / "build" / "slipstream"
     _bin_v2 = ROOT / "build" / "slipstream-v2"
-    _bin_v1 = ROOT / "build" / "slipstream"
     _bin_splash = ROOT / "build" / "splash"
     _default_bin = (
-        _bin_v2
+        _bin
+        if _bin.exists()
+        else _bin_v2
         if _bin_v2.exists()
-        else _bin_v1
-        if _bin_v1.exists()
         else _bin_splash
         if _bin_splash.exists()
-        else _bin_v2
+        else _bin
     )
     parser.add_argument(
         "--binary",

@@ -215,7 +215,7 @@ class ServerAccessTests(unittest.TestCase):
                 self.assertIn("data", launcher._request_json("/v1/models"))
             with mock.patch.dict(os.environ, {"SPLASH_API_KEY": "incorrect"}):
                 with self.assertRaisesRegex(
-                    launcher.LauncherError, "SLIPSTREAM_V2_API_KEY"
+                    launcher.LauncherError, "SLIPSTREAM(_V2)?_API_KEY"
                 ):
                     launcher._request_json("/v1/models")
 
