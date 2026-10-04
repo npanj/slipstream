@@ -1,5 +1,17 @@
 # Decisions — qwen4exp port
 
+## 4-Pass Radix Block Selection in QSA (2026-10-04)
+
+- **Problem**: In `models/qwen4exp/kernels/qsa_select.metal`, `qsa_select_blocks` previously executed a 32-pass bitwise binary search (`for (int bit = 31; bit >= 0; --bit)`) requiring 64 threadgroup barriers per row. Furthermore, resolving ties at the threshold used a sequential loop `for (uint taken = 0; taken < ties_wanted; ++taken)` running a full reduction across all blocks for every single tie (up to 512 passes and 1,024 barriers on heavily tied scores, taking 3.52 ms).
+- **Solution (Borrowed & Adapted from Upstream PR #253)**:
+  - Replaced the 32-pass bit search with an **8-bit radix histogram selection** over four passes (`shift = 24, 16, 8, 0`) using 256 atomic bins in threadgroup memory.
+  - Replaced the sequential $O(\text{ties})$ reduction loop with **parallel chunk-wise prefix scans**, resolving all ties in parallel in ascending index order in at most $\lceil \text{blocks} / 1024 \rceil$ chunk passes.
+- **Measured Results**:
+  - All-equal scores (512 ties): latency dropped from **3,523.9 µs down to 779.1 µs** (**4.52x speedup**).
+  - Production shape (65,536 blocks, 512 budget): latency dropped from **776.3 µs down to 379.3 µs** (**2.05x speedup**).
+  - Preserved 100% exact numerical match and deterministic slot ordering across all test suites (`dev/tests/engine/qsa_select_metal_test.mm`).
+
+
 ## Canonical Naming Standardization to Slipstream (2026-10-04)
 
 - **Universal Naming**: Standardized the project and binary names universally from `slipstream-v2` and `splash` to canonical **Slipstream** (matching the GitHub repository `npanj/slipstream`).

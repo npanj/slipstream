@@ -226,3 +226,8 @@
   - [x] Standardized server internals: thread names, crash trace dumps, chat UI localStorage keys, model `"owned_by": "slipstream"`, keepalive string.
   - [x] Updated all test assertions across `dev/tests/test_server.py` and `dev/tests/engine/` (417/417 tests pass; 171/171 server tests pass; 21/21 CPU engine targets pass).
 
+## Upstream PR #253 Evaluation & High-Leverage Borrowing (2026-10-04)
+
+- [x] **Upstream Analysis**: Analyzed all 72 changed files (+4,673 lines) in Jan Hilgard's PR #253 (`incoai/splash#253`), identifying key architectural differences (PR #253 requires 118 GB unified memory for M3 Ultra, while Slipstream runs on 64 GB via SSD expert streaming).
+- [x] **4-Pass Radix Block Selection**: Replaced 32-pass bitwise search and sequential tie loop in `models/qwen4exp/kernels/qsa_select.metal` with 4-pass 8-bit radix histogram selection and parallel chunk-wise tie resolution. Benchmarked 4.52x speedup on heavy ties (779.1 µs vs 3,523.9 µs) and 2.05x speedup on production blocks (379.3 µs vs 776.3 µs).
+- [x] **Verification**: All 5 reference test cases pass exact match in `qsa-select`, all 21 CPU engine targets pass (`make test-engine-cpu`), and all 171 server tests pass (`test_server.py`).

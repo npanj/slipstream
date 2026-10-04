@@ -1,5 +1,14 @@
 # Journal — qwen4exp port
 
+## 2026-10-04 10:25 PDT — antigravity
+
+1. Evaluated upstream Splash PR #253 (`Add Qwen3.8-Flash-Next (qwen4exp) GGUF support with MTP drafting` by Jan Hilgard) across all 72 changed files.
+2. Borrowed the high-leverage 4-pass 8-bit radix histogram block selection algorithm and parallel chunk-wise tie resolution for `qsa_select_blocks` in `models/qwen4exp/kernels/qsa_select.metal`, replacing the previous 32-pass bitwise search and sequential tie loop.
+3. Benchmarked the new radix kernel against the original: achieved a 4.52x speedup on heavy ties (779.1 µs vs 3,523.9 µs) and a 2.05x speedup on 64k production blocks (379.3 µs vs 776.3 µs), with 100% exact numerical agreement and deterministic slot order across all test cases.
+4. Validated 100% green test passes across all suites: `qsa-select` passed, all 21 CPU engine targets passed (`make test-engine-cpu`), and all 171 server tests passed (`dev/tests/test_server.py`).
+Blocked on: nothing.
+
+
 ## 2026-10-04 09:55 PDT — antigravity
 
 1. Updated documentation across `README.md`, `docs/architecture.md`, and `docs/swift-v3-usage.md` to comprehensively cover both supported model families: Qwen3.8-Flash-Next V3 (125.7B MoE) and Qwen3.8-27B (Dense Hybrid).

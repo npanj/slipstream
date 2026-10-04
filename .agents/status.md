@@ -1,11 +1,11 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-04 09:55 PDT by antigravity.
-**Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`, synced with `origin/main`).
+**Updated:** 2026-10-04 10:25 PDT by antigravity.
+**Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`).
 
 ## In one line
 
-Standardized repository to canonical Slipstream, restored Flash-Next MTP speculative drafting, and updated documentation (`README.md`, `docs/architecture.md`, `docs/swift-v3-usage.md`) with comprehensive usage, serving commands, and selection guidance for both Qwen3.8-Flash-Next V3 (125.7B MoE) and Qwen3.8-27B (Dense Hybrid). All test suites pass 100% green.
+Evaluated upstream Splash PR #253, borrowed the high-leverage 4-pass radix block selection algorithm for QSA (`qsa_select_blocks`), speeding up sparse block selection by 4.52x on ties and 2.05x on 64k production blocks while preserving 100% test pass rates across all suites.
 
 ---
 
