@@ -8,9 +8,30 @@ from pathlib import Path
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEQUANT_SOURCE = Path(__file__).with_name("fast_dequant.c")
+# Base kernels plus the extended set (IQ2/IQ3/IQ4, Q2_0, Q5_K) for GGUF models
+# that mix in exotic quant types.
+DEQUANT_SOURCES = [
+    Path(__file__).with_name("fast_dequant.c"),
+    Path(__file__).with_name("fast_dequant_ext.c"),
+]
 DEQUANT_LIB = REPO_ROOT / "build/libslipstream-dequant.dylib"
-DEQUANT_TYPES = ("q4_0", "q4_1", "q5_0", "q8_0", "q4_K", "q6_K")
+DEQUANT_TYPES = (
+    "q4_0",
+    "q4_1",
+    "q5_0",
+    "q8_0",
+    "q4_K",
+    "q6_K",
+    "q5_K",
+    "iq2_xxs",
+    "iq2_xs",
+    "iq2_s",
+    "iq3_xxs",
+    "iq3_s",
+    "iq4_nl",
+    "iq4_xs",
+    "q2_0",
+)
 # ggml type id -> (elements per block, bytes per block)
 GGML_BLOCKS = {
     0: (1, 4),  # F32
@@ -20,16 +41,24 @@ GGML_BLOCKS = {
     6: (32, 22),  # Q5_0
     8: (32, 34),  # Q8_0
     12: (256, 144),  # Q4_K
+    13: (256, 176),  # Q5_K
     14: (256, 210),  # Q6_K
+    16: (256, 66),  # IQ2_XXS
+    17: (256, 74),  # IQ2_XS
+    18: (256, 98),  # IQ3_XXS
+    20: (32, 18),  # IQ4_NL
+    21: (256, 110),  # IQ3_S
+    22: (256, 82),  # IQ2_S
+    23: (256, 136),  # IQ4_XS
     30: (1, 2),  # BF16
+    42: (64, 18),  # Q2_0
 }
 
 
 def _build_dequant_lib():
-    """Compile fast_dequant.c into build/ when missing or older than the source."""
-    if (
-        DEQUANT_LIB.exists()
-        and DEQUANT_LIB.stat().st_mtime >= DEQUANT_SOURCE.stat().st_mtime
+    """Compile the dequant kernels into build/ when missing or older than the sources."""
+    if DEQUANT_LIB.exists() and all(
+        DEQUANT_LIB.stat().st_mtime >= src.stat().st_mtime for src in DEQUANT_SOURCES
     ):
         return DEQUANT_LIB
     DEQUANT_LIB.parent.mkdir(parents=True, exist_ok=True)
@@ -48,7 +77,7 @@ def _build_dequant_lib():
                 "-fPIC",
                 "-o",
                 tmp,
-                str(DEQUANT_SOURCE),
+                *[str(src) for src in DEQUANT_SOURCES],
             ],
             check=True,
         )
@@ -56,9 +85,9 @@ def _build_dequant_lib():
     except (OSError, subprocess.CalledProcessError) as error:
         os.unlink(tmp)
         raise RuntimeError(
-            f"Cannot build {DEQUANT_LIB} from {DEQUANT_SOURCE}: {error}. "
-            "Install the Xcode command line tools, or set SLIPSTREAM_GGML_LIB "
-            "to a libggml-base dylib."
+            f"Cannot build {DEQUANT_LIB} from {', '.join(str(s) for s in DEQUANT_SOURCES)}: "
+            f"{error}. Install the Xcode command line tools, or set "
+            "SLIPSTREAM_GGML_LIB to a libggml-base dylib."
         ) from None
     return DEQUANT_LIB
 
@@ -275,6 +304,33 @@ class MultiShardGgufReader:
         elif ttype == 14:  # Q6_K
             raw = fd.read(count // 256 * 210)
             DEQUANT["q6_K"](raw, ptr, count)
+        elif ttype == 13:  # Q5_K
+            raw = fd.read(count // 256 * 176)
+            DEQUANT["q5_K"](raw, ptr, count)
+        elif ttype == 16:  # IQ2_XXS
+            raw = fd.read(count // 256 * 66)
+            DEQUANT["iq2_xxs"](raw, ptr, count)
+        elif ttype == 17:  # IQ2_XS
+            raw = fd.read(count // 256 * 74)
+            DEQUANT["iq2_xs"](raw, ptr, count)
+        elif ttype == 18:  # IQ3_XXS
+            raw = fd.read(count // 256 * 98)
+            DEQUANT["iq3_xxs"](raw, ptr, count)
+        elif ttype == 20:  # IQ4_NL
+            raw = fd.read(count // 32 * 18)
+            DEQUANT["iq4_nl"](raw, ptr, count)
+        elif ttype == 21:  # IQ3_S
+            raw = fd.read(count // 256 * 110)
+            DEQUANT["iq3_s"](raw, ptr, count)
+        elif ttype == 22:  # IQ2_S
+            raw = fd.read(count // 256 * 82)
+            DEQUANT["iq2_s"](raw, ptr, count)
+        elif ttype == 23:  # IQ4_XS
+            raw = fd.read(count // 256 * 136)
+            DEQUANT["iq4_xs"](raw, ptr, count)
+        elif ttype == 42:  # Q2_0
+            raw = fd.read(count // 64 * 18)
+            DEQUANT["q2_0"](raw, ptr, count)
         else:
             raise ValueError(f"Unsupported ggml type {ttype} for tensor {name}")
 
