@@ -1,5 +1,13 @@
 # Decisions — qwen4exp port
 
+## Swift-Qwen3.8-27B Q4 GGUF & Multimodal Vision Architecture (2026-10-04)
+
+- **Context**: User requested "SWIFT Q4 GGUF image for QWen3,8-27B model" and clarified intent to enable multimodal image input processing for Qwen3.8-27B.
+- **Findings**:
+  - Upstream repo `ukisai/Swift-1.5-Qwen3.8-27B-GGUF` provides the 4-bit language model `Swift-1.5-Qwen3.8-27B-Q4_K_M.gguf` (16.24 GB) and the multimodal projection GGUF `mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf` (0.86 GB / 885 MiB).
+  - Slipstream's C++ inference engine was streamlined to text-only in commit `114d979` ("Slipstream phase 2: text only - remove vision end to end") to conserve memory for Flash-Next, rejecting image payloads with HTTP 400.
+  - Multimodal image processing is directly supported via `llama-server` using `--mmproj mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf -m Swift-1.5-Qwen3.8-27B-Q4_K_M.gguf`, or by restoring the 27-block Metal vision pipeline from `splash2` (`Vision.mm`, `vision.metal`, `server/images.py`) for models with a `vision/` directory.
+
 ## Layer-Ahead Prefill Prefetch & Lookahead Routing in Qwen4Exp (2026-10-04)
 
 - **Context**: During prompt prefill in `models/qwen4exp/Qwen4ExpTarget.cpp`, each layer L previously encoded MoE experts, ran `stepGraph` synchronously (`.wait()`), and then only issued an `adviseMissedExperts` hint (`fcntl(F_RDADVISE)`). When layer L+1 began, `encodeLayerExpertsByExpert` blocked sequentially on `pread` to load missed experts while the GPU sat idle for 70–80 ms per layer, limiting Flash-Next prefill throughput on SSD streaming Macs to ~207 tok/s.

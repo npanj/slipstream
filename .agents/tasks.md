@@ -71,6 +71,7 @@
 - [ ] Code-prompt drift: 79% same pick vs llama.cpp 89%
 - [ ] Short-prompt reading speed (87 vs ~110 tok/s)
 - [x] 27B 4-bit package prepared: Swift-Qwen3.8-27B converted to Splash format (local/Swift-Qwen3.8-27B, 16.9 GB)
+- [ ] Multimodal vision serving for Swift-Qwen3.8-27B (upstream GGUF: `ukisai/Swift-1.5-Qwen3.8-27B-GGUF` `Swift-1.5-Qwen3.8-27B-Q4_K_M.gguf` + `mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf`)
 
 ## Deferred by Nitin
 

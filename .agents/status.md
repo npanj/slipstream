@@ -1,11 +1,11 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-04 23:13 PDT by antigravity.
+**Updated:** 2026-10-04 23:45 PDT by antigravity.
 **Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`, app `npanj/slipstream-menubar` `v26.10.7`, tap `npanj/homebrew-tap`).
 
 ## In one line
 
-Resolved Flash-Next (`swift-qwen38-flash-next-v3`) memory audit failure (`runtime_reserve_exceeded`) by accounting for the MTP draft head's streaming expert cache in `expertCacheActualAllocatedBytes()`. Server starts up cleanly via the macOS menu bar app to Ready status on port 8090. All 20 CPU engine test suites and 171 Python server tests pass 100% green.
+Resolved Flash-Next (`swift-qwen38-flash-next-v3`) memory audit failure (`runtime_reserve_exceeded`) by accounting for the MTP draft head's streaming expert cache in `expertCacheActualAllocatedBytes()`. Identified upstream 4-bit GGUF (`Swift-1.5-Qwen3.8-27B-Q4_K_M.gguf`, 16.24 GB) and vision projector (`mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf`, 0.86 GB) for Swift 27B multimodal processing. All 20 CPU engine test suites and 171 Python server tests pass 100% green.
 
 
 ---

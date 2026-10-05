@@ -1,5 +1,11 @@
 # Journal — qwen4exp port
 
+## 2026-10-04 23:45 PDT — antigravity
+1. Diagnosed user request for "SWIFT Q4 GGUF image for QWen3.8-27B": identified the exact upstream artifacts in `ukisai/Swift-1.5-Qwen3.8-27B-GGUF` on Hugging Face: `Swift-1.5-Qwen3.8-27B-Q4_K_M.gguf` (16.24 GB) and multimodal projector `mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf` (0.86 GB / 885 MiB).
+2. Clarified user intent via interactive prompt: user confirmed requirement for multimodal vision/image input processing for Qwen3.8-27B.
+3. Audited engine multimodal capability: Slipstream was streamlined to text-only in commit `114d979` for Flash-Next efficiency (rejecting images with HTTP 400). Multimodal image processing is natively supported via `llama-server` with `--mmproj`, or by restoring the 27-block vision tower from `splash2` (`Vision.mm`, `vision.metal`, `server/images.py`).
+Blocked on: user confirmation on download & serving path (llama-server vs native Slipstream vision port).
+
 ## 2026-10-04 15:45 PDT — antigravity
 
 1. Implemented Layer-Ahead Prefill Prefetch in `models/qwen4exp/Qwen4ExpTarget.cpp` to eliminate prefill GPU idle bubbles during prompt evaluation.
