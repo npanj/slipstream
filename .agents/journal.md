@@ -507,3 +507,8 @@ Blocked on: nothing.
 ## 2026-10-04 20:29 PDT — antigravity
 Restructured Slipstream Quickstart documentation into two clearly demarcated tracks: Pathway 1 (All-in-One Mac App with GUI + CLI via `brew install --cask npanj/tap/slipstream`) and Pathway 2 (CLI Only for terminal, headless, and server users via Homebrew, one-line curl, or source build).
 Blocked on: nothing.
+
+## 2026-10-04 20:47 PDT — antigravity
+Renamed application to "Slipstream" (`Slipstream.app`) across codebase and build artifacts. Tagged and released `v26.10.7` on GitHub. Resolved Gatekeeper malware warning on local system by clearing `com.apple.quarantine`, and updated Homebrew tap casks with declarative `postflight_steps` to automatically strip quarantine for all users on install. Verified 100% clean `brew audit` on formula and casks.
+Blocked on: nothing.
+

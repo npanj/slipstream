@@ -689,3 +689,16 @@ To create a Swift version of Nitin's V3 model (`Swift-Qwen3.8-Flash-Next-V3`) de
    - Users can install the GUI menubar app with `brew install --cask npanj/tap/slipstream-menubar`.
    - Users can install the engine CLI with `brew install npanj/tap/slipstream`.
    - Zero external maintainer approval bottleneck; instant updates upon GitHub release tagging.
+
+## 2026-10-04 — Application Renaming to "Slipstream" & Gatekeeper Quarantine Automation
+
+1. **Renaming to "Slipstream" (`Slipstream.app`)**:
+   - Renamed user-facing and application bundle identity from "Slipstream Menubar" to simply "Slipstream" (`Slipstream.app`).
+   - Cleaned up build targets, packaging scripts, and plist identifiers across `npanj/slipstream-menubar`.
+2. **Gatekeeper Unverified Malware Warning Resolution**:
+   - Cause: macOS Gatekeeper marks files downloaded via browsers/curl/Homebrew with extended attribute `com.apple.quarantine`. When code is signed ad-hoc rather than with a paid Apple Developer certificate ($99/yr), macOS blocks execution with an unverified malware dialogue.
+   - Solution:
+     - For local installs: cleared attribute via `xattr -dr com.apple.quarantine "/Applications/Slipstream.app"`.
+     - For Homebrew Cask installs: embedded declarative `postflight_steps` executing `run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "Slipstream.app"], base: :appdir, must_succeed: false` in both `Casks/slipstream.rb` and `Casks/slipstream-menubar.rb`.
+     - Homebrew will now strip the quarantine attribute automatically during installation, allowing the app to open without Gatekeeper blocks.
+

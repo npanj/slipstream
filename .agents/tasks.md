@@ -256,3 +256,9 @@
 - [x] **Formula Definition**: Added `Formula/slipstream.rb` for `v26.10.4` with automated unzipping, libexec placement, and symlinking to `bin/slipstream`.
 - [x] **Local Validation**: Tapped locally via `brew tap npanj/tap`, verified clean `brew info` (0 warnings, 0 errors), and verified checksum extraction with `brew fetch`.
 - [x] **Documentation**: Added Homebrew installation instructions to `npanj/slipstream/README.md`, `npanj/slipstream-menubar/README.md`, and `npanj/homebrew-tap/README.md`.
+- [x] **Slipstream App Rename & Gatekeeper Quarantine Resolution**:
+  - [x] Renamed application from "Slipstream Menubar" to "Slipstream" (`Slipstream.app`) across Makefile, build scripts, Info.plist, Swift codebase, and install scripts.
+  - [x] Resolved macOS Gatekeeper unverified malware warning by stripping `com.apple.quarantine` on local install and embedding `postflight_steps` with `xattr -dr com.apple.quarantine` in Homebrew casks.
+  - [x] Tagged and released `v26.10.7` on GitHub (`npanj/slipstream-menubar`) with DMG and ZIP artifacts.
+  - [x] Updated Homebrew tap (`npanj/homebrew-tap`) to `v26.10.7` with 100% clean `brew audit` (0 errors, 0 warnings).
+

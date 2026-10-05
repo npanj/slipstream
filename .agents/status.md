@@ -1,11 +1,12 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-04 20:29 PDT by antigravity.
-**Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`, menubar `npanj/slipstream-menubar`, tap `npanj/homebrew-tap`).
+**Updated:** 2026-10-04 20:48 PDT by antigravity.
+**Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`, app `npanj/slipstream-menubar` `v26.10.7`, tap `npanj/homebrew-tap`).
 
 ## In one line
 
-Configured unified Homebrew command `brew install --cask npanj/tap/slipstream` that automatically installs both the macOS Menu Bar App and the Slipstream CLI inference engine in a single command.
+Renamed application to "Slipstream" (`Slipstream.app`), resolved macOS Gatekeeper quarantine warning via automated Homebrew Cask postflight steps, and published release `v26.10.7`.
+
 
 ---
 
