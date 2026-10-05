@@ -497,3 +497,8 @@ Blocked on: nothing.
 ## 2026-10-04 20:23 PDT — antigravity
 Created and published official Homebrew tap at `npanj/homebrew-tap` with formulas for both `slipstream` CLI (release `v26.10.4`) and `slipstream-menubar` Cask (release `v26.10.6`). Verified clean local tap integration (`brew tap npanj/tap`), clean audit with zero errors, and successful checksum verification across both artifacts (`brew fetch`). Updated documentation across both repositories with Homebrew installation one-liners.
 Blocked on: nothing.
+
+
+## 2026-10-04 20:28 PDT — antigravity
+Added unified `Casks/slipstream.rb` with automatic formula dependency on `npanj/tap/slipstream`. Now running a single command `brew install --cask npanj/tap/slipstream` automatically installs both the macOS menu bar app into `/Applications` and the CLI engine onto `PATH`. Tested and verified dependency tree via `brew info --cask` and updated documentation across all repositories.
+Blocked on: nothing.

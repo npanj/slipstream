@@ -1,21 +1,21 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-04 20:23 PDT by antigravity.
+**Updated:** 2026-10-04 20:28 PDT by antigravity.
 **Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`, menubar `npanj/slipstream-menubar`, tap `npanj/homebrew-tap`).
 
 ## In one line
 
-Published official Homebrew Tap (`npanj/homebrew-tap`) enabling instant install of `slipstream-menubar` (Cask) and `slipstream` CLI (Formula) via `brew install`.
+Configured unified Homebrew command `brew install --cask npanj/tap/slipstream` that automatically installs both the macOS Menu Bar App and the Slipstream CLI inference engine in a single command.
 
 ---
 
 ## How to use it
 
 ```zsh
-# Install native macOS Menu Bar App with Homebrew:
-brew install --cask npanj/tap/slipstream-menubar
+# Single command to install BOTH Menu Bar App & CLI Engine:
+brew install --cask npanj/tap/slipstream
 
-# Install Slipstream CLI with Homebrew:
+# Install Slipstream CLI only:
 brew install npanj/tap/slipstream
 
 # Or one-line curl install of prebuilt binary:
