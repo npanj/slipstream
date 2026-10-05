@@ -282,4 +282,11 @@
   - [x] Recompiled release binary, installed to `/Applications/Slipstream.app`, stripped quarantine, and launched.
   - [x] Committed and pushed changes to `origin/main` in `npanj/slipstream-menubar`.
 
+## Flash-Next Memory Audit Error Resolution (2026-10-04)
+
+- [x] **Root Cause Diagnosis**: Traced startup failure of `swift-qwen38-flash-next-v3` in `~/Library/Logs/Slipstream/server.log` to `RuntimeBootstrapStage::MemoryAudit` (`runtime_reserve_exceeded`). The MTP draft head's expert cache (796,262,400 bytes for layer 48) was allocated by `loadQwen4ExpWeights()` but omitted from `Qwen4ExpWeights::expertCacheActualAllocatedBytes()`.
+- [x] **Audit Accounting Fix**: Added `if (mtpLayer)` block in `expertCacheActualAllocatedBytes()` (`models/qwen4exp/Qwen4Exp.hpp`) and in `evictStreamingExperts()` (`models/qwen4exp/Qwen4Exp.cpp`).
+- [x] **Build & Test Fix**: Added `runtime/ops/PromptLookup.cpp` to `MODEL_OPERATOR_SOURCES` in `dev/native.mk`.
+- [x] **Verification**: All 20 CPU engine test suites pass (`make test-engine-cpu`), all 171 Python server tests pass (`dev/tests/test_server.py`), and live server bootstraps to Ready state (`/health` and `/ready` return 200 OK) on port 8090. Server left stopped per invariants ready for menu bar launch.
+
 

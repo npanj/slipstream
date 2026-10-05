@@ -1,11 +1,11 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-04 21:15 PDT by antigravity.
+**Updated:** 2026-10-04 23:13 PDT by antigravity.
 **Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`, app `npanj/slipstream-menubar` `v26.10.7`, tap `npanj/homebrew-tap`).
 
 ## In one line
 
-Configured running `Slipstream.app` to point directly to the local developer workspace with checkout mode (`useCheckout: true`), implemented dynamic local model discovery (`~/models`), and integrated a macOS menu bar `Model` switcher for one-click model swapping and server controls.
+Resolved Flash-Next (`swift-qwen38-flash-next-v3`) memory audit failure (`runtime_reserve_exceeded`) by accounting for the MTP draft head's streaming expert cache in `expertCacheActualAllocatedBytes()`. Server starts up cleanly via the macOS menu bar app to Ready status on port 8090. All 20 CPU engine test suites and 171 Python server tests pass 100% green.
 
 
 ---

@@ -714,3 +714,18 @@ To create a Swift version of Nitin's V3 model (`Swift-Qwen3.8-Flash-Next-V3`) de
    - Added `Model` submenu directly to the macOS status item menu, showing all local models (`Swift-Qwen3.8-Flash-Next V3`, `Qwen3.8-Flash-Next V3`, `Swift-Qwen3.8-27B-Splash-HQ`) with checkmark state.
    - Selecting a model updates `menubar.json` and automatically restarts active servers or prepares the engine for the next launch.
    - Enhanced `ServerProcessInspector` to detect servers launched via `-m server.server` and active listening sockets via `lsof`.
+
+
+## 2026-10-04 — Flash-Next MTP Expert Cache Audit Accounting & Test Linkage
+
+1. **Root Cause of Memory Audit Failure**:
+   - Starting `swift-qwen38-flash-next-v3` failed at `RuntimeBootstrapStage::MemoryAudit` with error `runtime_reserve_exceeded`.
+   - The memory audit checks that unclassified allocations (`backend_allocated - categorized + device_untracked`) do not exceed the explicit pipeline and runtime reserves (1,073,741,824 bytes = 1.0 GiB).
+   - In `models/qwen4exp/Qwen4Exp.hpp`, `Qwen4ExpWeights::expertCacheActualAllocatedBytes()` only summed expert caches across `layers` (48 layers).
+   - When the MTP draft head is present (`result.mtpLayer`), `loadQwen4ExpWeights()` allocates an extra expert cache for layer 48 (`mtpLayer->expertCache`, 796,262,400 bytes).
+   - Because `mtpLayer->expertCache` was omitted from `expertCacheActualAllocatedBytes()`, it was excluded from `actual.streamCacheBytes` and leaked into `backendUnclassified` (totaling 1,104,691,584 bytes), exceeding the 1.0 GiB reserve by ~30.9 MB.
+2. **Resolution & Prevention**:
+   - Added `if (mtpLayer)` block in `expertCacheActualAllocatedBytes()` to count `mtpLayer->expertCache.cacheGate`, `cacheUp`, and `cacheDown`.
+   - Added `if (mtpLayer)` block in `evictStreamingExperts()` to advise kernel `MADV_DONTNEED` on MTP streaming experts during eviction.
+   - Added missing `PromptLookup.cpp` dependency to `MODEL_OPERATOR_SOURCES` in `dev/native.mk`.
+   - Verified that live server bootstraps cleanly to Ready state on port 8090, passing all memory audits and health checks.

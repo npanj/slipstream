@@ -408,6 +408,11 @@ struct Qwen4ExpWeights final {
       total += layer.expertCache.cacheUp.sizeBytes();
       total += layer.expertCache.cacheDown.sizeBytes();
     }
+    if (mtpLayer) {
+      total += mtpLayer->expertCache.cacheGate.sizeBytes();
+      total += mtpLayer->expertCache.cacheUp.sizeBytes();
+      total += mtpLayer->expertCache.cacheDown.sizeBytes();
+    }
     return total;
   }
 };

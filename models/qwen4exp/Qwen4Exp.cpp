@@ -781,6 +781,18 @@ void Qwen4ExpWeights::evictStreamingExperts() const noexcept {
       madvise(ptr, ffn.expertDown.packed.sizeBytes(), MADV_DONTNEED);
     }
   }
+  if (mtpLayer && residentLayers <= layers.size()) {
+    const auto &ffn = mtpLayer->ffn;
+    if (void *ptr = ffn.expertGate.packed.contents()) {
+      madvise(ptr, ffn.expertGate.packed.sizeBytes(), MADV_DONTNEED);
+    }
+    if (void *ptr = ffn.expertUp.packed.contents()) {
+      madvise(ptr, ffn.expertUp.packed.sizeBytes(), MADV_DONTNEED);
+    }
+    if (void *ptr = ffn.expertDown.packed.contents()) {
+      madvise(ptr, ffn.expertDown.packed.sizeBytes(), MADV_DONTNEED);
+    }
+  }
 }
 
 } // namespace splash::model

@@ -22,7 +22,14 @@ import subprocess
 import sys
 import time
 
-ENGINE_PROGRAMS = {"generate-sample", "splash", "llama-server", "splash-q8"}
+ENGINE_PROGRAMS = {
+    "generate-sample",
+    "splash",
+    "slipstream",
+    "slipstream-v2",
+    "llama-server",
+    "splash-q8",
+}
 
 
 def other_engines():
