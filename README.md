@@ -42,9 +42,9 @@ Use [**Slipstream Menubar**](https://github.com/npanj/slipstream-menubar), creat
 - **Live HUD Stats Panel:** Floating dashboard graphing token speeds, TTFT, speculative draft acceptance rate, KV cache pressure, and Mac GPU/memory utilization.
 - **Zero configuration friction:** Automatically configures `--port`, raises macOS GPU wired memory limits on 64 GB Macs, and prepares models in place.
 
-Install the menu bar app via Homebrew:
+Install both the Menu Bar App and CLI Engine in one command:
 ```zsh
-brew install --cask npanj/tap/slipstream-menubar
+brew install --cask npanj/tap/slipstream
 ```
 *(Or install via script: `curl -fsSL https://github.com/npanj/slipstream-menubar/raw/main/install.sh | sh`, or download the `.dmg` from [Slipstream Menubar Releases](https://github.com/npanj/slipstream-menubar/releases/latest).)*
 
