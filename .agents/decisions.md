@@ -677,3 +677,15 @@ To create a Swift version of Nitin's V3 model (`Swift-Qwen3.8-Flash-Next-V3`) de
    - Set `defaultReleaseRepository` to `npanj/slipstream`.
    - Set app update repository to `npanj/slipstream-menubar`.
    - Configured official model defaults to `nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF` and `nitinpanj/qwen38-flash-next-v3`.
+
+
+## 2026-10-04 — Official Homebrew Tap Creation (`npanj/homebrew-tap`)
+
+1. **Tap Architecture**:
+   - Repository: `https://github.com/npanj/homebrew-tap`.
+   - Distributes `Formula/slipstream.rb` for the inference engine CLI and `Casks/slipstream-menubar.rb` for the macOS GUI app.
+   - Enforces `depends_on arch: :arm64` and `depends_on macos: :sequoia`.
+2. **Installation Simplicity**:
+   - Users can install the GUI menubar app with `brew install --cask npanj/tap/slipstream-menubar`.
+   - Users can install the engine CLI with `brew install npanj/tap/slipstream`.
+   - Zero external maintainer approval bottleneck; instant updates upon GitHub release tagging.

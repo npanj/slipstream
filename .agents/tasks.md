@@ -248,3 +248,11 @@
 - [x] **Configuration Alignment**: Pointed `defaultReleaseRepository` to `npanj/slipstream`, app update check to `npanj/slipstream-menubar`, and default models to `nitinpanj/*`.
 - [x] **Release Packaging**: Tagged and pushed `v26.10.6` to trigger GitHub Actions automated packaging of `.dmg`, `.zip`, checksums, and `install.sh`.
 - [x] **Slipstream Main Documentation**: Updated `npanj/slipstream/README.md` with a prominent "macOS Menu Bar App (GUI)" section with one-line install and creator credits.
+
+## Official Homebrew Tap Creation & Validation (2026-10-04)
+
+- [x] **Repository Creation**: Created public repository `npanj/homebrew-tap` configured with Homebrew formula and cask standards.
+- [x] **Cask Definition**: Added `Casks/slipstream-menubar.rb` for `v26.10.6` with SHA256 checksum and macOS Sequoia ARM64 constraints.
+- [x] **Formula Definition**: Added `Formula/slipstream.rb` for `v26.10.4` with automated unzipping, libexec placement, and symlinking to `bin/slipstream`.
+- [x] **Local Validation**: Tapped locally via `brew tap npanj/tap`, verified clean `brew info` (0 warnings, 0 errors), and verified checksum extraction with `brew fetch`.
+- [x] **Documentation**: Added Homebrew installation instructions to `npanj/slipstream/README.md`, `npanj/slipstream-menubar/README.md`, and `npanj/homebrew-tap/README.md`.

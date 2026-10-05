@@ -1,20 +1,24 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-04 19:48 PDT by antigravity.
-**Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`, menubar `npanj/slipstream-menubar`).
+**Updated:** 2026-10-04 20:23 PDT by antigravity.
+**Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`, menubar `npanj/slipstream-menubar`, tap `npanj/homebrew-tap`).
 
 ## In one line
 
-Adopted and published native macOS GUI companion repository `npanj/slipstream-menubar` (original creator & co-author Mike Zinner) with 92 passing tests, local ad-hoc build, and GitHub release `v26.10.6`; updated Slipstream README and credits.
+Published official Homebrew Tap (`npanj/homebrew-tap`) enabling instant install of `slipstream-menubar` (Cask) and `slipstream` CLI (Formula) via `brew install`.
 
 ---
 
 ## How to use it
 
 ```zsh
-# One-line install of native macOS Menu Bar App:
-curl -fsSL https://github.com/npanj/slipstream-menubar/raw/main/install.sh | sh
-# One-line install of prebuilt binary:
+# Install native macOS Menu Bar App with Homebrew:
+brew install --cask npanj/tap/slipstream-menubar
+
+# Install Slipstream CLI with Homebrew:
+brew install npanj/tap/slipstream
+
+# Or one-line curl install of prebuilt binary:
 curl -fsSL https://raw.githubusercontent.com/npanj/slipstream/main/install.sh | sh
 
 # Serve Swift-Qwen3.8-Flash-Next-V3 (local directory or Hugging Face repo):

@@ -492,3 +492,8 @@ Blocked on: nothing.
 ## 2026-10-04 19:48 PDT — antigravity
 Audited and adopted Mike Zinner's native macOS menu bar app (`mzinner/slipstream-menubar-item`) as a standalone companion repository at `npanj/slipstream-menubar`. Re-pointed default release and model paths to `npanj/slipstream` and `nitinpanj/*`, verified all 92 unit tests pass, and verified clean local `.app` compilation and code signing. Published official repository with full commit history preserving Mike Zinner as creator and co-author, tagged `v26.10.6` triggering GitHub Actions release packaging, and updated Slipstream README with install one-liners and credits.
 Blocked on: nothing.
+
+
+## 2026-10-04 20:23 PDT — antigravity
+Created and published official Homebrew tap at `npanj/homebrew-tap` with formulas for both `slipstream` CLI (release `v26.10.4`) and `slipstream-menubar` Cask (release `v26.10.6`). Verified clean local tap integration (`brew tap npanj/tap`), clean audit with zero errors, and successful checksum verification across both artifacts (`brew fetch`). Updated documentation across both repositories with Homebrew installation one-liners.
+Blocked on: nothing.
