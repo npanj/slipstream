@@ -32,24 +32,6 @@ Everything is open source under Apache-2.0.
 
 ## Quickstart (Step-by-Step)
 
-### macOS Menu Bar App (GUI)
-
-Prefer a native Mac app instead of Terminal commands?
-Use [**Slipstream Menubar**](https://github.com/npanj/slipstream-menubar), created and co-authored by **Mike Zinner** ([@mzinner](https://github.com/mzinner)):
-
-- **One-click server control:** Start, stop, and switch models directly from the macOS menu bar.
-- **Glanceable speed:** Displays real-time prompt (`↓`) and generation (`↑`) tokens/second in the menu bar.
-- **Live HUD Stats Panel:** Floating dashboard graphing token speeds, TTFT, speculative draft acceptance rate, KV cache pressure, and Mac GPU/memory utilization.
-- **Zero configuration friction:** Automatically configures `--port`, raises macOS GPU wired memory limits on 64 GB Macs, and prepares models in place.
-
-Install both the Menu Bar App and CLI Engine in one command:
-```zsh
-brew install --cask npanj/tap/slipstream
-```
-*(Or install via script: `curl -fsSL https://github.com/npanj/slipstream-menubar/raw/main/install.sh | sh`, or download the `.dmg` from [Slipstream Menubar Releases](https://github.com/npanj/slipstream-menubar/releases/latest).)*
-
----
-
 ### Prerequisites
 - **Hardware:**
   - **Flash-Next V3 (125.7B MoE):** Apple Silicon Mac with **64 GB Unified Memory** (M2/M3/M4/M5 Pro/Max).
@@ -63,26 +45,42 @@ brew install --cask npanj/tap/slipstream
 
 ### Step 1: Install Slipstream
 
-You can install Slipstream directly without compiling, or build from source:
+Choose the install method that matches your setup:
 
-#### Option A: Homebrew or One-Line Install (Recommended — No compilation required)
+#### Pathway 1: All-in-One Mac App (Menu Bar + CLI)
 
-Install via Homebrew:
+Prefer a native Mac app with a live performance HUD and menu bar speed gauges?
+Use [**Slipstream Menubar**](https://github.com/npanj/slipstream-menubar), created and co-authored by **Mike Zinner** ([@mzinner](https://github.com/mzinner)):
+
+- **One-click server control:** Start, stop, and switch models directly from the macOS menu bar.
+- **Glanceable speed:** Displays real-time prompt (`↓`) and generation (`↑`) tokens/second in the menu bar.
+- **Live HUD Stats Panel:** Floating dashboard graphing token speeds, TTFT, speculative draft acceptance rate, KV cache pressure, and Mac GPU/memory utilization.
+- **Zero configuration friction:** Automatically configures `--port`, raises macOS GPU wired memory limits on 64 GB Macs, and prepares models in place.
+
+**Install both the Menu Bar App and CLI in one command:**
+```zsh
+brew install --cask npanj/tap/slipstream
+```
+*(Or install via script: `curl -fsSL https://github.com/npanj/slipstream-menubar/raw/main/install.sh | sh`, or download the `.dmg` from [Slipstream Menubar Releases](https://github.com/npanj/slipstream-menubar/releases/latest).)*
+
+---
+
+#### Pathway 2: CLI Only (Headless / Terminal / Server)
+
+If you only want the command-line inference engine without the GUI:
+
+**Option A: Install via Homebrew**
 ```zsh
 brew install npanj/tap/slipstream
 ```
 
-Or install via one-line curl script:
+**Option B: Install via one-line curl script**
 ```zsh
 curl -fsSL https://raw.githubusercontent.com/npanj/slipstream/main/install.sh | sh
 ```
-
 *This automatically detects your Apple Silicon Mac, downloads the latest prebuilt release binary, verifies its SHA256 checksum, unpacks into `~/.local/share/slipstream/`, and links `slipstream` into `~/.local/bin`.*
 
-You can also download `slipstream-<version>-macos26-arm-64bit.zip` directly from [GitHub Releases](https://github.com/npanj/slipstream/releases/latest).
-
-#### Option B: Build from source
-
+**Option C: Build from source**
 ```zsh
 git clone https://github.com/npanj/slipstream.git
 cd slipstream
