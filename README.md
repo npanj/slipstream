@@ -32,6 +32,24 @@ Everything is open source under Apache-2.0.
 
 ## Quickstart (Step-by-Step)
 
+### macOS Menu Bar App (GUI)
+
+Prefer a native Mac app instead of Terminal commands?
+Use [**Slipstream Menubar**](https://github.com/npanj/slipstream-menubar), created and co-authored by **Mike Zinner** ([@mzinner](https://github.com/mzinner)):
+
+- **One-click server control:** Start, stop, and switch models directly from the macOS menu bar.
+- **Glanceable speed:** Displays real-time prompt (`↓`) and generation (`↑`) tokens/second in the menu bar.
+- **Live HUD Stats Panel:** Floating dashboard graphing token speeds, TTFT, speculative draft acceptance rate, KV cache pressure, and Mac GPU/memory utilization.
+- **Zero configuration friction:** Automatically configures `--port`, raises macOS GPU wired memory limits on 64 GB Macs, and prepares models in place.
+
+Install the menu bar app in one line:
+```zsh
+curl -fsSL https://github.com/npanj/slipstream-menubar/raw/main/install.sh | sh
+```
+*(Or download the `.dmg` from [Slipstream Menubar Releases](https://github.com/npanj/slipstream-menubar/releases/latest).)*
+
+---
+
 ### Prerequisites
 - **Hardware:**
   - **Flash-Next V3 (125.7B MoE):** Apple Silicon Mac with **64 GB Unified Memory** (M2/M3/M4/M5 Pro/Max).
@@ -324,6 +342,7 @@ The core primitives implemented in Slipstream:
 
 ## Credits & Acknowledgments
 
+- **Mike Zinner** ([@mzinner](https://github.com/mzinner)): Creator and co-author of [Slipstream Menubar](https://github.com/npanj/slipstream-menubar), the official native macOS menu bar app for running, configuring, and monitoring Slipstream.
 - **Splash Team (Incoai)**: Full credit to the creators of Splash ([github.com/incoai/splash](https://github.com/incoai/splash)). Their C++ Metal speculative decoding design and memory architecture provided the foundation for this work. We will prepare a clean PR/patch proposing these Flash-Next and SSD streaming extensions to the Splash upstream repo.
 - **ds4 Team**: For their valuable insights on Metal router numerical precision (Taylor polynomial softplus expansion) and streaming scheduling designs.
 - **Qwen Team**: For training Qwen3.8-Flash-Next and open-sourcing the hybrid linear MTP architecture.
