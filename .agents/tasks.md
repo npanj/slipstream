@@ -262,3 +262,24 @@
   - [x] Tagged and released `v26.10.7` on GitHub (`npanj/slipstream-menubar`) with DMG and ZIP artifacts.
   - [x] Updated Homebrew tap (`npanj/homebrew-tap`) to `v26.10.7` with 100% clean `brew audit` (0 errors, 0 warnings).
 
+## Developer Checkout Mode & Local Model Discovery (2026-10-04)
+
+- [x] **Developer Checkout Configuration**:
+  - [x] Configured `menubar.json` with `useCheckout: true` pointing to `/Users/nitin/Documents/shared-with-google-drive/model-serving/slipstream`.
+  - [x] Verified `Slipstream.app` runs directly through local `./slipstream` launcher, enabling real-time local testing of C++, Metal, and Python modifications.
+- [x] **Dynamic Local Model Discovery**:
+  - [x] Implemented `LocalModelScanner.scan()` in `ModelSetup.swift` detecting local models in `~/models` and `~/.slipstream/models`.
+  - [x] Fixed `ModelSpec.folderURL` to preserve absolute and tilde paths instead of incorrectly appending `ModelStore.root`.
+  - [x] Added unit tests `testLocalModelFolderURL` and `testLocalModelScanner` in `CoreTests.swift` (94/94 tests pass).
+- [x] **macOS Menu Bar Model Switcher**:
+  - [x] Added dynamic `Model` submenu directly in the status item menu, listing all scanned local models (`Swift-Qwen3.8-Flash-Next V3`, `Qwen3.8-Flash-Next V3`, `Swift-Qwen3.8-27B-Splash-HQ`) with live checkmarks.
+  - [x] Added "Choose Folder…" open panel dialog for ad-hoc custom model directories.
+  - [x] Wired seamless model switching: updates configuration and automatically stops and restarts active server with the new model.
+- [x] **Server Process Detection Hardening**:
+  - [x] Enhanced `ServerProcessInspector.isSlipstreamServer` to recognize processes started with `-m server.server`.
+  - [x] Added fallback TCP socket listener check via `lsof -ti :<port> -sTCP:LISTEN` for robust status detection across all launch mechanisms.
+- [x] **Deployment**:
+  - [x] Recompiled release binary, installed to `/Applications/Slipstream.app`, stripped quarantine, and launched.
+  - [x] Committed and pushed changes to `origin/main` in `npanj/slipstream-menubar`.
+
+

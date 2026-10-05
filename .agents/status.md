@@ -1,11 +1,11 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-04 20:48 PDT by antigravity.
+**Updated:** 2026-10-04 21:15 PDT by antigravity.
 **Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`, app `npanj/slipstream-menubar` `v26.10.7`, tap `npanj/homebrew-tap`).
 
 ## In one line
 
-Renamed application to "Slipstream" (`Slipstream.app`), resolved macOS Gatekeeper quarantine warning via automated Homebrew Cask postflight steps, and published release `v26.10.7`.
+Configured running `Slipstream.app` to point directly to the local developer workspace with checkout mode (`useCheckout: true`), implemented dynamic local model discovery (`~/models`), and integrated a macOS menu bar `Model` switcher for one-click model swapping and server controls.
 
 
 ---

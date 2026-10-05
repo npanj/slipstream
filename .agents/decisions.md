@@ -702,3 +702,15 @@ To create a Swift version of Nitin's V3 model (`Swift-Qwen3.8-Flash-Next-V3`) de
      - For Homebrew Cask installs: embedded declarative `postflight_steps` executing `run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "Slipstream.app"], base: :appdir, must_succeed: false` in both `Casks/slipstream.rb` and `Casks/slipstream-menubar.rb`.
      - Homebrew will now strip the quarantine attribute automatically during installation, allowing the app to open without Gatekeeper blocks.
 
+## 2026-10-04 — Developer Workspace Integration & Dynamic Local Model Discovery
+
+1. **Source Checkout Mode Integration**:
+   - Configured `menubar.json` with `useCheckout: true` pointing to local developer workspace `/Users/nitin/Documents/shared-with-google-drive/model-serving/slipstream`.
+   - Starts and stops run through the developer `slipstream` launcher, immediately executing local code iterations (Metal shaders, C++ engine, Python server).
+2. **Dynamic Local Model Discovery**:
+   - Implemented `LocalModelScanner.scan()` in `ModelSetup.swift` to scan standard model roots (`~/models` and `~/.slipstream/models`) for valid models (`manifest.json`, `prepared/manifest.json`, and `.gguf`).
+   - Fixed `ModelSpec.folderURL` to preserve absolute / tilde paths rather than prepending `ModelStore.root`.
+3. **Interactive Menu Bar Model Switcher**:
+   - Added `Model` submenu directly to the macOS status item menu, showing all local models (`Swift-Qwen3.8-Flash-Next V3`, `Qwen3.8-Flash-Next V3`, `Swift-Qwen3.8-27B-Splash-HQ`) with checkmark state.
+   - Selecting a model updates `menubar.json` and automatically restarts active servers or prepares the engine for the next launch.
+   - Enhanced `ServerProcessInspector` to detect servers launched via `-m server.server` and active listening sockets via `lsof`.
