@@ -42,11 +42,11 @@ Use [**Slipstream Menubar**](https://github.com/npanj/slipstream-menubar), creat
 - **Live HUD Stats Panel:** Floating dashboard graphing token speeds, TTFT, speculative draft acceptance rate, KV cache pressure, and Mac GPU/memory utilization.
 - **Zero configuration friction:** Automatically configures `--port`, raises macOS GPU wired memory limits on 64 GB Macs, and prepares models in place.
 
-Install the menu bar app in one line:
+Install the menu bar app via Homebrew:
 ```zsh
-curl -fsSL https://github.com/npanj/slipstream-menubar/raw/main/install.sh | sh
+brew install --cask npanj/tap/slipstream-menubar
 ```
-*(Or download the `.dmg` from [Slipstream Menubar Releases](https://github.com/npanj/slipstream-menubar/releases/latest).)*
+*(Or install via script: `curl -fsSL https://github.com/npanj/slipstream-menubar/raw/main/install.sh | sh`, or download the `.dmg` from [Slipstream Menubar Releases](https://github.com/npanj/slipstream-menubar/releases/latest).)*
 
 ---
 
@@ -65,8 +65,14 @@ curl -fsSL https://github.com/npanj/slipstream-menubar/raw/main/install.sh | sh
 
 You can install Slipstream directly without compiling, or build from source:
 
-#### Option A: One-line install (Recommended — No compilation required)
+#### Option A: Homebrew or One-Line Install (Recommended — No compilation required)
 
+Install via Homebrew:
+```zsh
+brew install npanj/tap/slipstream
+```
+
+Or install via one-line curl script:
 ```zsh
 curl -fsSL https://raw.githubusercontent.com/npanj/slipstream/main/install.sh | sh
 ```
