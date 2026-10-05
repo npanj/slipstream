@@ -502,3 +502,8 @@ Blocked on: nothing.
 ## 2026-10-04 20:28 PDT — antigravity
 Added unified `Casks/slipstream.rb` with automatic formula dependency on `npanj/tap/slipstream`. Now running a single command `brew install --cask npanj/tap/slipstream` automatically installs both the macOS menu bar app into `/Applications` and the CLI engine onto `PATH`. Tested and verified dependency tree via `brew info --cask` and updated documentation across all repositories.
 Blocked on: nothing.
+
+
+## 2026-10-04 20:29 PDT — antigravity
+Restructured Slipstream Quickstart documentation into two clearly demarcated tracks: Pathway 1 (All-in-One Mac App with GUI + CLI via `brew install --cask npanj/tap/slipstream`) and Pathway 2 (CLI Only for terminal, headless, and server users via Homebrew, one-line curl, or source build).
+Blocked on: nothing.

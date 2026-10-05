@@ -1,6 +1,6 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-04 20:28 PDT by antigravity.
+**Updated:** 2026-10-04 20:29 PDT by antigravity.
 **Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`, menubar `npanj/slipstream-menubar`, tap `npanj/homebrew-tap`).
 
 ## In one line
