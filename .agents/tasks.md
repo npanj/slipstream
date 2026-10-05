@@ -239,3 +239,12 @@
 - [x] **Verification**: All 21 CPU engine tests pass (`make test-engine-cpu`), architecture check passes (`make architecture-check`), and all 171 server tests pass (`dev/tests/test_server.py`).
 - [ ] **GPU Live-Row Speculative Pruning (PR #283)**: Evaluate upstream PR #283 draft verify live rows kernel for pruning doomed draft candidates before target verification.
 
+
+## macOS Menu Bar App Companion Repository & Community Adoption (2026-10-04)
+
+- [x] **Audit & Verification**: Cloned and audited Mike Zinner's native Swift/SwiftUI menubar app (`mzinner/slipstream-menubar-item`). Verified clean architecture, zero external dependencies, 92 passing unit tests (`make test`), and verified local `.app` compilation and ad-hoc code signing (`make app`).
+- [x] **Decoupled Companion Repository**: Created standalone repository `npanj/slipstream-menubar`, keeping the C++ inference engine codebase clean and free of Xcode/AppKit dependencies.
+- [x] **Full Commit History & Credits**: Preserved all 40+ original git commits from Mike Zinner, giving him full creator and co-author credits in `README.md`, docs, and release notes.
+- [x] **Configuration Alignment**: Pointed `defaultReleaseRepository` to `npanj/slipstream`, app update check to `npanj/slipstream-menubar`, and default models to `nitinpanj/*`.
+- [x] **Release Packaging**: Tagged and pushed `v26.10.6` to trigger GitHub Actions automated packaging of `.dmg`, `.zip`, checksums, and `install.sh`.
+- [x] **Slipstream Main Documentation**: Updated `npanj/slipstream/README.md` with a prominent "macOS Menu Bar App (GUI)" section with one-line install and creator credits.

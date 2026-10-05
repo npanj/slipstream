@@ -1,17 +1,19 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-04 15:45 PDT by antigravity.
-**Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`).
+**Updated:** 2026-10-04 19:48 PDT by antigravity.
+**Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`, menubar `npanj/slipstream-menubar`).
 
 ## In one line
 
-Implemented Layer-Ahead Prefill Prefetch in `models/qwen4exp/Qwen4ExpTarget.cpp` with lookahead router prediction (`encodePrefillPredictRoute` / `prefetchPrefillPredicted`) and concurrent GCD SSD reads (`prefetchLayerMisses`), completely eliminating prefill GPU idle bubbles; verified 100% green across all 21 CPU engine tests and 171 server tests.
+Adopted and published native macOS GUI companion repository `npanj/slipstream-menubar` (original creator & co-author Mike Zinner) with 92 passing tests, local ad-hoc build, and GitHub release `v26.10.6`; updated Slipstream README and credits.
 
 ---
 
 ## How to use it
 
 ```zsh
+# One-line install of native macOS Menu Bar App:
+curl -fsSL https://github.com/npanj/slipstream-menubar/raw/main/install.sh | sh
 # One-line install of prebuilt binary:
 curl -fsSL https://raw.githubusercontent.com/npanj/slipstream/main/install.sh | sh
 

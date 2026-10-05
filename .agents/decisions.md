@@ -662,3 +662,18 @@ To create a Swift version of Nitin's V3 model (`Swift-Qwen3.8-Flash-Next-V3`) de
    - In `runtime/model/Runtime.mm`, restored `buffers.mtpEnabled = mtpDrafting()` in `encodeTargetVerifyBatchForward()`.
    - In multi-architecture merge `cf4f91c`, the assignment had been omitted when introducing `isProposing`. Because `mtpEnabled` defaulted to `false`, `Qwen4ExpTarget::addVerify()` skipped both MTP draft passes and Prompt Lookup Decoding, dropping throughput to ~15 tok/s (0% acceptance rate).
    - Restoring the flag re-engages the MTP draft head and Prompt Lookup engine for Flash-Next, returning decode speed to ~40–50+ tok/s.
+
+
+## 2026-10-04 — Separate Companion Repository for macOS Menu Bar App (`npanj/slipstream-menubar`)
+
+1. **Architecture & Separation of Concerns**:
+   - Chose a separate companion repository (`npanj/slipstream-menubar`) rather than a monorepo merge.
+   - Preserves Slipstream engine as a pure C++/Metal/Python inference runtime without entangling Xcode/Swift build systems or CI runners.
+   - Enables independent release cadence for macOS UI features without incrementing engine semantic versions.
+2. **Attribution & Provenance**:
+   - Preserved all 40+ original git commits from Mike Zinner's repository (`mzinner/slipstream-menubar-item`) so full commit history and authorship are intact.
+   - Prominently credited Mike Zinner as creator and lead author in `README.md`, release notes, and documentation.
+3. **Configuration Alignment**:
+   - Set `defaultReleaseRepository` to `npanj/slipstream`.
+   - Set app update repository to `npanj/slipstream-menubar`.
+   - Configured official model defaults to `nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF` and `nitinpanj/qwen38-flash-next-v3`.

@@ -487,3 +487,8 @@ Blocked on: nothing.
 ## 2026-10-02 21:33 PDT — antigravity
 Consolidated Work Hub (`~/Documents/shared-with-google-drive/INDEX.html`): removed all 3 older/duplicate cards for Flash-Next/Slipstream (Cards 173, 196, 214) and placed a single authoritative Slipstream card at the very top of `PROJECTS` (index 0, `bucket: "🟢 live"`). Defaulted model to Swift-Qwen3.8-Flash-Next-V3 with comprehensive copy-run commands for switching to Original Base Flash-Next V3. Updated Quick operations to `slipstream-log.sh` and `slipstream-stop.sh`. Synchronized `MAIN.md` and `PROJECT_INDEX.json`, validated hub drift via `hub-sync.sh` (0 drift, exit 0).
 Blocked on: nothing.
+
+
+## 2026-10-04 19:48 PDT — antigravity
+Audited and adopted Mike Zinner's native macOS menu bar app (`mzinner/slipstream-menubar-item`) as a standalone companion repository at `npanj/slipstream-menubar`. Re-pointed default release and model paths to `npanj/slipstream` and `nitinpanj/*`, verified all 92 unit tests pass, and verified clean local `.app` compilation and code signing. Published official repository with full commit history preserving Mike Zinner as creator and co-author, tagged `v26.10.6` triggering GitHub Actions release packaging, and updated Slipstream README with install one-liners and credits.
+Blocked on: nothing.
