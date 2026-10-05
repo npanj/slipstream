@@ -5,7 +5,7 @@
 
 ## In one line
 
-Resolved Flash-Next (`swift-qwen38-flash-next-v3`) memory audit failure (`runtime_reserve_exceeded`) by accounting for the MTP draft head's streaming expert cache in `expertCacheActualAllocatedBytes()`. Identified upstream 4-bit GGUF (`Swift-1.5-Qwen3.8-27B-Q4_K_M.gguf`, 16.24 GB) and vision projector (`mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf`, 0.86 GB) for Swift 27B multimodal processing. All 20 CPU engine test suites and 171 Python server tests pass 100% green.
+Downloading official 4-bit weights (`Swift-1.5-Qwen3.8-27B-Q4_K_M.gguf`, 16.24 GB) and vision projector (`mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf`, 0.86 GB) into `~/models/swift-qwen38-27b-q4-gguf/`. Updated menu bar app to recognize it locally. All 20 CPU engine test suites, 94 Swift tests, and 171 Python server tests pass 100% green.
 
 
 ---
