@@ -13,12 +13,26 @@ V3 decodes at 31.2 tok/s against a published 41.7 (−25%). On the identical
 published 36.9 (−17%). Both are same-prompt comparisons, so the gap is not a
 workload artifact. See *Published vs measured* below.
 
-On Flash-Next the regression is almost entirely in one file, `models/qwen4exp/Qwen4ExpTarget.cpp`, and inside it the dominant
-cost is the NVMe advisory work added on 2026-10-09 12:54: `adviseHorizonPredicted`
-called on every pipelined stage, plus a synchronous `adviseMissedExperts` call in
-the host miss-staging path. Together they cost ~9 of the ~13 ms/step that
-per-step latency has grown by (`SPLASH_DISABLE_RDADVISE=1` recovers 34.6 → 38.4
-tok/s with no other change).
+On Flash-Next the loss splits across two axes, and they do not live in the same
+place. Decode rate is `1000 × tokens-per-step ÷ ms-per-step`, so the same-suite
+record (51.9 tok/s at 4.38 tok/step, 84.4 ms/step) against the current build
+(34.6 at 3.06, 88.4) decomposes as ×0.699 from tokens per step against ×0.955
+from per-step latency: **roughly 30 points of the 33% loss are the draft yield,
+and only about 4 points are per-step cost.**
+
+The per-step part is in `models/qwen4exp/Qwen4ExpTarget.cpp`, dominated by the
+NVMe advisory work added on 2026-10-09 12:54: `adviseHorizonPredicted` called on
+every pipelined stage, plus a synchronous `adviseMissedExperts` call in the host
+miss-staging path. Together they cost ~9 of the ~13 ms/step that per-step latency
+has grown by (`SPLASH_DISABLE_RDADVISE=1` recovers 34.6 → 38.4 tok/s with no
+other change).
+
+The larger axis is **not** in that file. Reverting it restores per-step latency to
+better than the recorded level (75.2 against 84.4 ms/step) while tokens per step
+stays depressed (2.87) — its changes are net-positive for yield, so the yield
+collapse lies elsewhere in the working tree, or in the weights package that was
+re-prepared since the record was made. It is not the MTP thresholds (those
+*raise* yield) and not per-step cost.
 
 Speculation is **not** broken on either model. Flash-Next runs 3.06 tokens per
 step and the 27B runs 3.61 (greedy) / 3.85 (T=0.2). A dead drafter reads ~1.0
@@ -151,11 +165,19 @@ for SSD bandwidth with the real misses it is meant to hide.
 
 Per-step latency is back to the recorded level when the file is reverted
 (75.2 vs the recorded 72.4 ms/step), but tokens per step stays below the historic
-band (3.06 against 3.19–4.38). The residual ~4 ms/step and the lower yield are
-both still unexplained. The remaining working-tree changes in
-`Qwen4ExpTarget.cpp` are the suspects: the predictor-v2 `std::sort` that runs per
-layer, and the victim-eviction safeguard that refuses to admit a new expert when
-the incumbent's frequency is higher and the candidate has fewer than two votes.
+band (3.06 against 3.19–4.38). The residual ~4 ms/step is unexplained, and inside
+that file the suspects remain the predictor-v2 `std::sort` that runs per layer,
+and the victim-eviction safeguard that refuses to admit a new expert when the
+incumbent's frequency is higher and the candidate has fewer than two votes.
+
+The dominant open question is the other axis: **tokens per step, −30%, which is
+most of the regression and is not in the file above.** It is exactly 3.06 in every
+greedy run, so it is a real change in drafting rather than noise. Untested
+candidates are the acceptance and proposal kernels touched by the 10-09..10-09
+sampling work (`runtime/ops/Sampling.cpp`, `runtime/metal/kernels/**/sampling.metal`,
++338 lines), and the re-prepared Flash-Next package, since a changed drafter or
+changed acceptance changes yield without touching per-step cost. Nothing has been
+excluded on this axis yet.
 
 ## 27B Splash-HQ
 
