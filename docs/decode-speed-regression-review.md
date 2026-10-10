@@ -243,7 +243,13 @@ Sampled decode, temperature 0.7 (2,430 tokens):
 | `SPLASH_EAGLE2_DRAFT=0` | 30.4 | 3.00 | 98.7 |
 | *recorded, same harness* | *51.8* | *4.57* | *88.2* |
 
-## Root cause
+## The one isolated per-step cost: the horizon advisory
+
+The regression itself is the expert-miss increase documented in *Where the extra
+time goes* above — nothing in this section explains that, and the advisory below
+is worth nothing at the default cache. What this section establishes is the one
+per-step cost that was isolated end to end, and why it matters under a tight cache
+budget.
 
 `adviseMissedExperts()` is now called synchronously from the host routing path
 whenever misses are staged, and `adviseHorizonPredicted(layer + 2)` runs once per
@@ -351,9 +357,17 @@ not loaded, and decode collapses to ~11 tok/s with no error message.
 
 ## Recommended changes, in order
 
-1. **Implemented as a switch; whether it pays depends on the cache budget.**
+1. **Find the ~40 unexplained expert misses per step — this is the regression.**
+   The current build misses 128.1 experts a step against the published build's
+   73.2, worth about +16.4 ms/step and the whole of the 40.7 → 35.2 tok/s loss.
+   The victim-eviction guard (`SPLASH_NO_EVICTION_GUARD`,
+   `Qwen4ExpTarget.cpp:2466`) accounts for ~15 of them; the rest are unattributed.
+   The admission order is the untested suspect, since the predictor-v2 change
+   touches how candidates are ranked before they are offered to the cache.
+   Nothing else here matters as much.
+2. **Implemented as a switch; whether it pays depends on the cache budget.**
    The horizon advisory now has its own condition, `SPLASH_NO_HORIZON_ADVISORY`
-   (`Qwen4ExpTarget.cpp:3549-3558`), which leaves `prefetchPredicted(layer + 1)`
+   (`Qwen4ExpTarget.cpp:3563`), which leaves `prefetchPredicted(layer + 1)`
    and the prefill advisories the README credits with a 28% win untouched, and
    preserves today's default. Turning it off recovers the measured 16.9 ms/step
    (+22% tok/s, 32.7 → 40.0) when the expert cache is pinned to 34 GiB — the
@@ -361,10 +375,10 @@ not loaded, and decode collapses to ~11 tok/s with no error message.
    nothing measurable at the default size. Settle the cache budget first: at the
    default the same build is 8.6 ms/step faster than at 34 GiB with no code
    change at all.
-2. Default `SPLASH_EAGLE2_DRAFT=0` until it is measured as a win on this
+3. Default `SPLASH_EAGLE2_DRAFT=0` until it is measured as a win on this
    MoE-plus-SSD-streaming path; it costs 7% sampled today and was landed without
    a decode measurement.
-3. Measure acceptance with the instruments that already exist rather than adding
+4. Measure acceptance with the instruments that already exist rather than adding
    capture: `/status` emits `draft_acceptance_rate` and `accepted_draft_tokens`
    (`runtime/engine/Status.cpp:276`), `dev/benchmarks/benchmark_drafting.py`
    reports the pre/post delta of `splash_drafted_tokens_total` against
@@ -374,7 +388,7 @@ not loaded, and decode collapses to ~11 tok/s with no error message.
    on Flash-Next (`.agents/decisions.md`). Speculation is engaging but the yield
    is low on structured-derivation text — the 27B loses most on Math & Logic and
    Constraint Reasoning — so the next question is acceptance, not raw speed.
-4. Keep the two published suites runnable from the repository — the 6-task
+5. Keep the two published suites runnable from the repository — the 6-task
    Flash-Next prompts and the 5-domain 27B suite — so the next regression is
    measured against a like-for-like baseline instead of a cross-suite average.
 
