@@ -43,7 +43,8 @@ namespace {
 // Fixed reserves the memory plan carries beside the planned arenas: Metal
 // pipeline objects and encoder scratch, and the process's own runtime overhead.
 constexpr uint64_t kPipelineReserveBytes = 256ULL << 20;
-constexpr uint64_t kRuntimeOverheadReserveBytes = 512ULL << 20;
+// HACK(initialed85): trying to add support for M2 Max
+constexpr uint64_t kRuntimeOverheadReserveBytes = 768ULL << 20;
 
 using metal::BufferStorage;
 using metal::CommandGraph;
