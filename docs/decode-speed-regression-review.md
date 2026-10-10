@@ -181,6 +181,16 @@ is not a capacity shortfall: it is an admission or eviction policy that scales t
 wrong way. That is why the published build is indifferent to the budget while this
 one is not, and it means raising the cache budget is not a fix.
 
+One caveat on the millisecond columns above. `SPLASH_STEP_TIMING` is not free: it
+re-enables the per-stage `AwakeClock::now()` host queries across all 47 decode
+layers that were otherwise gated behind this switch, so absolute times in these
+tables are not comparable with the suite's `ms/step` — the miss *counts* are the
+part to trust. It also surfaces an unresolved contradiction worth chasing before
+any fix: by the suite the current build is *slower* at 34 GiB (93.4 ms/step) than
+at the default cache (87.0), while by GPU wall in these runs it is *faster* (76.1
+against 82.0). Two measurements of the same build, opposite directions, and
+nothing measured here reconciles them.
+
 This pointed at expert cache policy, and the victim-eviction safeguard added in
 `Qwen4ExpTarget.cpp` — which refuses to admit a new expert when the incumbent's
 frequency is higher and the candidate has fewer than two votes — was the prime
