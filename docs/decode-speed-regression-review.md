@@ -13,26 +13,33 @@ V3 decodes at 31.2 tok/s against a published 41.7 (−25%). On the identical
 published 36.9 (−17%). Both are same-prompt comparisons, so the gap is not a
 workload artifact. See *Published vs measured* below.
 
-On Flash-Next the loss splits across two axes, and they do not live in the same
-place. Decode rate is `1000 × tokens-per-step ÷ ms-per-step`, so the same-suite
-record (51.9 tok/s at 4.38 tok/step, 84.4 ms/step) against today's build at the
-default cache (35.2 at 3.06, 87.0) decomposes as ×0.699 from tokens per step
-against ×0.970 from per-step latency: **the draft yield is 30 of the 32 points
-lost, and per-step latency is within 3% of the record.**
+The regression is real, and it is entirely per-step latency — not draft yield.
 
-There is one identified per-step cost, `adviseHorizonPredicted(layer + 2)` in
-`models/qwen4exp/Qwen4ExpTarget.cpp`, added 2026-10-09 12:54 — but it is worth
-16.9 ms/step **only when the expert cache is pinned to 34 GiB**, which is what
-the published 6-task harness does. At the default dynamic cache size the same
-call costs nothing measurable. Either way it does not close the gap: the yield
-axis does. (*Confirmed by three-way isolation* below.)
+The published `origin/main` state was rebuilt on this machine (commit `6c0ba57`,
+2026-10-04 21:15, which contains no `adviseHorizonPredicted` at all) and run on
+the identical prompts, package and harness — see *The published build, rebuilt on
+this machine* below:
 
-The larger axis is **not** in that file. Reverting it restores per-step latency to
-better than the recorded level (75.2 against 84.4 ms/step) while tokens per step
-stays depressed (2.87) — its changes are net-positive for yield, so the yield
-collapse lies elsewhere in the working tree, or in the weights package that was
-re-prepared since the record was made. It is not the MTP thresholds (those
-*raise* yield) and not per-step cost.
+| build | tok/s | tok/step | ms/step |
+|---|---|---|---|
+| published `origin/main` (10-04), default cache | 40.7 (40.6–40.8) | 2.87 | 70.6 |
+| published `origin/main` (10-04), 34 GiB | 40.6 | 2.87 | 70.8 |
+| current build, default cache | 35.2 (34.8–35.5) | 3.06 | 87.0 |
+| current build, 34 GiB | 32.7 (31.9–33.6) | 3.06 | 93.4 |
+
+Decode rate is `1000 × tokens-per-step ÷ ms-per-step`, so at the default cache the
+move from 40.7 to 35.2 tok/s (−13.5%) decomposes as ×1.066 from tokens per step
+*against* ×0.811 from per-step latency: **per-step cost grew 16.4 ms/step (+23%)
+and tokens per step moved the other way, up 6.6%.** The draft-yield axis that
+looked dominant earlier in this review was an artifact of comparing against the
+journal's 51.9 tok/s / 4.38 tok/step record: that record is not the published
+build, and the published build has *lower* yield than today's. Yield is not the
+regression.
+
+The one identified per-step cost, `adviseHorizonPredicted(layer + 2)` (added
+2026-10-09 12:54), accounts for 16.9 ms/step of the 22.6 measured at 34 GiB, and
+**nothing at the default cache — where the full +16.4 ms/step regression stands
+unattributed.** (*Confirmed by three-way isolation* below.)
 
 Speculation is **not** broken on either model. Flash-Next runs 3.06 tokens per
 step and the 27B runs 3.61 (greedy) / 3.85 (T=0.2). A dead drafter reads ~1.0
@@ -123,11 +130,33 @@ without, so the direction and rough size hold up. Tokens per step is exactly
 3.06 in every one of these runs — greedy drafting is deterministic, so only the
 timing varies between them.
 
+## The published build, rebuilt on this machine (2026-10-09)
+
+`origin/main` is commit `6c0ba57` (2026-10-04 21:15), the code state behind the
+README's benchmark tables, and it contains no `adviseHorizonPredicted` at all
+(`grep -c` = 0), confirming the call is a 10-09 addition. It was checked out into
+a scratch worktree, built from scratch (41 objects, no errors), and driven on the
+same prompts file, the same package (`~/models/swift-qwen38-flash-next-v3/prepared`)
+and the same harness wrapper as the current build, interleaved across two cache
+settings and two reps each. It honours `SPLASH_EXPERT_CACHE_GIB` and defaults to
+the same `physicalGiB − 28 = 36 GiB`, so the arms are like for like.
+
+Two observations beyond the headline:
+
+- **The published build is insensitive to the expert cache budget** — 70.7 against
+  70.8 ms/step, 40.6 tok/s either way. The current build is not: 87.0 at the
+  default against 93.4 at 34 GiB. Whatever landed made decode more sensitive to
+  how much of the expert set is resident, which is a lead in its own right.
+- The 10-04 engine loads today's prepared package without complaint, so this is
+  two builds of code against one set of weights, not two packages. What it does
+  not exclude is the weights having changed under both builds at some earlier
+  date.
+
 ### Confirmed by three-way isolation — conditional on the expert cache (2026-10-09)
 
-The comparisons above cannot say *which* call in the lookahead block costs the
-time, because `prefetchPredicted(layer + 1)` and `adviseHorizonPredicted(layer + 2)`
-share a single condition. Giving the horizon advisory its own switch and running
+Neither call in the lookahead block could be measured through the switches that
+already existed, because `prefetchPredicted(layer + 1)` and
+`adviseHorizonPredicted(layer + 2)` share a single condition. Giving the horizon advisory its own switch and running
 all three arms interleaved — three reps each, alternating order, one session, one
 environment — removes that ambiguity and the session drift with it. At
 `SPLASH_EXPERT_CACHE_GIB=34`, which is what the published 6-task harness sets
@@ -222,14 +251,30 @@ file is unexplained and untested, and the suspects remain the predictor-v2 `std:
 and the victim-eviction safeguard that refuses to admit a new expert when the
 incumbent's frequency is higher and the candidate has fewer than two votes.
 
-The dominant open question is the other axis: **tokens per step, −30%, which is
-most of the regression and is not in the file above.** It is exactly 3.06 in every
-greedy run, so it is a real change in drafting rather than noise. Untested
-candidates are the acceptance and proposal kernels touched by the 10-09..10-09
-sampling work (`runtime/ops/Sampling.cpp`, `runtime/metal/kernels/**/sampling.metal`,
-+338 lines), and the re-prepared Flash-Next package, since a changed drafter or
-changed acceptance changes yield without touching per-step cost. Nothing has been
-excluded on this axis yet.
+The dominant open question is now a single one: **where the +16.4 ms/step comes
+from at the default expert cache.** It is the whole regression (40.7 → 35.2 tok/s
+against the rebuilt published baseline) and no switch measured here touches it —
+the horizon advisory, the only identified per-step cost, is worth nothing at the
+default cache. At 34 GiB it explains 16.9 of the 22.6 ms/step, leaving ~6 that
+behaves as if it were cache-independent, so the default-cache figure is not
+advisory plus a constant.
+
+Draft yield is **not** the open axis this review once said it was. Against the
+rebuilt published build it went up, 2.87 → 3.06 tok/step. The journal's 51.9 tok/s
+/ 4.38 tok/step figure still cannot be attributed to any revision, and until it
+can, decompositions that lean on it should be discarded.
+
+Inside `Qwen4ExpTarget.cpp` the untested suspects for the residual remain the
+predictor-v2 `std::sort` that runs per layer, and the victim-eviction safeguard
+that refuses to admit a new expert when the incumbent's frequency is higher and
+the candidate has fewer than two votes. Reverting that file to its 10-04 state
+reaches 75.2 ms/step against the baseline build's 70.8, so about 4.4 ms/step of the
+file's delta is still unexplained — a small slice of the whole.
+
+The strongest lead, and the one that has not been pursued: **the published build
+is insensitive to the expert cache budget (70.7 against 70.8 ms/step) and the
+current build is not (87.0 against 93.4).** That points at expert residency rather
+than at the advisory itself.
 
 ## 27B Splash-HQ
 
@@ -317,7 +362,10 @@ not loaded, and decode collapses to ~11 tok/s with no error message.
 - The "few days back" reference points (43 tok/s / 3.19 tok/step from 10-08, and
   51.9 / 4.38 earlier in the same suite) come from the project journal, not from a
   pristine checkout re-measured here. The within-run comparisons above — 34.6 vs
-  38.4 vs 38.2 vs 29.9 — are the hard evidence.
+  38.4 vs 38.2 vs 29.9 — are the hard evidence. For the baseline itself that gap
+  is now closed — `origin/main` was rebuilt and measured — but the 51.9 / 4.38
+  record still cannot be attributed to any revision, and the decomposition above
+  deliberately does not use it.
 - Both published columns were produced by earlier builds of this engine (the
   27B figures by the `npanj/splash` q8 fork), so the comparison is
   current-build versus published-build, not two builds of identical code. The
