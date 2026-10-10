@@ -215,16 +215,27 @@ not loaded, and decode collapses to ~11 tok/s with no error message.
 
 ## Recommended changes, in order
 
-1. Gate the horizon advisory and the synchronous miss-path advisory behind an
-   environment variable that defaults off, or drop the horizon advisory entirely.
-   Expected: back to ~38 tok/s greedy.
+1. Drop the horizon advisory (`adviseHorizonPredicted`, `Qwen4ExpTarget.cpp:3551`)
+   while keeping `prefetchPredicted(layer + 1)`. It is not independently
+   switchable today, which is why this is work rather than a flag: it shares the
+   `lookahead` switch with the prefetch beside it (`:3419`, `:3549-3552`), and the
+   family-wide `SPLASH_DISABLE_RDADVISE` is checked inside `adviseMissedExperts`
+   itself (`:398`), so it silences *every* advisory — including the prefill ones
+   the README credits with a 28% win. Split the block so the horizon call gets its
+   own default-off switch. Expected: back to ~38 tok/s greedy.
 2. Default `SPLASH_EAGLE2_DRAFT=0` until it is measured as a win on this
    MoE-plus-SSD-streaming path; it costs 7% sampled today and was landed without
    a decode measurement.
-3. Capture `draft_acceptance_rate` from `/slots` during a live run. Speculation
-   is engaging but the yield is low on structured-derivation text — the 27B loses
-   most on Math & Logic and Constraint Reasoning — so the next question is
-   acceptance, not raw speed.
+3. Measure acceptance with the instruments that already exist rather than adding
+   capture: `/status` emits `draft_acceptance_rate` and `accepted_draft_tokens`
+   (`runtime/engine/Status.cpp:276`), `dev/benchmarks/benchmark_drafting.py`
+   reports the pre/post delta of `splash_drafted_tokens_total` against
+   `splash_accepted_draft_tokens_total`, and `SPLASH_TRACE` plus
+   `models/qwen4exp/bench/trace_report.py` gives acceptance by depth and why
+   guessing stopped. The recorded figure to compare against is 68.7% cumulative
+   on Flash-Next (`.agents/decisions.md`). Speculation is engaging but the yield
+   is low on structured-derivation text — the 27B loses most on Math & Logic and
+   Constraint Reasoning — so the next question is acceptance, not raw speed.
 4. Keep the two published suites runnable from the repository — the 6-task
    Flash-Next prompts and the 5-domain 27B suite — so the next regression is
    measured against a like-for-like baseline instead of a cross-suite average.
