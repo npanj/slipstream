@@ -263,10 +263,12 @@ Qwen4ExpCachePlan planQwen4ExpExpertCache(const Qwen4ExpLayout &layout,
     plan.residentLayers = std::min<uint32_t>(layout.layers, std::max(0, std::atoi(envResident)));
   if (plan.residentLayers >= layout.layers) return plan;
   const uint64_t expertStride = uint64_t{layout.expertIntermediateSize} * layout.hiddenSize * 9 / 16;
-  // The expert cache gets the budget llama.cpp's --moe-stream-cache uses on
-  // this machine: everything but ~28 GiB, i.e. 36 GiB of 64. Measured on a
-  // 64 GB M5 Pro: 16 GiB (128 per layer) 10-13 tok/s, 36 GiB 14-19. Past
-  // ~38 GiB both engines swap. SPLASH_EXPERT_CACHE_GIB or _CAPACITY override.
+  // The expert cache gets everything but ~34 GiB, i.e. 30 GiB of 64: fixed
+  // runtime with a 30 GiB cache is ~48 GiB, safely under the Metal
+  // recommended working set (52.02 GiB on a 64 GB Mac). Measured on a 64 GB
+  // M5 Pro: 16 GiB (128 per layer) 10-13 tok/s. Past ~38 GiB both engines
+  // swap, and 36 GiB no longer fits the working set. SPLASH_EXPERT_CACHE_GIB
+  // or _CAPACITY override.
   uint64_t physical = 0;
   size_t length = sizeof(physical);
   (void)sysctlbyname("hw.memsize", &physical, &length, nullptr, 0);

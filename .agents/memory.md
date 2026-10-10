@@ -83,6 +83,10 @@ wanted 128 MiB, long before any real weights existed.
 - **Agent Session APFS Vault Invariant**: All interactive turns automatically snapshot into atomic JSON checkpoints in `~/.cache/slipstream/agent_vaults/` (`<session_id>.json` + `latest.json`). Sessions can be resumed via `./slipstream code -c` (or `--continue`) or in-session `/resume [id]`, preserving conversation turns, execution checklists (`/todo`), and token statistics across unexpected terminal restarts or timeouts.
 - **macOS `recv()` with `MSG_DONTWAIT` on Blocking Sockets**: On macOS Darwin, calling `recv(1, MSG_PEEK | MSG_DONTWAIT)` on a blocking HTTP socket can block or hang when the client is waiting for the server's streaming response. Use a cached `selectors.DefaultSelector().select(0)` on the request handler instance to safely poll for client disconnection with zero memory allocations and zero risk of blocking.
 - **Metal Pipeline State Lookups in Hot Decode Loops**: Calling `[pipelines objectForKey:[NSString stringWithUTF8String:name]]` during dispatch creates an autoreleased `NSString` and performs an Objective-C runtime dictionary lookup for every single forward step. Cache pipeline pointers directly on `ComputeDispatch::cachedPipeline` and maintain a C++ `std::unordered_map` for sub-microsecond PSO resolution.
+- **Decode defaults follow measurement (2026-10-10)**: horizon advisory off / EAGLE-2 off / guard on / prefetch on / 30 GiB default budget — pinned by `decodeFeatureSwitchDefaults()`. Do not re-enable without a same-prompt A/B.
+- **One engine at a time, and never 36 GiB cache on 64 GB**: a 36 GiB expert-cache run drove the box to 57 MB free with swap active; cap profiling at 34 GiB with a 10 GiB free-memory abort floor.
+- **Suite harnesses swallow engine stderr on success**: `speed_suite.py` discards `generate-sample` stderr unless the run fails, so `[Verify Timing]` lines need direct-harness capture (`/tmp/prof/verify.sh` pattern).
+- **`FrontendServer` must init `unix_server` before `super().__init__`**: otherwise a bind failure masks the real OSError behind AttributeError in `server_close`.
 
 ## About Nitin
 

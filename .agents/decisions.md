@@ -1222,4 +1222,11 @@ Adopted 4 cutting-edge research tracks into the active development plan:
    - Updated `SlipstreamAgent` to default to `timeout = None` with socket blocking mode (`sock.settimeout(None)`).
    - Added `--no-timeout` flag and `--timeout 0` support in `install/launcher.py`. Users retain full manual control via `Ctrl+C` steering without premature timer aborts.
 
+4. **Decode defaults are set by measurement (2026-10-10 regression fix)**:
+   - The L+2 horizon advisory (`adviseHorizonPredicted`) cost +17–24 ms/step at pinned 32–34 GiB expert caches — the serving configs — because speculative readahead for guessed experts contends on SSD bandwidth with the real misses. Default off; opt in with `SPLASH_HORIZON_ADVISORY=1`. The layer+1 prefetch beside it measured free and stays on; the prefill advisory the README credits is a different call site, untouched.
+   - EAGLE-2 tree drafting cost ~9% in sampled mode and never engages in greedy; default off, opt in with `SPLASH_EAGLE2_DRAFT=1`. This also restores the config the accuracy workloads ran under.
+   - The victim-eviction guard stays on: neutral with the advisory off, protective when it is on (measured interaction, not theory).
+   - 30 GiB default cache budget stays: it is the Metal working-set safety fix, not a tunable. A 36 GiB cache arm nearly froze the 64 GB test machine (57 MB free, swap storm) — never exceed 34 GiB on this box.
+   - Env defaults are pinned by `decodeFeatureSwitchDefaults()` in `qwen4exp_layout_test.cpp` so a later edit cannot silently re-enable a measured cost.
+
 

@@ -14,6 +14,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -228,6 +229,32 @@ inline constexpr uint32_t kHyperDownPadded = 512;
 inline constexpr uint32_t kHyperDownSplits = 10;
 inline constexpr uint32_t kPromptStagingExperts = 144;
 inline constexpr uint32_t kHyperDownSplitRows = 32;
+
+// Decode-path feature switches. Defaults are set by measurement on a 64 GB
+// Apple Silicon Mac (10-prompt decode suite, greedy), not by taste:
+// - The L+2 horizon advisory costs ~17-24 ms/step at pinned 32-34 GiB expert
+//   caches (the serving configs) and ~nothing at the default budget, while
+//   the layer+1 prefetch beside it is free. Default off, opt back in with
+//   SPLASH_HORIZON_ADVISORY=1. SPLASH_NO_HORIZON_ADVISORY=1 still forces off.
+// - The prefetch victim-eviction guard is neutral with the advisory off and
+//   protects hot residents when it is on. Default on, opt out as before.
+// - EAGLE-2 tree drafting costs ~7-9% in sampled mode and never engages in
+//   greedy (it requires temperature > 0). Default off, opt in with
+//   SPLASH_EAGLE2_DRAFT=1.
+inline bool horizonAdvisoryEnabled() noexcept {
+  const char *off = std::getenv("SPLASH_NO_HORIZON_ADVISORY");
+  if (off && std::atoi(off) != 0) return false;
+  const char *on = std::getenv("SPLASH_HORIZON_ADVISORY");
+  return on && std::atoi(on) != 0;
+}
+inline bool evictionGuardEnabled() noexcept {
+  const char *value = std::getenv("SPLASH_NO_EVICTION_GUARD");
+  return !(value && std::atoi(value) != 0);
+}
+inline bool eagle2DraftEnabled() noexcept {
+  const char *value = std::getenv("SPLASH_EAGLE2_DRAFT");
+  return value ? (std::atoi(value) != 0) : false;
+}
 
 struct Qwen4ExpHyperConnection final {
   metal::MetalBuffer norm;         // hyperConnectionWidth

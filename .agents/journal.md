@@ -1,5 +1,13 @@
 # Journal — qwen4exp port
 
+## 2026-10-10 08:30 PDT — muse-code
+Fixed the Flash-Next decode regression end to end and corrected two review claims that didn't survive re-measurement:
+- Ran 30+ profiling arms (10-prompt suite + exact 09-26/ splash-plus prompts, current vs rebuilt 10-04 builds): horizon advisory costs +17–24 ms/step at pinned 32–34 GiB, ~0 at default; EAGLE-2 costs ~9% sampled; guard is neutral with advisory off (keep on); prefetch/MTP-thresholds/sticky all keepers.
+- Shipped: advisory + EAGLE-2 default off (opt-ins), guard unchanged, horizon top-by-frequency ranking, spin-wait yield, stale cache comment, `FrontendServer` unix_server init-order fix, two regression tests. Post-fix 41.7/41.7 parity @34 GiB, greedy bit-identical.
+- Overturned: "misses rise with cache" (default was mislabelled 36, actually 30; n=817 shows 85.8→61.6 normal) and "75% more misses" (equal-cache gap ~30%, speed gap now ~3% noise). 27B has no in-window regression (10-04: 11.5 tok/s, speculation dead).
+- Safety: 36 GiB cache arm nearly froze the box (57 MB free, swap storm) — cap at 34. Full python suites need an unsandboxed terminal (bind/pty denied here).
+Blockers: none. Uncommitted: 7 files; nothing pushed.
+
 ## 2026-10-09 19:25 PDT — antigravity
 Completed Swift-27B DFlash neural drafter restoration and dual-model regression verification:
 - DFlash Draft Context Restoration: Wired `setDraftContextPlan`, `hasDraft()`, `activeDraftCaptures`, `advanceDraftContext`, and draft KV cache capture in `Runtime.hpp` / `Runtime.mm`. Prefill and decode now populate and advance the DFlash draft KV cache.

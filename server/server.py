@@ -1569,10 +1569,13 @@ class FrontendServer(ThreadingHTTPServer):
         self.connections = HttpAdmission(
             request_capacity + self.control_connection_capacity
         )
-        super().__init__(address, FrontendHandler, bind_and_activate)
-        self.app = app
+        # unix_server/unix_thread must exist before super().__init__: if the
+        # bind fails, socketserver calls self.server_close(), which reads
+        # unix_server. Otherwise the real OSError is masked by AttributeError.
         self.unix_server = None
         self.unix_thread = None
+        super().__init__(address, FrontendHandler, bind_and_activate)
+        self.app = app
         if bind_and_activate:
             self._start_unix_server()
 

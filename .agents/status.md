@@ -1,11 +1,17 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-09 19:25 PDT by antigravity (Swift-27B DFlash Neural Drafter Restored; Decode 46.8 tok/s; Zero Regressions on Flash-Next V3).
+**Updated:** 2026-10-10 08:30 PDT by muse-code (decode regression fixed: horizon advisory + EAGLE-2 defaulted off; Flash-Next back to published 41.7 tok/s).
 **Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`, app `npanj/slipstream-menubar` `v26.10.7`, tap `npanj/homebrew-tap`).
 
 ## In one line
 
-Restored DFlash draft context prefill and decode KV advancement in `Runtime.mm` for Swift-27B (quadrupling decode from 11.0 to 46.8 tok/s at 45.7% acceptance rate), verified zero regressions on Flash-Next V3 MoE, with 100% test pass rate and ports 8090/8000 idle and free.
+Fixed the Flash-Next decode regression (32.4 → 41.7 tok/s on the published 09-26 prompts, exact parity): the L+2 horizon advisory now defaults off and EAGLE-2 tree drafting defaults off, both as opt-ins pinned by a new regression test. Greedy outputs are bit-identical pre/post fix. 27B has no in-window regression (10-04 build can't draft on today's package at all: 11.5 vs current 30.4 tok/s). Working tree holds 7 uncommitted files; nothing pushed.
+
+## Regression fix (2026-10-10) — current state
+
+- **Files changed (uncommitted):** `models/qwen4exp/Qwen4Exp.{hpp,cpp}`, `Qwen4ExpTarget.cpp` (3 switch call-sites, horizon top-by-frequency ranking, spin-wait yield), `server/server.py` (unix_server init-order fix), `dev/tests/engine/qwen4exp_layout_test.cpp` (+`decodeFeatureSwitchDefaults`), `dev/tests/test_server.py` (+bind-failure test), `docs/decode-speed-regression-review.md` (Resolution section + 2 corrected claims).
+- **Verification observed:** `make` clean; `make test-engine-cpu` green; `qwen4exp-layout` PASS; same-prompt 41.7/41.7 @34 GiB, 38.5 @default, 36.6 sampled, 27B 31.6 unchanged; `test_server.py` full suite + `test_agent.py` environment-blocked in this session (socket bind / pty denied), server/agent untouched except the init fix.
+- **Do not run:** 36 GiB expert cache on the 64 GB box (near-freeze observed); `test_server.py`/`test_agent.py` need an unsandboxed terminal.
 
 ---
 

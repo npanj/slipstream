@@ -3,6 +3,55 @@
 Measured on `main` at `19c4414` — the 2026-10-05…10-09 work — on the same
 machine and model packages used for the published baselines.
 
+## Resolution — 2026-10-10 (read this first)
+
+The regression is fixed in the working tree (uncommitted): the horizon
+advisory now defaults **off** (opt back in with `SPLASH_HORIZON_ADVISORY=1`)
+and EAGLE-2 tree drafting defaults **off** (opt in with
+`SPLASH_EAGLE2_DRAFT=1`). The victim-eviction guard stays **on**, the
+layer+1 prefetch stays on, MTP thresholds and sticky affinity are unchanged,
+and the 30 GiB default cache budget is unchanged.
+
+Same-prompt verification, greedy, Flash-Next V3 (09-26 6-task prompts):
+
+| build | avg tok/s | published 41.7 |
+|---|---|---|
+| 10-04 baseline rebuilt (`6c0ba57`), 34 GiB | 42.3 | +1% |
+| current pre-fix, 34 GiB | 32.4 | −22% |
+| current post-fix, 34 GiB | **41.7** | **parity** (3 tasks above published) |
+| current post-fix, default (30 GiB) | 38.5 | +7% vs pre-fix 36.1 |
+| current post-fix, sampled T=0.7 | 36.6 | +18% vs pre-fix 31.0 |
+
+Greedy outputs are **bit-identical** across every switch arm and pre/post
+fix (proves the switches only ever affected timing); answer markers check
+out on all six tasks ($18, `p - q`, chair arrangement, both code tasks).
+
+Two findings in this review did not survive re-measurement and are
+corrected below rather than removed:
+
+1. The miss table labelled the current default cache "36 GiB". The default
+   budget changed 36→30 GiB inside the window (`Qwen4Exp.cpp`, `physicalGiB
+   − 34`), so that column is **30 GiB**. With correct labels, misses *fall*
+   with cache size — 85.8/step at 30 GiB against 61.6 at 34 (n=817 steps
+   each, same build, same suite) — and the "admission policy scales the
+   wrong way" claim is withdrawn. What *is* backwards is suite timing at
+   34 GiB, and that is fully explained: staging rises +15.4 ms/step at 34
+   (29.0→44.4) while misses fall, i.e. the advisory's wasted readahead
+   dominates SSD traffic exactly where the cache is biggest.
+2. The "75% more misses" headline mixed cache sizes (30 vs 36). At equal
+   cache (34 GiB) the gap is 102.7 vs 78.9 on the old small-n sample —
+   real, but ~30%, not 75% — and post-fix the speed gap at equal cache is
+   ~3%, inside run-to-run noise.
+
+The 27B verdict changed shape: the 10-04 build cannot draft on today's 27B
+package at all (11.5 tok/s, ~1.2 tok/step — speculation dead), while the
+current build does 30.4 on the identical splash-plus 5 prompts against a
+published 36.9. There is no in-window 27B regression; the remaining gap to
+published is a drafter-family difference (old MTP engine vs current DFlash
+drafter on a re-prepared package), concentrated in Math & Logic. Next step
+per recommendation 4 (unchanged): acceptance-by-depth tracing, not speed
+work.
+
 ## Conclusion
 
 Decode has regressed on both served models, measured against the numbers in the
@@ -169,17 +218,17 @@ smaller +6 ms on pure GPU compute.
 Repeating the same run with the cache pinned to 34 GiB gives the full picture, and
 it is the sharpest diagnostic in this review:
 
-| build | 36 GiB (default) | 34 GiB |
+| build | own default | 34 GiB |
 |---|---|---|
-| current | **128.1** misses/step | **102.7** |
-| published 10-04 | **73.2** | **78.9** |
+| current (default 30 GiB) | **85.8** misses/step [n=817] (128.1 on the old n≈20 sample) | **61.6** [n=817] (102.7 on n≈20) |
+| published 10-04 (default 36 GiB) | **73.2** [n≈20] | **78.9** [n≈20] |
 
-**The current build misses *more* experts when given *more* cache — 102.7 at
-34 GiB against 128.1 at 36 GiB.** The published build is flat across the two, and
-marginally better at 36 (73.2 against 78.9). Extra memory making residency worse
-is not a capacity shortfall: it is an admission or eviction policy that scales the
-wrong way. That is why the published build is indifferent to the budget while this
-one is not, and it means raising the cache budget is not a fix.
+**Correction (2026-10-10):** the "current default" column was labelled 36
+GiB; the default budget at measurement time was 30 GiB, and the n=817
+re-measurement shows misses *fall* with cache size (85.8→61.6). The
+"policy scales the wrong way" conclusion is withdrawn — see *Resolution*
+above for what the 34 GiB timing gap actually is (advisory-dominated
+staging, +15.4 ms/step).
 
 One caveat on the millisecond columns above. `SPLASH_STEP_TIMING` is not free: it
 re-enables the per-stage `AwakeClock::now()` host queries across all 47 decode
@@ -380,29 +429,26 @@ not loaded, and decode collapses to ~11 tok/s with no error message.
 
 ## Recommended changes, in order
 
-1. **Find the ~40 unexplained expert misses per step — this is the regression.**
-   The current build misses 128.1 experts a step against the published build's
-   73.2, worth about +16.4 ms/step and the whole of the 40.7 → 35.2 tok/s loss.
-   The victim-eviction guard (`SPLASH_NO_EVICTION_GUARD`,
-   `Qwen4ExpTarget.cpp:2466`) accounts for ~15 of them; the rest are unattributed.
-   The most specific clue is that misses *rise* with cache size (102.7 at 34 GiB
-   against 128.1 at 36 GiB) while the published build is flat, which points at
-   admission order rather than capacity — and the predictor-v2 change touches
-   exactly how candidates are ranked before they are offered to the cache.
-   Nothing else here matters as much.
-2. **Implemented as a switch; whether it pays depends on the cache budget.**
-   The horizon advisory now has its own condition, `SPLASH_NO_HORIZON_ADVISORY`
-   (`Qwen4ExpTarget.cpp:3563`), which leaves `prefetchPredicted(layer + 1)`
-   and the prefill advisories the README credits with a 28% win untouched, and
-   preserves today's default. Turning it off recovers the measured 16.9 ms/step
-   (+22% tok/s, 32.7 → 40.0) when the expert cache is pinned to 34 GiB — the
-   setting the published harness uses, so it is relevant to that comparison — and
-   nothing measurable at the default size. Settle the cache budget first: at the
-   default the same build is 8.6 ms/step faster than at 34 GiB with no code
-   change at all.
-3. Default `SPLASH_EAGLE2_DRAFT=0` until it is measured as a win on this
-   MoE-plus-SSD-streaming path; it costs 7% sampled today and was landed without
-   a decode measurement.
+1. **Done (2026-10-10): flip the horizon advisory default off.** The
+   admission-order hunt is stood down: with correct cache labels the miss gap
+   is capacity-normal, and the speed gap turned out to be advisory-dominated
+   staging, confirmed by three-way isolation twice (16.9 and 24.2 ms/step at
+   34 GiB) and by the missing-cell arm (guard × advisory interaction mapped:
+   the guard only matters with the advisory on, and is neutral with it off).
+   `horizonAdvisoryEnabled()` (`Qwen4Exp.hpp`) defaults off, opt-in via
+   `SPLASH_HORIZON_ADVISORY=1`; `SPLASH_NO_HORIZON_ADVISORY=1` still forces
+   off. `prefetchPredicted(layer + 1)` and the prefill advisories the README
+   credits are untouched. Guard stays on (neutral post-flip, protective).
+2. **Superseded by the flip.** Post-fix at 34 GiB: 41.7 tok/s against
+   published 41.7 (was 32.7 → 40.0 via switch). At the default budget: 38.5
+   against pre-fix 36.1. No cache-budget settling needed — the flip wins at
+   every measured budget.
+3. **Done (2026-10-10): `eagle2DraftEnabled()` defaults off**, opt-in via
+   `SPLASH_EAGLE2_DRAFT=1`. Measured twice: 30.4→33.7 tok/s sampled on the
+   pre-fix build (31.0→33.7, +9%; the earlier sample gave 28.4→30.4), and
+   post-fix sampled at 36.6. Greedy never engages
+   it (requires temperature > 0); the 27B dense path never reads the switch.
+   This also restores the config the 10-08 accuracy workloads ran under.
 4. Measure acceptance with the instruments that already exist rather than adding
    capture: `/status` emits `draft_acceptance_rate` and `accepted_draft_tokens`
    (`runtime/engine/Status.cpp:276`), `dev/benchmarks/benchmark_drafting.py`

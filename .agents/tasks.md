@@ -412,6 +412,7 @@
   - [x] Integrated Darwin `fcntl(F_RDADVISE)` non-blocking kernel advisory in `prefetchPredicted()` for active predicted misses.
   - [x] Implemented `adviseHorizonPredicted()` in `Qwen4ExpTarget.cpp` issuing horizon advisories 2 layers ahead ($L+2$) during pipelined decode loop, pre-faulting NVMe pages into unified page cache via background DMA.
   - [x] Recompiled `build/slipstream` and verified 100% pass across all 24 CPU engine tests (`make test-engine-cpu`).
+  - [x] **2026-10-10 REGRESSION FIX — advisory defaults off**: measured +17–24 ms/step cost at pinned 32–34 GiB caches (wasted readahead dominates SSD traffic); `horizonAdvisoryEnabled()` in `Qwen4Exp.hpp` defaults off, opt-in `SPLASH_HORIZON_ADVISORY=1`. Same-prompt 09-26 tasks back to 41.7 tok/s (parity with published). EAGLE-2 also defaulted off (+9% sampled). Guard stays on. Covered by `decodeFeatureSwitchDefaults()` in `qwen4exp_layout_test.cpp`.
 
 #### Track 4: Single-Tenant Workstation Co-Design
 - [x] **Mooncake-Style Predictive Background Promotion**:

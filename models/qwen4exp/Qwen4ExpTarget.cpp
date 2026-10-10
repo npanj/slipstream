@@ -2289,7 +2289,11 @@ void Qwen4ExpTarget::addVerify(
       for (uint32_t exp : uniqueExperts) {
         const int16_t slot = cache.expertToSlot[exp];
         if (slot >= 0)
-          while (cache.slotReads[slot].load(std::memory_order_acquire)) {}
+          while (cache.slotReads[slot].load(std::memory_order_acquire)) {
+            // Yield the core to the pread workers filling this slot instead
+            // of starving them (same reason as the MetalBackend spin loops).
+            __builtin_arm_yield();
+          }
       }
       hostParts[0] += std::chrono::duration<double, std::milli>(
                           AwakeClock::now() - waitStart).count();
@@ -2462,9 +2466,7 @@ void Qwen4ExpTarget::addVerify(
           // The guard is switchable so its cost in extra expert misses can be
           // measured against the build that predates it (10-04 has no such
           // guard and misses 73 experts a step where this build misses 128).
-          static const bool guardVictim = [] {
-            return std::getenv("SPLASH_NO_EVICTION_GUARD") == nullptr;
-          }();
+          static const bool guardVictim = evictionGuardEnabled();
           if (guardVictim && vicFreq > candFreq + 4 && votes[expert] < 2) {
             continue; // retain the established victim expert
           }
@@ -2520,16 +2522,27 @@ void Qwen4ExpTarget::addVerify(
     const uint64_t stride = weights.layers[horizonLayer].ffn.expertGate.expertStrideBytes;
 
     // Use historical activation frequency and sticky affinity to advise the
-    // highest-probability candidates for this layer that are not yet in cache
+    // highest-probability candidates for this layer that are not yet in cache.
+    // Ranked by frequency (not id order) so the limited advisory bandwidth
+    // goes to the most likely experts; re-sorted by id afterwards so
+    // adviseMissedExperts can batch sequential experts into single syscalls.
     struct HorizonMiss { uint32_t expert; };
     std::vector<HorizonMiss> horizonMisses;
     if (!cache.frequency.empty()) {
+      constexpr uint32_t kHorizonAdvised = 8;
+      std::vector<uint32_t> ranked;
       for (uint32_t e = 0; e < weights.layout.experts && e < cache.frequency.size(); ++e) {
         if (cache.frequency[e] >= 4 && cache.expertToSlot[e] < 0) {
-          horizonMisses.push_back({e});
-          if (horizonMisses.size() >= 8) break;
+          ranked.push_back(e);
         }
       }
+      if (ranked.size() > kHorizonAdvised) {
+        std::nth_element(ranked.begin(), ranked.begin() + kHorizonAdvised, ranked.end(),
+                         [&](uint32_t a, uint32_t b) { return cache.frequency[a] > cache.frequency[b]; });
+        ranked.resize(kHorizonAdvised);
+      }
+      std::sort(ranked.begin(), ranked.end());
+      for (uint32_t e : ranked) horizonMisses.push_back({e});
     }
     if (!horizonMisses.empty()) {
       adviseMissedExperts(source, horizonMisses.data(), horizonMisses.size(), stride);
@@ -3108,10 +3121,7 @@ void Qwen4ExpTarget::addVerify(
     // When entropy is high / confidence is ambiguous (top-1 < 0.75 or top-1/top-2 margin < 0.15),
     // tree branching simultaneously explores multi-token paths.
     // When confidence is very high (top-1 >= 0.75), deep linear chaining is preferred.
-    static const bool eagle2Enabled = [] {
-      const char *value = std::getenv("SPLASH_EAGLE2_DRAFT");
-      return value ? (std::atoi(value) != 0) : true;
-    }();
+    static const bool eagle2Enabled = eagle2DraftEnabled();
 
     drafts[0] = step(mtp.firstPosition, mtp.rows, mtp.tokens.data());
     draftTrace.chosen[0] = drafts[0];
@@ -3559,8 +3569,7 @@ void Qwen4ExpTarget::addVerify(
         // bandwidth with the misses it is meant to hide. It is separately
         // switchable so it can be measured against the prefetch above it,
         // which shares this block's single `lookahead` switch.
-        static const bool horizonAdvisory =
-            std::getenv("SPLASH_NO_HORIZON_ADVISORY") == nullptr;
+        static const bool horizonAdvisory = horizonAdvisoryEnabled();
         if (horizonAdvisory)
           adviseHorizonPredicted(layer + 2);
       }

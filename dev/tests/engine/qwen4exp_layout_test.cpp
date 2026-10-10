@@ -2,6 +2,7 @@
 #include "model/WeightStore.hpp"
 #include "ops/GDN.hpp"
 
+#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 
@@ -184,10 +185,41 @@ void stateLayoutsAreConsistent() {
           "GDN conv history must be taps minus one");
 }
 
+// Decode-feature defaults are set by measurement (see the switches in
+// Qwen4Exp.hpp): the horizon advisory regressed pinned-cache decode by
+// ~20% and must stay opt-in, the eviction guard stays on, and EAGLE-2 tree
+// drafting stays opt-in. This pins the polarity so a drive-by edit cannot
+// silently re-enable a measured cost. (The engine reads each switch once at
+// first decode, so this tests the predicate, not a live toggle.)
+void decodeFeatureSwitchDefaults() {
+  unsetenv("SPLASH_HORIZON_ADVISORY");
+  unsetenv("SPLASH_NO_HORIZON_ADVISORY");
+  unsetenv("SPLASH_NO_EVICTION_GUARD");
+  unsetenv("SPLASH_EAGLE2_DRAFT");
+  require(!horizonAdvisoryEnabled(), "horizon advisory must default off");
+  require(evictionGuardEnabled(), "eviction guard must default on");
+  require(!eagle2DraftEnabled(), "eagle-2 drafting must default off");
+  setenv("SPLASH_HORIZON_ADVISORY", "1", 1);
+  require(horizonAdvisoryEnabled(), "SPLASH_HORIZON_ADVISORY=1 must opt in");
+  setenv("SPLASH_NO_HORIZON_ADVISORY", "1", 1);
+  require(!horizonAdvisoryEnabled(), "explicit off must win over opt-in");
+  unsetenv("SPLASH_HORIZON_ADVISORY");
+  unsetenv("SPLASH_NO_HORIZON_ADVISORY");
+  setenv("SPLASH_NO_EVICTION_GUARD", "1", 1);
+  require(!evictionGuardEnabled(), "SPLASH_NO_EVICTION_GUARD=1 must opt out");
+  unsetenv("SPLASH_NO_EVICTION_GUARD");
+  setenv("SPLASH_EAGLE2_DRAFT", "1", 1);
+  require(eagle2DraftEnabled(), "SPLASH_EAGLE2_DRAFT=1 must opt in");
+  setenv("SPLASH_EAGLE2_DRAFT", "0", 1);
+  require(!eagle2DraftEnabled(), "SPLASH_EAGLE2_DRAFT=0 must stay off");
+  unsetenv("SPLASH_EAGLE2_DRAFT");
+}
+
 } // namespace
 
 int main() {
   try {
+    decodeFeatureSwitchDefaults();
     packedWidthsFollowFromTheConcatenation();
     linearAttentionLayers();
     supportedProjectionsAreQ4Aligned();

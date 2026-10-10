@@ -598,6 +598,34 @@ class ServerTest(unittest.TestCase):
         self.harnesses.append(harness)
         return harness
 
+    def test_bind_failure_reports_oserror_not_attribute_error(self):
+        # If the TCP bind fails, socketserver calls server_close() from
+        # inside __init__; unix_server must already exist or the real
+        # OSError is masked by AttributeError. No real socket needed: fail
+        # the bind with a mock so this runs anywhere binds are denied too.
+        runtime = FakeRuntime()
+        backend = backend_api.NativeBackend(
+            runtime, FakeTokenizer(), request_logger=None
+        )
+        app = request_frontend.Frontend(
+            FakeTokenizer(), backend, "test-model", 128, 16, 2, 2, None
+        )
+        try:
+            with mock.patch.object(
+                api.socketserver.TCPServer,
+                "server_bind",
+                side_effect=OSError("Address in use"),
+            ):
+                with self.assertRaises(OSError):
+                    api.FrontendServer(
+                        ("127.0.0.1", 0),
+                        app,
+                        api.HTTP_IO_TIMEOUT,
+                        request_capacity=4,
+                    )
+        finally:
+            backend.close()
+
     def test_expected_client_disconnect_does_not_print_server_traceback(self):
         harness = self.harness(FakeRuntime())
         with mock.patch.object(api.ThreadingHTTPServer, "handle_error") as parent:
