@@ -164,9 +164,22 @@ Both builds were run on one prompt with `SPLASH_STEP_TIMING=1`, which emits one
 
 **The current build misses 75% more experts per step.** That is the regression:
 staging and the host reads that serve it grow by about 20 ms/step, with a much
-smaller +6 ms on pure GPU compute. It also explains the cache sensitivity noted
-above — a build missing 128 experts a step is far more exposed to how many slots
-the budget buys than one missing 73.
+smaller +6 ms on pure GPU compute.
+
+Repeating the same run with the cache pinned to 34 GiB gives the full picture, and
+it is the sharpest diagnostic in this review:
+
+| build | 36 GiB (default) | 34 GiB |
+|---|---|---|
+| current | **128.1** misses/step | **102.7** |
+| published 10-04 | **73.2** | **78.9** |
+
+**The current build misses *more* experts when given *more* cache — 102.7 at
+34 GiB against 128.1 at 36 GiB.** The published build is flat across the two, and
+marginally better at 36 (73.2 against 78.9). Extra memory making residency worse
+is not a capacity shortfall: it is an admission or eviction policy that scales the
+wrong way. That is why the published build is indifferent to the budget while this
+one is not, and it means raising the cache budget is not a fix.
 
 This pointed at expert cache policy, and the victim-eviction safeguard added in
 `Qwen4ExpTarget.cpp` — which refuses to admit a new expert when the incumbent's
@@ -362,8 +375,10 @@ not loaded, and decode collapses to ~11 tok/s with no error message.
    73.2, worth about +16.4 ms/step and the whole of the 40.7 → 35.2 tok/s loss.
    The victim-eviction guard (`SPLASH_NO_EVICTION_GUARD`,
    `Qwen4ExpTarget.cpp:2466`) accounts for ~15 of them; the rest are unattributed.
-   The admission order is the untested suspect, since the predictor-v2 change
-   touches how candidates are ranked before they are offered to the cache.
+   The most specific clue is that misses *rise* with cache size (102.7 at 34 GiB
+   against 128.1 at 36 GiB) while the published build is flat, which points at
+   admission order rather than capacity — and the predictor-v2 change touches
+   exactly how candidates are ranked before they are offered to the cache.
    Nothing else here matters as much.
 2. **Implemented as a switch; whether it pays depends on the cache budget.**
    The horizon advisory now has its own condition, `SPLASH_NO_HORIZON_ADVISORY`
