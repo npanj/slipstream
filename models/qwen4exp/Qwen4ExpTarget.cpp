@@ -3548,7 +3548,15 @@ void Qwen4ExpTarget::addVerify(
       // so NVMe DMA pre-faults the next horizon.
       if (lookahead) {
         prefetchPredicted(layer + 1);
-        adviseHorizonPredicted(layer + 2);
+        // The horizon advisory pre-faults guessed experts of the layer two
+        // ahead, for every pipelined stage, and its guesses compete for SSD
+        // bandwidth with the misses it is meant to hide. It is separately
+        // switchable so it can be measured against the prefetch above it,
+        // which shares this block's single `lookahead` switch.
+        static const bool horizonAdvisory =
+            std::getenv("SPLASH_NO_HORIZON_ADVISORY") == nullptr;
+        if (horizonAdvisory)
+          adviseHorizonPredicted(layer + 2);
       }
       if (collectTiming) {
         totalStageMs += std::chrono::duration<double, std::milli>(
