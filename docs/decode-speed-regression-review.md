@@ -152,6 +152,32 @@ Two observations beyond the headline:
   not exclude is the weights having changed under both builds at some earlier
   date.
 
+## Where the extra time goes: expert misses (2026-10-09)
+
+Both builds were run on one prompt with `SPLASH_STEP_TIMING=1`, which emits one
+`[Verify Timing]` line per decode step, and the lines were averaged:
+
+| build | misses/step | staging | miss reads | pure GPU | GPU wall |
+|---|---|---|---|---|---|
+| current | **128.1** | 41.2 ms | 34.0 ms | 50.8 ms | 82.0 ms |
+| published 10-04 | **73.2** | 21.2 ms | 21.9 ms | 44.5 ms | 64.7 ms |
+
+**The current build misses 75% more experts per step.** That is the regression:
+staging and the host reads that serve it grow by about 20 ms/step, with a much
+smaller +6 ms on pure GPU compute. It also explains the cache sensitivity noted
+above — a build missing 128 experts a step is far more exposed to how many slots
+the budget buys than one missing 73.
+
+This points at expert cache policy rather than at the advisory, and one change
+fits the mechanism exactly: the victim-eviction safeguard added in
+`Qwen4ExpTarget.cpp`, which refuses to admit a new expert when the incumbent's
+frequency is higher and the candidate has fewer than two votes. Refusing
+admissions is precisely how misses rise. It has not been tested. The predictor-v2
+`std::sort` is the other in-file candidate, but that is a compute change and
+compute is the smaller side of this delta.
+
+Single prompt, 18–21 decoded steps per build: directional, not yet a constant.
+
 ### Confirmed by three-way isolation — conditional on the expert cache (2026-10-09)
 
 Neither call in the lookahead block could be measured through the switches that
@@ -251,13 +277,15 @@ file is unexplained and untested, and the suspects remain the predictor-v2 `std:
 and the victim-eviction safeguard that refuses to admit a new expert when the
 incumbent's frequency is higher and the candidate has fewer than two votes.
 
-The dominant open question is now a single one: **where the +16.4 ms/step comes
-from at the default expert cache.** It is the whole regression (40.7 → 35.2 tok/s
-against the rebuilt published baseline) and no switch measured here touches it —
-the horizon advisory, the only identified per-step cost, is worth nothing at the
-default cache. At 34 GiB it explains 16.9 of the 22.6 ms/step, leaving ~6 that
-behaves as if it were cache-independent, so the default-cache figure is not
-advisory plus a constant.
+The dominant open question is now narrowed to: **why the current build misses 75%
+more experts per step (128.1 against 73.2), which is the +16.4 ms/step.** No
+switch measured here touches it — the horizon advisory, the only identified
+per-step cost, is worth nothing at the default cache. At 34 GiB it explains 16.9
+of the 22.6 ms/step, leaving ~6 that behaves as if it were cache-independent, so
+the default-cache figure is not advisory plus a constant. The prime suspect is the
+victim-eviction safeguard in `Qwen4ExpTarget.cpp`, since refusing admissions
+produces exactly this signature; it is untested. The predictor-v2 `std::sort` is
+the remaining in-file candidate, though it is a compute change.
 
 Draft yield is **not** the open axis this review once said it was. Against the
 rebuilt published build it went up, 2.87 → 3.06 tok/step. The journal's 51.9 tok/s
