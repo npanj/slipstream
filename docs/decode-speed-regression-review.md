@@ -1,13 +1,19 @@
 # Decode speed regression review — 2026-10-09
 
-Measured on the working tree at `main` + the uncommitted 2026-10-05…10-09 work,
-on the same machine and model packages used for the recorded baselines.
+Measured on `main` at `19c4414` — the 2026-10-05…10-09 work — on the same
+machine and model packages used for the published baselines.
 
 ## Conclusion
 
-Decode on Flash-Next V3 has regressed roughly 20% (34.6 tok/s now against ~43
-recorded on 2026-10-08, on the same harness). The regression is almost entirely
-in one file, `models/qwen4exp/Qwen4ExpTarget.cpp`, and inside it the dominant
+Decode has regressed on both served models, measured against the numbers in the
+project's own release posts. On the identical 6 prompts behind
+`dev/benchmarks/comparison_swift-qwen38-flash-next-v3_results.json`, Flash-Next
+V3 decodes at 31.2 tok/s against a published 41.7 (−25%). On the identical
+5-domain suite in `npanj/splash-plus`, the 27B decodes at 30.8 against a
+published 36.9 (−17%). Both are same-prompt comparisons, so the gap is not a
+workload artifact. See *Published vs measured* below.
+
+On Flash-Next the regression is almost entirely in one file, `models/qwen4exp/Qwen4ExpTarget.cpp`, and inside it the dominant
 cost is the NVMe advisory work added on 2026-10-09 12:54: `adviseHorizonPredicted`
 called on every pipelined stage, plus a synchronous `adviseMissedExperts` call in
 the host miss-staging path. Together they cost ~9 of the ~13 ms/step that
@@ -17,6 +23,47 @@ tok/s with no other change).
 Speculation is **not** broken on either model. Flash-Next runs 3.06 tokens per
 step and the 27B runs 3.61 (greedy) / 3.85 (T=0.2). A dead drafter reads ~1.0
 tokens per step; that is not what is happening.
+
+## Published vs measured
+
+Both comparisons below run the **same prompts** as the published benchmark, on
+the same machine class (M5 Pro, 64 GB), greedy, against the current build.
+
+Flash-Next V3 — the 6 tasks of `dev/tools/compare_slipstream_vs_llamacpp.py`:
+
+| task | published | current build | delta |
+|---|---|---|---|
+| gsm8k_math | 44.5 | 33.5 | −25% |
+| math500_series | 43.7 | 32.0 | −27% |
+| constraint_logic | 46.2 | 30.5 | −34% |
+| python_intervals | 36.4 | 26.9 | −26% |
+| rust_csv | 39.9 | 29.9 | −25% |
+| tech_explanation | 39.6 | 34.1 | −14% |
+| **AVERAGE** | **41.7** | **31.2** | **−25%** |
+
+The published column is `comparison_swift-qwen38-flash-next-v3_results.json`;
+the release post's own table reports 40.8 for the same six tasks. `gsm8k_math`
+(196 tokens generated here against 192 published) and `rust_csv` (1200 against
+1199, both at the cap) are the clean controls: generation length is not what
+produces the gap. The 145-item scorecard figure of 43.9 for the same model
+agrees within a few percent of this 6-task average.
+
+27B Splash-HQ native 8-bit — the 5 domains of `npanj/splash-plus`
+(`scripts/run_all_models_standard_bench.py`, temperature 0.0, max_tokens 250):
+
+| domain | published | current build | delta |
+|---|---|---|---|
+| Math & Logic | 54.8 | 39.3 | −28% |
+| Coding & Algorithms | 34.7 | 31.9 | −8% |
+| Constraint Reasoning | 39.3 | 29.9 | −24% |
+| Domain Knowledge | 21.9 | 21.9 | 0% |
+| Nuanced Writing | 33.7 | 30.8 | −9% |
+| **AVERAGE** | **36.9** | **30.8** | **−17%** |
+
+A correction worth recording: matching these tasks to the local suite by *task
+name* suggested the two builds were within ~5%, because a local "GSM8K" or
+"Rust CSV" prompt is not the published prompt. Only running the published
+prompts shows the real, larger gap. Task-name similarity is not a comparison.
 
 ## How this was measured
 
@@ -123,10 +170,12 @@ lru 30.8 (3.56), explain 24.1 (2.78).
 Speculation is engaging in both cohorts, so the "speculation is not working"
 hypothesis does not hold up: this is ~2.6–2.9 accepted drafts beyond the anchor
 per step, and tokens per step reproduced exactly (3.61 in both greedy runs). It
-is nonetheless slower than the 2026-10-09 19:25 claim of 46.8 tok/s with 45.7%
-acceptance, which at a similar yield implies ~78 ms/step against the 115.7–125.5
-measured. There is no recorded same-harness 27B baseline, so this is a gap
-against a claim, not a measured regression.
+is nonetheless slower than the claim of 46.8 tok/s with 45.7% acceptance, which
+at a similar yield implies ~78 ms/step against the 115.7–125.5 measured. The
+same-suite comparison in *Published vs measured* is the firm version of this:
+30.8 against a published 36.9, and the two domains that fall hardest are Math &
+Logic (−28%) and Constraint Reasoning (−24%) — the structured-derivation text
+where the drafter has to guess most.
 
 What was *not* reproduced is the reported "very slow" speed; nothing offline went
 below 24 tok/s. A slow run that this harness cannot see would have to come from
@@ -150,8 +199,13 @@ not loaded, and decode collapses to ~11 tok/s with no error message.
 2. Default `SPLASH_EAGLE2_DRAFT=0` until it is measured as a win on this
    MoE-plus-SSD-streaming path; it costs 7% sampled today and was landed without
    a decode measurement.
-3. Re-measure the 27B on this harness and record the number, so the next
-   regression has a like-for-like baseline.
+3. Capture `draft_acceptance_rate` from `/slots` during a live run. Speculation
+   is engaging but the yield is low on structured-derivation text — the 27B loses
+   most on Math & Logic and Constraint Reasoning — so the next question is
+   acceptance, not raw speed.
+4. Keep the two published suites runnable from the repository — the 6-task
+   Flash-Next prompts and the 5-domain 27B suite — so the next regression is
+   measured against a like-for-like baseline instead of a cross-suite average.
 
 ## Limitations
 
@@ -165,6 +219,14 @@ not loaded, and decode collapses to ~11 tok/s with no error message.
   51.9 / 4.38 earlier in the same suite) come from the project journal, not from a
   pristine checkout re-measured here. The within-run comparisons above — 34.6 vs
   38.4 vs 38.2 vs 29.9 — are the hard evidence.
+- Both published columns were produced by earlier builds of this engine (the
+  27B figures by the `npanj/splash` q8 fork), so the comparison is
+  current-build versus published-build, not two builds of identical code. The
+  two engines compute `stream_tokens_per_second` in the same spirit — decode
+  only, prefill excluded — but their measurement windows could differ in detail.
+- The published 27B suite tokenises ~50 tokens shorter per prompt than the
+  current server does, a chat-template difference; user prompts and generation
+  length are identical.
 - The 27B live path was not measured: no server acceptance telemetry, and no
   long-context or constrained-decoding run.
 - The lower tokens per step (3.06 against 4.38 on this suite) is not attributed
