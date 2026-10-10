@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Slipstream — Visual Textbook</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel2: #1c2128;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --server: #58a6ff;
+    --engine: #d2a8ff;
+    --model: #7ee787;
+    --plugin: #ffa657;
+    --ops: #79c0ff;
+    --metal: #ff7b72;
+    --ssd: #e3b341;
+    --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif;
+    padding: 40px 24px 80px;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 32px; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 40px; font-size: 15px; }
+  h2 { font-size: 20px; margin: 40px 0 16px; }
+
+  /* ---- chapter grid ---- */
+  .chapters { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+  .chapter {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 22px;
+    text-decoration: none;
+    color: var(--text);
+    transition: border-color 0.15s, transform 0.15s;
+    display: block;
+  }
+  .chapter:hover {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+  }
+  .chapter .num {
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .chapter .title { font-weight: 700; font-size: 16px; margin-bottom: 6px; }
+  .chapter .desc { color: var(--muted); font-size: 13px; line-height: 1.5; }
+  .chapter .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    display: inline-block; margin-right: 8px;
+  }
+
+  /* ---- TOC sidebar ---- */
+  .toc {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    margin-bottom: 32px;
+  }
+  .toc h2 { margin-top: 0; font-size: 16px; }
+  .toc ol { padding-left: 20px; }
+  .toc li { margin: 6px 0; font-size: 14px; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+
+  /* ---- back link ---- */
+  .back {
+    display: inline-block;
+    margin-bottom: 24px;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 14px;
+  }
+  .back:hover { color: var(--accent); }
+
+  /* ---- footer ---- */
+  .footer {
+    margin-top: 48px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Slipstream: A Visual Textbook</h1>
+  <p class="subtitle">A component-by-component walkthrough of the Slipstream inference engine, from HTTP request to GPU kernel, with the data structures and control flow that make 40+ tok/s possible on a 64 GB Mac.</p>
+
+  <div class="toc">
+    <h2>Table of Contents</h2>
+    <ol>
+      <li><a href="01-big-picture.html">The Big Picture</a> — full system diagram, dependency rules</li>
+      <li><a href="02-server.html">The Server (Python)</a> — HTTP, chat template, tools, streaming</li>
+      <li><a href="03-protocol.html">The Wire Protocol</a> — binary frames, SPLH codec, transport</li>
+      <li><a href="04-engine.html">The Engine (C++)</a> — scheduler, cache, memory plan &amp; governor</li>
+      <li><a href="05-model-runtime.html">The Model Runtime (C++)</a> — decode loop, state, drafting</li>
+      <li><a href="06-models.html">Model Folders</a> — qwen4exp MoE, qwen38 Dense, plug-in points</li>
+      <li><a href="07-ops.html">Shared Ops (C++)</a> — kernel families: Linear, MoE, Attention, GDN…</li>
+      <li><a href="08-metal.html">The Metal Backend</a> — buffers, pipelines, command graphs, residency</li>
+      <li><a href="09-agent.html">The Agent Harness</a> — co-located coding agent, warm PTY, tools</li>
+      <li><a href="10-decode-step.html">One Decode Step, Annotated</a> — draft → verify → commit trace</li>
+      <li><a href="11-memory.html">Memory: The Three Ledgers</a> — physical, GPU, KV page management</li>
+      <li><a href="12-startup.html">Startup Sequence</a> — bootstrap stages, warmup, ready</li>
+    </ol>
+  </div>
+
+  <div class="chapters">
+    <a class="chapter" href="01-big-picture.html">
+      <div class="num">Chapter 01</div>
+      <div class="title"><span class="dot" style="background:var(--server)"></span>The Big Picture</div>
+      <div class="desc">Full system diagram from client to GPU. The six layers, the pipe boundary, and the dependency rules enforced by the architecture checker.</div>
+    </a>
+    <a class="chapter" href="02-server.html">
+      <div class="num">Chapter 02</div>
+      <div class="title"><span class="dot" style="background:var(--server)"></span>The Server (Python)</div>
+      <div class="desc">HTTP handler, SSE streaming, chat template, tool grammar, document/image preprocessing, and the subprocess pipe client.</div>
+    </a>
+    <a class="chapter" href="03-protocol.html">
+      <div class="num">Chapter 03</div>
+      <div class="title"><span class="dot" style="background:var(--engine)"></span>The Wire Protocol</div>
+      <div class="desc">Binary frame codec (SPLH), frame types, request/tokens/done payloads, and the FdTransport pipe loop.</div>
+    </a>
+    <a class="chapter" href="04-engine.html">
+      <div class="num">Chapter 04</div>
+      <div class="title"><span class="dot" style="background:var(--engine)"></span>The Engine (C++)</div>
+      <div class="desc">Scheduler phase FSM, batch packing, three-layer cache (KV pool, KV cache, state cache), memory plan and governor.</div>
+    </a>
+    <a class="chapter" href="05-model-runtime.html">
+      <div class="num">Chapter 05</div>
+      <div class="title"><span class="dot" style="background:var(--model)"></span>The Model Runtime (C++)</div>
+      <div class="desc">The 3220-line decode loop: draft → verify → accept → commit. Per-request state, execution limits, QwenTarget front class, DFlash draft.</div>
+    </a>
+    <a class="chapter" href="06-models.html">
+      <div class="num">Chapter 06</div>
+      <div class="title"><span class="dot" style="background:var(--plugin)"></span>Model Folders</div>
+      <div class="desc">qwen4exp 125.7B MoE (expert streaming, hyper-connections, MTP) and qwen38 27B Dense (DFlash, GDN). The four plug-in files.</div>
+    </a>
+    <a class="chapter" href="07-ops.html">
+      <div class="num">Chapter 07</div>
+      <div class="title"><span class="dot" style="background:var(--ops)"></span>Shared Ops (C++)</div>
+      <div class="desc">One C++ entry point per kernel family: Linear, MoE, PagedAttention, GDN, Sampling, RoPE, Embedding, Vision, PromptLookup.</div>
+    </a>
+    <a class="chapter" href="08-metal.html">
+      <div class="num">Chapter 08</div>
+      <div class="title"><span class="dot" style="background:var(--metal)"></span>The Metal Backend</div>
+      <div class="desc">GPU buffers, pre-compiled pipelines, command graphs with stage events, residency heartbeat, kernel organization, ABI.</div>
+    </a>
+    <a class="chapter" href="09-agent.html">
+      <div class="num">Chapter 09</div>
+      <div class="title"><span class="dot" style="background:var(--ssd)"></span>The Agent Harness</div>
+      <div class="desc">Co-located coding agent: warm PTY shell, in-process tools (file editor, ripgrep, web research, repo mapper), agent loop.</div>
+    </a>
+    <a class="chapter" href="10-decode-step.html">
+      <div class="num">Chapter 10</div>
+      <div class="title"><span class="dot" style="background:var(--model)"></span>One Decode Step, Annotated</div>
+      <div class="desc">Complete trace of a decode step: MTP draft (7 ms) → 48-layer verify (65 ms) → commit. Token-by-token acceptance.</div>
+    </a>
+    <a class="chapter" href="11-memory.html">
+      <div class="num">Chapter 11</div>
+      <div class="title"><span class="dot" style="background:var(--engine)"></span>Memory: The Three Ledgers</div>
+      <div class="desc">Physical memory governor, GPU memory plan, KV page pool. Pressure levels, hysteresis, budget example for 64 GB Mac.</div>
+    </a>
+    <a class="chapter" href="12-startup.html">
+      <div class="num">Chapter 12</div>
+      <div class="title"><span class="dot" style="background:var(--metal)"></span>Startup Sequence</div>
+      <div class="desc">Nine bootstrap stages: resource assembly → model creation → prefill/decode/draft warmup → memory audit → ready.</div>
+    </a>
+  </div>
+
+  <div class="footer">
+    Slipstream Visual Textbook · Generated from the codebase · See <code>docs/architecture.md</code> for the canonical document
+  </div>
+</div>
+</body>
+</html>

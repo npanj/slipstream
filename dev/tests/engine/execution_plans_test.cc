@@ -210,6 +210,28 @@ void allCandidates() {
       }
     }
   }
+  // The 27B DFlash draft shape plans through installed choices; unsupported
+  // shapes never reach a kernel.
+  const DraftAttentionShape draftShape{5120, 1280, 6144, 4096, 32, 8, 128};
+  constexpr std::array draftFields{
+      &DraftAttentionWorkspace::convolutionBytes,
+      &DraftAttentionWorkspace::qkvBytes,
+      &DraftAttentionWorkspace::groupedQueriesBytes,
+      &DraftAttentionWorkspace::queryKeysBytes,
+      &DraftAttentionWorkspace::queryValuesBytes};
+  for (uint32_t lanes = 1; lanes <= 4; ++lanes) {
+    for (auto config : DraftAttention::candidates(draftShape)) {
+      OperatorChoices choices;
+      choices.draftAttention.push_back({{draftShape, lanes}, config});
+      plans.install(choices);
+      const auto selected = plans.draftAttention(draftShape, lanes);
+      require(selected.configuration() == config,
+              "draft candidate not selected");
+      covers(plans.draftAttentionWorkspacePerLane(draftShape),
+             selected.workspace(), lanes, draftFields);
+    }
+  }
+  rejects([&] { (void)plans.draftAttention({1, 1, 1, 1, 1, 1, 1}, 1); });
   for (auto shape : moeShapes) {
     for (uint32_t rows : {1U, 17U, 2048U})
       for (const auto &candidate : plans.moeCandidates({shape, rows, MoePhase::Prefill})) {

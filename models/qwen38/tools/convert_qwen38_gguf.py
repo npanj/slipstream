@@ -193,6 +193,20 @@ def convert_single_layer(
                 reader.read_tensor(f"{prefix}.ssm_in.weight"), group=64, bits=4
             )
             packed.section(tile_q4(*pad_rows(*ssm_in, LAYOUT["packed_gdn"])))
+        elif reader.has(f"{prefix}.attn_qkv.weight") and reader.has(f"{prefix}.attn_gate.weight"):
+            # Standard Qwen3.5 / Qwen3.8 GGUF linear attention decomposition
+            qkv_t = reader.read_tensor(f"{prefix}.attn_qkv.weight")
+            gate_t = reader.read_tensor(f"{prefix}.attn_gate.weight")
+            qkv = quantize_affine(qkv_t, group=64, bits=4)
+            gate = quantize_affine(gate_t, group=64, bits=4)
+            parts = [qkv, gate]
+            if reader.has(f"{prefix}.ssm_beta.weight"):
+                beta = quantize_affine(reader.read_tensor(f"{prefix}.ssm_beta.weight"), group=64, bits=4)
+                parts.append(beta)
+            if reader.has(f"{prefix}.ssm_alpha.weight"):
+                alpha = quantize_affine(reader.read_tensor(f"{prefix}.ssm_alpha.weight"), group=64, bits=4)
+                parts.append(alpha)
+            packed.section(tile_q4(*concatenate(parts, LAYOUT["packed_gdn"])))
         else:
             # Fallback to individual projections
             qkv_key = (
@@ -237,7 +251,9 @@ def convert_single_layer(
         packed.section((-np.exp(a_log)).astype("<f4").tobytes())
 
         dt_key = (
-            f"{prefix}.ssm_dt"
+            f"{prefix}.ssm_dt.bias"
+            if reader.has(f"{prefix}.ssm_dt.bias")
+            else f"{prefix}.ssm_dt"
             if reader.has(f"{prefix}.ssm_dt")
             else f"{prefix}.linear_attn.dt_bias"
         )
@@ -260,7 +276,9 @@ def convert_single_layer(
 
     # 3. Post Attention Layernorm
     post_norm_key = (
-        f"{prefix}.ffn_norm.weight"
+        f"{prefix}.post_attention_norm.weight"
+        if reader.has(f"{prefix}.post_attention_norm.weight")
+        else f"{prefix}.ffn_norm.weight"
         if reader.has(f"{prefix}.ffn_norm.weight")
         else f"{prefix}.post_attention_layernorm.weight"
     )
@@ -432,9 +450,21 @@ def prepare_gguf_model(
         cfg["text_config"].setdefault("max_position_embeddings", 262144)
     cfg_file.write_text(json.dumps(cfg, indent=2))
 
+    # Link vision tower if present in source
+    vision_src = model_dir / "vision" / "model.bin"
+    if vision_src.exists():
+        vision_dst_dir = output_dir / "vision"
+        vision_dst_dir.mkdir(parents=True, exist_ok=True)
+        vision_dst = vision_dst_dir / "model.bin"
+        if not vision_dst.exists():
+            try:
+                os.link(vision_src, vision_dst)
+            except OSError:
+                shutil.copy2(vision_src, vision_dst)
+
     # Generate manifest.json
     artifacts = []
-    for sub in ["target", "tokenizer"]:
+    for sub in ["target", "tokenizer", "vision"]:
         p = output_dir / sub
         if not p.exists():
             continue

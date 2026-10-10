@@ -25,10 +25,22 @@ struct CacheNamespace final {
   bool operator==(const CacheNamespace &) const = default;
 };
 
+struct ImageIdentity final {
+  uint64_t lo = 0;
+  uint64_t hi = 0;
+
+  bool operator==(const ImageIdentity &) const = default;
+};
+
+[[nodiscard]] ImageIdentity
+blockImageIdentity(uint64_t blockBegin, uint32_t blockTokens,
+                   std::span<const ImageSpan> spans) noexcept;
+
 struct KvBlockKeyView final {
   uint64_t parentBlock = 0;
   uint64_t indexHash = 0;
   std::span<const uint32_t> tokens;
+  ImageIdentity images;
 };
 
 // Hashes filter candidates; equality still requires the complete key.
@@ -67,20 +79,63 @@ public:
   KvCache &operator=(const KvCache &) = delete;
   ~KvCache() noexcept;
 
-  // Keys are the parent block and the exact tokens.
+  // Keys are the parent block, the exact tokens, and the identity of any
+  // image content the rows depend on (zero for text-only blocks).
   [[nodiscard]] std::optional<BlockMatch> find(uint64_t parentBlock,
-                                               std::span<const uint32_t> tokens) const;
+                                               std::span<const uint32_t> tokens,
+                                               ImageIdentity images = {}) const;
   [[nodiscard]] InsertResult insert(uint64_t parentBlock,
                                     std::span<const uint32_t> tokens,
-                                    uint32_t physicalPage);
+                                    uint32_t physicalPage,
+                                    ImageIdentity images = {});
 
   void retainActive(uint64_t blockId);
   void releaseActive(uint64_t blockId) noexcept;
   void touch(uint64_t blockId) noexcept;
 
+  void retainChain(uint64_t blockId);
+  void releaseChain(uint64_t blockId) noexcept;
+
+  // Forks a copy-on-write branch from an existing block chain.
+  // Retains all ancestor blocks in the chain, allowing an exploratory
+  // branch to append new child pages without duplicating ancestor VRAM.
+  [[nodiscard]] uint64_t forkBranch(uint64_t blockId);
+
+  // Attention-Saliency tracking for Heavy-Hitter (H2O) cache optimization.
+  void recordSaliency(uint64_t blockId, float weight);
+  [[nodiscard]] float blockSaliency(uint64_t blockId) const noexcept;
+  [[nodiscard]] std::vector<uint64_t> lowSaliencyBlocks(uint64_t chainBlockId,
+                                                        float threshold) const;
+
+  // Permanent Root Prefix Pinning: freezes immutable system prompt and
+  // workspace symbols into resident KV blocks with 0 ms re-prefill and immune to LRU eviction.
+  void pinRootChain(uint64_t blockId);
+  void unpinRootChain(uint64_t blockId) noexcept;
+  [[nodiscard]] bool isRootPinned(uint64_t blockId) const noexcept;
+
   [[nodiscard]] Chain chain(uint64_t blockId) const;
   [[nodiscard]] bool contains(uint64_t blockId) const noexcept;
   [[nodiscard]] uint32_t chainLength(uint64_t blockId) const;
+
+  struct BlockExport final {
+    uint64_t id = 0;
+    uint64_t parent = 0;
+    std::array<uint32_t, pageTokens> tokens{};
+    uint32_t physicalPage = 0;
+    uint32_t depth = 0;
+  };
+
+
+  [[nodiscard]] std::optional<BlockExport> exportBlock(uint64_t blockId) const;
+  [[nodiscard]] std::vector<BlockExport> vaultChain(uint64_t blockId) const;
+
+  // Splices a new chain by skipping middle blocks between ancestorBlockId and descendantBlockId.
+  // Returns a Chain containing ancestor's prefix pages concatenated with descendant's suffix pages,
+  // enabling zero-recompute history compaction.
+  [[nodiscard]] Chain spliceChain(uint64_t ancestorBlockId,
+                                  uint64_t descendantBlockId) const;
+
+
 
   // Only a leaf unused by active requests can be removed. The caller handles
   // any composite state attached to the returned block before erase().
@@ -100,19 +155,23 @@ private:
     uint64_t parent = 0;
     uint64_t indexHash = 0;
     std::array<uint32_t, pageTokens> tokens{};
+    ImageIdentity images;
     uint32_t physicalPage = 0;
     uint32_t children = 0;
     uint32_t activeUsers = 0;
     uint32_t depth = 0;
     uint64_t lastUsed = 0;
+    float saliency = 1.0f;
     // Allocate the index node once at publication. Pinned/non-leaf blocks
     // retain it here, so unpinning and eviction never allocate under pressure.
     EvictionOrder::node_type evictionNode;
     bool evictable = false;
+    bool pinned = false;
   };
 
   [[nodiscard]] uint64_t indexHash(uint64_t parentBlock,
-                                   std::span<const uint32_t> tokens) const noexcept;
+                                   std::span<const uint32_t> tokens,
+                                   ImageIdentity images) const noexcept;
   [[nodiscard]] Block &block(uint64_t blockId);
   [[nodiscard]] const Block &block(uint64_t blockId) const;
   void touchEvictable(uint64_t blockId) noexcept;

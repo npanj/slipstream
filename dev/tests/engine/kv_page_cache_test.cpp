@@ -39,6 +39,48 @@ std::array<uint32_t, KvCache::pageTokens> page(uint32_t token) {
   return result;
 }
 
+void testImageIdentityKeysBlocks() {
+  test::TestKvBacking backing(8, 100);
+  KvPool pool(backing);
+  CacheRecency recency;
+  KvCache cache(pool, cacheNamespace(), recency);
+  auto acquired = pool.acquirePages(2, false);
+  require(acquired.granted() && acquired.pages.size() == 2,
+          "test pages were not acquired");
+
+  // Two images with the same grid and placeholder tokens differ only by
+  // content digest; text-only lookups carry the zero identity.
+  const ImageSpan red{8, 16, 8, 8, 0x1111, 0x2222};
+  const ImageSpan blue{8, 16, 8, 8, 0x3333, 0x4444};
+  const std::array<ImageSpan, 1> redSpans{red};
+  const std::array<ImageSpan, 1> blueSpans{blue};
+  require(blockImageIdentity(0, 32, {}) == ImageIdentity{},
+          "text-only block identity must be zero");
+  require(blockImageIdentity(32, 32, redSpans) == ImageIdentity{},
+          "a block after the image must not carry image identity");
+  const ImageIdentity redIdentity = blockImageIdentity(0, 32, redSpans);
+  const ImageIdentity blueIdentity = blockImageIdentity(0, 32, blueSpans);
+  require(redIdentity != ImageIdentity{} && redIdentity != blueIdentity,
+          "image identity does not depend on the content digest");
+  const ImageSpan redLater{40, 16, 8, 8, 0x1111, 0x2222};
+  const std::array<ImageSpan, 1> laterSpans{redLater};
+  require(blockImageIdentity(32, 32, laterSpans) != redIdentity,
+          "image identity ignores the block's alignment inside the image");
+
+  const auto tokens = page(248056);
+  auto redBlock = cache.insert(0, tokens, acquired.pages[0], redIdentity);
+  require(redBlock.inserted, "image block was not inserted");
+  require(!cache.find(0, tokens), "text-only lookup matched an image block");
+  require(!cache.find(0, tokens, blueIdentity),
+          "a different image matched a token-identical block");
+  auto found = cache.find(0, tokens, redIdentity);
+  require(found && found->id == redBlock.id,
+          "identical image content did not match its block");
+  auto blueBlock = cache.insert(0, tokens, acquired.pages[1], blueIdentity);
+  require(blueBlock.inserted && blueBlock.id != redBlock.id,
+          "token-identical blocks with different images were merged");
+  for (uint32_t physical : acquired.pages) pool.releasePage(physical, false);
+}
 
 void testExactChainedBlocksAndPhysicalOwnership() {
   test::TestKvBacking backing(8, 100);
@@ -272,12 +314,161 @@ void testHashCollisionStillRequiresExactTokens() {
   auto right = left;
   right.back() = 8;
   constexpr uint64_t forcedCollision = 0x12345678;
-  const KvBlockKeyView stored{11, forcedCollision, left};
-  const KvBlockKeyView colliding{11, forcedCollision, right};
-  const KvBlockKeyView exact{11, forcedCollision, left};
+  const KvBlockKeyView stored{11, forcedCollision, left, {}};
+  const KvBlockKeyView colliding{11, forcedCollision, right, {}};
+  const KvBlockKeyView exact{11, forcedCollision, left, {}};
   require(!exactKvBlockKeyMatch(stored, colliding) &&
               exactKvBlockKeyMatch(stored, exact),
           "KV block matching trusted a colliding index hash");
+}
+
+void testSpliceChainPreservesPrefixAndSuffixPages() {
+  test::TestKvBacking backing(8, 100);
+  KvPool pool(backing);
+  CacheRecency recency;
+  KvCache cache(pool, cacheNamespace(), recency);
+
+  auto acquired = pool.acquirePages(4, false);
+  require(acquired.granted() && acquired.pages.size() == 4, "acquire pages failed");
+
+  // Create chain: Root (Block 1, page 0) -> Turn 1 (Block 2, page 1) -> Turn 2 (Block 3, page 2) -> Turn 3 (Block 4, page 3)
+  auto r1 = cache.insert(0, page(101), acquired.pages[0]);
+  auto r2 = cache.insert(r1.id, page(102), acquired.pages[1]);
+  auto r3 = cache.insert(r2.id, page(103), acquired.pages[2]);
+  auto r4 = cache.insert(r3.id, page(104), acquired.pages[3]);
+
+  // Splice: Skip middle turn 1 & 2 (blocks 2 & 3), keeping root (block 1) and turn 3 (block 4)
+  auto spliced = cache.spliceChain(r1.id, r4.id);
+  // Root has 1 block, r4 chain has 4 blocks -> total 5 blocks in spliced chain
+  require(spliced.pages.size() == 5, "splice chain size mismatch");
+  require(spliced.pages[0] == acquired.pages[0], "root page must match");
+  require(spliced.pages.back() == acquired.pages[3], "suffix page must match");
+}
+
+void testVaultChainExport() {
+  test::TestKvBacking backing(8, 100);
+  KvPool pool(backing);
+  CacheRecency recency;
+  KvCache cache(pool, cacheNamespace(), recency);
+
+  auto acquired = pool.acquirePages(3, false);
+  require(acquired.granted() && acquired.pages.size() == 3, "acquire pages failed");
+
+  auto b1 = cache.insert(0, page(201), acquired.pages[0]);
+  auto b2 = cache.insert(b1.id, page(202), acquired.pages[1]);
+  auto b3 = cache.insert(b2.id, page(203), acquired.pages[2]);
+
+  auto exported = cache.vaultChain(b3.id);
+  require(exported.size() == 3, "vault chain size must be 3");
+  require(exported[0].id == b1.id, "first vaulted block must be b1");
+  require(exported[1].id == b2.id, "second vaulted block must be b2");
+  require(exported[2].id == b3.id, "third vaulted block must be b3");
+  require(exported[0].tokens[0] == 201, "tokens must match exported block");
+  require(exported[2].tokens[0] == 203, "tokens must match exported block");
+}
+
+void testForkBranchCoW() {
+  test::TestKvBacking backing(8, 100);
+  KvPool pool(backing);
+  CacheRecency recency;
+  KvCache cache(pool, cacheNamespace(), recency);
+
+  auto acquired = pool.acquirePages(3, false);
+  require(acquired.granted() && acquired.pages.size() == 3, "acquire pages failed");
+
+  auto root = cache.insert(0, page(301), acquired.pages[0]);
+  auto b1 = cache.insert(root.id, page(302), acquired.pages[1]);
+  auto b2 = cache.insert(b1.id, page(303), acquired.pages[2]);
+
+  // Before fork: b2 is evictable leaf
+  require(cache.evictionCandidate().value().id == b2.id, "b2 must be eviction candidate before fork");
+
+  // Fork CoW branch from b2
+  uint64_t forkId = cache.forkBranch(b2.id);
+  require(forkId == b2.id, "forkId must match blockId");
+
+  // While branch is active, the chain is pinned and not evictable
+  require(!cache.evictionCandidate().has_value(), "forked chain must be protected from eviction");
+
+  // Release branch
+  cache.releaseChain(forkId);
+  require(cache.evictionCandidate().value().id == b2.id, "b2 must be eviction candidate after release");
+}
+
+void testAttentionSaliencyTracking() {
+  test::TestKvBacking backing(8, 100);
+  KvPool pool(backing);
+  CacheRecency recency;
+  KvCache cache(pool, cacheNamespace(), recency);
+
+  auto acquired = pool.acquirePages(3, false);
+  require(acquired.granted() && acquired.pages.size() == 3, "acquire pages failed");
+
+  auto root = cache.insert(0, page(401), acquired.pages[0]);
+  auto toolOutput = cache.insert(root.id, page(402), acquired.pages[1]);
+  auto finalAnswer = cache.insert(toolOutput.id, page(403), acquired.pages[2]);
+
+  // Default saliency is 1.0f
+  require(cache.blockSaliency(toolOutput.id) == 1.0f, "initial saliency must be 1.0f");
+
+  // Record low attention weight on tool output multiple times
+  cache.recordSaliency(toolOutput.id, 0.05f);
+  cache.recordSaliency(toolOutput.id, 0.05f);
+  cache.recordSaliency(toolOutput.id, 0.05f);
+
+  // Record high attention weight on final answer
+  cache.recordSaliency(finalAnswer.id, 0.95f);
+
+  require(cache.blockSaliency(toolOutput.id) < 0.6f, "tool output saliency must have decayed");
+  require(cache.blockSaliency(finalAnswer.id) > 0.9f, "final answer saliency must remain high");
+
+  // Query low-saliency blocks below threshold 0.7f
+  auto lowBlocks = cache.lowSaliencyBlocks(finalAnswer.id, 0.7f);
+  require(lowBlocks.size() == 1, "exactly one low-saliency block expected");
+  require(lowBlocks[0] == toolOutput.id, "low saliency block must be toolOutput");
+}
+
+void testPermanentRootPrefixPinning() {
+  test::TestKvBacking backing(5, 100);
+  KvPool pool(backing);
+  CacheRecency recency;
+  KvCache cache(pool, cacheNamespace(), recency);
+
+  auto acquired = pool.acquirePages(3, false);
+  require(acquired.granted() && acquired.pages.size() == 3, "acquire pages failed");
+
+  auto root = cache.insert(0, page(501), acquired.pages[0]);
+  auto turn1 = cache.insert(root.id, page(502), acquired.pages[1]);
+
+  require(!cache.isRootPinned(root.id), "root should not be pinned initially");
+
+  // Pin root chain: permanently locks root in RAM
+  cache.pinRootChain(root.id);
+  require(cache.isRootPinned(root.id), "root must now be pinned");
+
+  // Turn 1 leaf is evictable, but pinned root must NEVER be evictable
+  cache.erase(turn1.id);
+
+  // After turn1 is erased, root becomes a leaf. But because it is pinned,
+  // evictionCandidate() must NOT return it!
+  auto candidate = cache.evictionCandidate();
+  require(!candidate.has_value(), "pinned root must not be an eviction candidate");
+
+  // Direct erase of pinned root must be rejected
+  requireThrows<std::logic_error>(
+      [&] { cache.erase(root.id); },
+      "cannot evict a pinned KV cache root block");
+
+  // Unpin root chain restores normal eviction eligibility
+  cache.unpinRootChain(root.id);
+  require(!cache.isRootPinned(root.id), "root must be unpinned");
+
+  auto unpinnedCandidate = cache.evictionCandidate();
+  require(unpinnedCandidate.has_value() && unpinnedCandidate->id == root.id,
+          "unpinned root must now be an eviction candidate");
+
+  cache.erase(root.id);
+  require(cache.snapshot().blocks == 0, "cache must be empty after erasing unpinned root");
 }
 
 } // namespace
@@ -285,10 +476,16 @@ void testHashCollisionStillRequiresExactTokens() {
 int main() {
   try {
     testExactChainedBlocksAndPhysicalOwnership();
+    testImageIdentityKeysBlocks();
     testErasedLeafParentInheritsRecency();
     testInputValidation();
     testCandidateOrderThroughChurn();
     testHashCollisionStillRequiresExactTokens();
+    testSpliceChainPreservesPrefixAndSuffixPages();
+    testVaultChainExport();
+    testForkBranchCoW();
+    testAttentionSaliencyTracking();
+    testPermanentRootPrefixPinning();
     std::cout << "KV page cache tests passed\n";
     return 0;
   } catch (const std::exception &error) {
@@ -296,3 +493,5 @@ int main() {
     return 1;
   }
 }
+
+

@@ -36,6 +36,17 @@ struct TargetSamplingBatchParams {
 static_assert(sizeof(TargetSamplingBatchParams) == 68,
               "Batched target sampling parameters are 68 bytes on both sides");
 
+struct SelectorBatchParams {
+  uint32_t anchor[SPLASH_MAXIMUM_BATCH_WIDTH];
+  float temperature[SPLASH_MAXIMUM_BATCH_WIDTH];
+  uint32_t lanes;
+  uint32_t sampling_mask;
+  uint32_t vocabulary;
+};
+
+static_assert(sizeof(SelectorBatchParams) == 44,
+              "Draft selector parameters are 44 bytes on both sides");
+
 struct VerifyInputBatchParams {
   uint32_t lanes;
   uint32_t vocabulary;

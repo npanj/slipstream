@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Slipstream — Block Diagram</title>
+<style>
+  :root { --bg:#0d1117; --text:#e6edf3; --muted:#8b949e; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Helvetica,Arial,sans-serif;
+    padding:32px 20px 60px; }
+  .wrap { max-width:1480px; margin:0 auto; }
+  h1 { font-size:24px; margin-bottom:2px; }
+  .sub { color:var(--muted); font-size:14px; margin-bottom:20px; }
+  svg { width:100%; height:auto; display:block; }
+  .steps { display:grid; grid-template-columns:1fr 1fr; gap:6px 28px; margin-top:24px;
+    font-size:12.5px; color:var(--muted); }
+  .steps b { color:var(--text); font-weight:600; }
+  .steps .n { display:inline-block; min-width:20px; color:#3fb950; font-weight:700;
+    font-family:"SF Mono",Menlo,monospace; font-size:11.5px; }
+  @media (max-width:800px){ .steps{grid-template-columns:1fr;} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>⚡ Slipstream — component &amp; request-flow block diagram</h1>
+  <div class="sub">Two processes, one pipe. Green = request path, blue = token return path. Numbered badges trace one <code>/v1/chat/completions</code> call end to end.</div>
+
+<svg viewBox="0 0 1440 950" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Slipstream block diagram">
+  <defs>
+    <marker id="m-green"  viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3fb950"/></marker>
+    <marker id="m-blue"   viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#58a6ff"/></marker>
+    <marker id="m-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#d2a8ff"/></marker>
+    <marker id="m-red"    viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#ff7b72"/></marker>
+    <marker id="m-yellow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#e3b341"/></marker>
+    <marker id="m-gray"   viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker>
+  </defs>
+
+  <rect x="0" y="0" width="1440" height="950" fill="#0d1117"/>
+
+  <!-- ============ CLIENT ============ -->
+  <rect x="120" y="24" width="260" height="56" rx="10" fill="#161b22" stroke="#8b949e" stroke-width="1.5"/>
+  <text x="250" y="47" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="700">HTTP client</text>
+  <text x="250" y="66" text-anchor="middle" fill="#8b949e" font-size="11">curl · app · agent · OpenAI / Anthropic API</text>
+
+  <!-- client -> server -->
+  <path d="M 250 80 L 250 170" stroke="#3fb950" stroke-width="2" fill="none" marker-end="url(#m-green)"/>
+  <circle cx="250" cy="125" r="11" fill="#0d1117" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="250" y="129" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="700">1</text>
+  <text x="262" y="122" fill="#8b949e" font-size="10.5">POST /v1/chat/completions</text>
+
+  <!-- ============ PYTHON PROCESS ============ -->
+  <rect x="80" y="130" width="1280" height="190" rx="12" fill="rgba(88,166,255,0.04)" stroke="#58a6ff" stroke-opacity="0.55" stroke-width="1.5"/>
+  <text x="98" y="154" fill="#58a6ff" font-size="12.5" font-weight="700" letter-spacing="1">PYTHON PROCESS — server/</text>
+
+  <rect x="110" y="170" width="230" height="110" rx="9" fill="rgba(88,166,255,0.08)" stroke="#58a6ff"/>
+  <text x="225" y="196" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="700">HTTP routes</text>
+  <text x="225" y="214" text-anchor="middle" fill="#8b949e" font-size="10.5">server.py · ThreadingHTTPServer</text>
+  <text x="225" y="230" text-anchor="middle" fill="#8b949e" font-size="10.5">auth · deadlines · SSE streaming</text>
+  <text x="225" y="246" text-anchor="middle" fill="#8b949e" font-size="10.5">OpenAI / Anthropic / Responses</text>
+
+  <rect x="390" y="170" width="250" height="110" rx="9" fill="rgba(88,166,255,0.08)" stroke="#58a6ff"/>
+  <text x="515" y="196" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="700">Frontend</text>
+  <text x="515" y="214" text-anchor="middle" fill="#8b949e" font-size="10.5">frontend.py</text>
+  <text x="515" y="230" text-anchor="middle" fill="#8b949e" font-size="10.5">chat template · image resize</text>
+  <text x="515" y="246" text-anchor="middle" fill="#8b949e" font-size="10.5">tokenize · context check</text>
+
+  <rect x="690" y="170" width="230" height="110" rx="9" fill="rgba(88,166,255,0.08)" stroke="#58a6ff"/>
+  <text x="805" y="196" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="700">Backend</text>
+  <text x="805" y="214" text-anchor="middle" fill="#8b949e" font-size="10.5">backend.py</text>
+  <text x="805" y="230" text-anchor="middle" fill="#8b949e" font-size="10.5">submit · cancel · priorities</text>
+  <text x="805" y="246" text-anchor="middle" fill="#8b949e" font-size="10.5">startup retry (1×, 2 s grace)</text>
+
+  <rect x="970" y="170" width="350" height="110" rx="9" fill="rgba(88,166,255,0.08)" stroke="#58a6ff"/>
+  <text x="1145" y="196" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="700">Runtime client</text>
+  <text x="1145" y="214" text-anchor="middle" fill="#8b949e" font-size="10.5">runtime.py · protocol.py</text>
+  <text x="1145" y="230" text-anchor="middle" fill="#8b949e" font-size="10.5">frame codec v5 · selectors pipe loop</text>
+  <text x="1145" y="246" text-anchor="middle" fill="#8b949e" font-size="10.5">CPU grammar masks · crash-trace ring</text>
+
+  <path d="M 340 225 L 390 225" stroke="#3fb950" stroke-width="2" fill="none" marker-end="url(#m-green)"/>
+  <circle cx="365" cy="225" r="11" fill="#0d1117" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="365" y="229" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="700">2</text>
+  <path d="M 640 225 L 690 225" stroke="#3fb950" stroke-width="2" fill="none" marker-end="url(#m-green)"/>
+  <circle cx="665" cy="225" r="11" fill="#0d1117" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="665" y="229" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="700">3</text>
+  <path d="M 920 225 L 970 225" stroke="#3fb950" stroke-width="2" fill="none" marker-end="url(#m-green)"/>
+  <circle cx="945" cy="225" r="11" fill="#0d1117" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="945" y="229" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="700">4</text>
+
+  <!-- ============ PIPE ============ -->
+  <path d="M 1100 280 L 1100 440" stroke="#3fb950" stroke-width="2.5" fill="none" marker-end="url(#m-green)"/>
+  <circle cx="1100" cy="360" r="11" fill="#0d1117" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="1100" y="364" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="700">5</text>
+  <text x="1112" y="352" fill="#8b949e" font-size="10.5">request frame</text>
+  <text x="1112" y="366" fill="#8b949e" font-size="10.5">(24-byte LE header)</text>
+
+  <path d="M 1240 440 L 1240 280" stroke="#58a6ff" stroke-width="2.5" fill="none" marker-end="url(#m-blue)"/>
+  <circle cx="1240" cy="360" r="11" fill="#0d1117" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="1240" y="364" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="700">12</text>
+  <text x="1228" y="352" text-anchor="end" fill="#8b949e" font-size="10.5">token / status</text>
+  <text x="1228" y="366" text-anchor="end" fill="#8b949e" font-size="10.5">frames</text>
+
+  <!-- SSE return to client -->
+  <path d="M 1240 170 L 1240 52 L 380 52" stroke="#58a6ff" stroke-width="2" fill="none" marker-end="url(#m-blue)"/>
+  <text x="810" y="44" text-anchor="middle" fill="#58a6ff" font-size="11">SSE token stream → client</text>
+
+  <!-- ============ NATIVE PROCESS ============ -->
+  <rect x="80" y="400" width="1280" height="480" rx="12" fill="rgba(210,168,255,0.04)" stroke="#d2a8ff" stroke-opacity="0.55" stroke-width="1.5"/>
+  <text x="98" y="424" fill="#d2a8ff" font-size="12.5" font-weight="700" letter-spacing="1">NATIVE ENGINE PROCESS — runtime/  (main.mm → Bootstrap → NativeRuntime::tick())</text>
+
+  <!-- row 1 -->
+  <rect x="110" y="440" width="290" height="90" rx="9" fill="rgba(210,168,255,0.08)" stroke="#d2a8ff"/>
+  <text x="255" y="466" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="700">Memory plan / governor</text>
+  <text x="255" y="484" text-anchor="middle" fill="#8b949e" font-size="10.5">MemoryPlan · MemoryGovernor · MemoryAudit</text>
+  <text x="255" y="500" text-anchor="middle" fill="#8b949e" font-size="10.5">KV page grants · host-pressure backoff</text>
+
+  <rect x="560" y="440" width="390" height="90" rx="9" fill="rgba(210,168,255,0.08)" stroke="#d2a8ff"/>
+  <text x="755" y="466" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="700">Engine + Scheduler</text>
+  <text x="755" y="484" text-anchor="middle" fill="#8b949e" font-size="10.5">Engine.cpp · Scheduler.cpp</text>
+  <text x="755" y="500" text-anchor="middle" fill="#8b949e" font-size="10.5">request state machine · prefill packing · decode lanes · deadlines</text>
+
+  <rect x="1000" y="440" width="320" height="90" rx="9" fill="rgba(210,168,255,0.08)" stroke="#d2a8ff"/>
+  <text x="1160" y="466" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="700">Protocol + transport</text>
+  <text x="1160" y="484" text-anchor="middle" fill="#8b949e" font-size="10.5">Protocol.cpp · FdTransport</text>
+  <text x="1160" y="500" text-anchor="middle" fill="#8b949e" font-size="10.5">frame decode · nonblocking pipe loop</text>
+
+  <!-- governor <-> engine -->
+  <path d="M 400 485 L 560 485" stroke="#d2a8ff" stroke-width="2" fill="none" marker-start="url(#m-purple)" marker-end="url(#m-purple)"/>
+  <circle cx="480" cy="485" r="11" fill="#0d1117" stroke="#d2a8ff" stroke-width="1.5"/>
+  <text x="480" y="489" text-anchor="middle" fill="#d2a8ff" font-size="11" font-weight="700">8</text>
+  <text x="480" y="472" text-anchor="middle" fill="#8b949e" font-size="10.5">KV page grant</text>
+
+  <!-- engine <-> protocol -->
+  <path d="M 1000 485 L 950 485" stroke="#3fb950" stroke-width="2" fill="none" marker-end="url(#m-green)"/>
+  <circle cx="975" cy="485" r="11" fill="#0d1117" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="975" y="489" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="700">6</text>
+  <text x="975" y="508" text-anchor="middle" fill="#8b949e" font-size="10.5">admit</text>
+  <path d="M 950 465 L 1000 465" stroke="#58a6ff" stroke-width="2" fill="none" marker-end="url(#m-blue)"/>
+  <text x="975" y="458" text-anchor="middle" fill="#8b949e" font-size="10.5">token</text>
+
+  <!-- engine <-> kv cache (routed) -->
+  <path d="M 660 530 L 660 555 L 220 555 L 220 580" stroke="#d2a8ff" stroke-width="2" fill="none" marker-start="url(#m-purple)" marker-end="url(#m-purple)"/>
+  <circle cx="440" cy="555" r="11" fill="#0d1117" stroke="#d2a8ff" stroke-width="1.5"/>
+  <text x="440" y="559" text-anchor="middle" fill="#d2a8ff" font-size="11" font-weight="700">7</text>
+  <text x="440" y="542" text-anchor="middle" fill="#8b949e" font-size="10.5">prefix lookup → resume boundary</text>
+
+  <!-- engine -> model runtime (BatchPlan) -->
+  <path d="M 850 530 L 850 580" stroke="#3fb950" stroke-width="2" fill="none" marker-end="url(#m-green)"/>
+  <circle cx="850" cy="555" r="11" fill="#0d1117" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="850" y="559" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="700">9</text>
+  <text x="862" y="552" fill="#8b949e" font-size="10.5">BatchPlan</text>
+  <text x="862" y="566" fill="#8b949e" font-size="10.5">(prefill chunk / decode step)</text>
+
+  <!-- model runtime -> engine (token) -->
+  <path d="M 900 580 L 900 530" stroke="#58a6ff" stroke-width="2" fill="none" marker-end="url(#m-blue)"/>
+  <text x="912" y="558" fill="#8b949e" font-size="10.5">token / done</text>
+
+  <!-- row 2 -->
+  <rect x="110" y="580" width="220" height="170" rx="9" fill="rgba(210,168,255,0.08)" stroke="#d2a8ff"/>
+  <text x="220" y="608" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="700">KV prefix cache</text>
+  <text x="220" y="628" text-anchor="middle" fill="#8b949e" font-size="10.5">KvCache · KvPool · Cache</text>
+  <text x="220" y="644" text-anchor="middle" fill="#8b949e" font-size="10.5">StateCache · CacheRecency</text>
+  <text x="220" y="664" text-anchor="middle" fill="#8b949e" font-size="10.5">8-bit paged KV</text>
+  <text x="220" y="680" text-anchor="middle" fill="#8b949e" font-size="10.5">recurrent-state reuse</text>
+  <text x="220" y="696" text-anchor="middle" fill="#8b949e" font-size="10.5">Q8PageStorage</text>
+
+  <rect x="590" y="580" width="380" height="170" rx="9" fill="rgba(126,231,135,0.08)" stroke="#7ee787"/>
+  <text x="780" y="606" text-anchor="middle" fill="#7ee787" font-size="12.5" font-weight="700" letter-spacing="0.5">MODEL RUNTIME — runtime/model/  (decode loop, Runtime.mm)</text>
+
+  <rect x="610" y="630" width="160" height="90" rx="8" fill="rgba(126,231,135,0.10)" stroke="#7ee787" stroke-opacity="0.7"/>
+  <text x="690" y="656" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="700">Draft head</text>
+  <text x="690" y="674" text-anchor="middle" fill="#8b949e" font-size="10">DFlashDraft · 5 layers</text>
+  <text x="690" y="690" text-anchor="middle" fill="#8b949e" font-size="10">≤5 guesses, ~7 ms</text>
+  <text x="690" y="706" text-anchor="middle" fill="#8b949e" font-size="10">DraftContextPlan</text>
+
+  <rect x="790" y="630" width="160" height="90" rx="8" fill="rgba(126,231,135,0.10)" stroke="#7ee787" stroke-opacity="0.7"/>
+  <text x="870" y="656" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="700">Target model</text>
+  <text x="870" y="674" text-anchor="middle" fill="#8b949e" font-size="10">QwenTarget · QwenState</text>
+  <text x="870" y="690" text-anchor="middle" fill="#8b949e" font-size="10">verify anchor+guesses</text>
+  <text x="870" y="706" text-anchor="middle" fill="#8b949e" font-size="10">~65 ms, accept k+1</text>
+
+  <path d="M 770 665 L 790 665" stroke="#3fb950" stroke-width="2" fill="none" marker-end="url(#m-green)"/>
+  <text x="780" y="656" text-anchor="middle" fill="#8b949e" font-size="9.5">guesses</text>
+  <path d="M 790 700 L 770 700" stroke="#58a6ff" stroke-width="2" fill="none" marker-end="url(#m-blue)"/>
+  <text x="780" y="716" text-anchor="middle" fill="#8b949e" font-size="9.5">accept</text>
+
+  <!-- model runtime <-> kv cache -->
+  <path d="M 590 665 L 330 665" stroke="#d2a8ff" stroke-width="2" fill="none" marker-start="url(#m-purple)" marker-end="url(#m-purple)"/>
+  <text x="460" y="656" text-anchor="middle" fill="#8b949e" font-size="10.5">KV read / write</text>
+
+  <rect x="1000" y="580" width="160" height="170" rx="9" fill="rgba(121,192,255,0.08)" stroke="#79c0ff"/>
+  <text x="1080" y="608" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="700">Shared ops</text>
+  <text x="1080" y="628" text-anchor="middle" fill="#8b949e" font-size="10">runtime/ops/</text>
+  <text x="1080" y="646" text-anchor="middle" fill="#8b949e" font-size="10">PagedAttention · GDN</text>
+  <text x="1080" y="662" text-anchor="middle" fill="#8b949e" font-size="10">MoE · Linear · RoPE</text>
+  <text x="1080" y="678" text-anchor="middle" fill="#8b949e" font-size="10">Sampling · Embedding</text>
+  <text x="1080" y="694" text-anchor="middle" fill="#8b949e" font-size="10">PromptLookup · Vision</text>
+  <text x="1080" y="710" text-anchor="middle" fill="#8b949e" font-size="10">ExecutionPlans</text>
+
+  <rect x="1190" y="580" width="140" height="170" rx="9" fill="rgba(255,123,114,0.08)" stroke="#ff7b72"/>
+  <text x="1260" y="608" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="700">Metal backend</text>
+  <text x="1260" y="628" text-anchor="middle" fill="#8b949e" font-size="10">runtime/metal/</text>
+  <text x="1260" y="646" text-anchor="middle" fill="#8b949e" font-size="10">MetalBackend</text>
+  <text x="1260" y="662" text-anchor="middle" fill="#8b949e" font-size="10">CommandGraph</text>
+  <text x="1260" y="678" text-anchor="middle" fill="#8b949e" font-size="10">Residency</text>
+  <text x="1260" y="694" text-anchor="middle" fill="#8b949e" font-size="10">Watchdog</text>
+  <text x="1260" y="710" text-anchor="middle" fill="#8b949e" font-size="10">kernels/</text>
+
+  <path d="M 970 665 L 1000 665" stroke="#3fb950" stroke-width="2" fill="none" marker-end="url(#m-green)"/>
+  <circle cx="985" cy="665" r="11" fill="#0d1117" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="985" y="669" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="700">10</text>
+  <path d="M 1160 665 L 1190 665" stroke="#3fb950" stroke-width="2" fill="none" marker-end="url(#m-green)"/>
+
+  <!-- row 3 -->
+  <rect x="590" y="800" width="380" height="70" rx="9" fill="rgba(227,179,65,0.08)" stroke="#e3b341"/>
+  <text x="780" y="828" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="700">SSD — ~/.slipstream/models</text>
+  <text x="780" y="848" text-anchor="middle" fill="#8b949e" font-size="10.5">sharded GGUF Q4/Q8 · 512 experts · predictive read-ahead</text>
+
+  <rect x="1190" y="800" width="140" height="70" rx="9" fill="rgba(255,123,114,0.10)" stroke="#ff7b72"/>
+  <text x="1260" y="828" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="700">Apple GPU</text>
+  <text x="1260" y="848" text-anchor="middle" fill="#8b949e" font-size="10.5">M5 Pro · unified memory</text>
+
+  <path d="M 1260 750 L 1260 800" stroke="#ff7b72" stroke-width="2" fill="none" marker-start="url(#m-red)" marker-end="url(#m-red)"/>
+  <text x="1272" y="780" fill="#8b949e" font-size="10.5">command buffers</text>
+
+  <path d="M 780 800 L 780 750" stroke="#e3b341" stroke-width="2" fill="none" marker-start="url(#m-yellow)" marker-end="url(#m-yellow)"/>
+  <circle cx="780" cy="775" r="11" fill="#0d1117" stroke="#e3b341" stroke-width="1.5"/>
+  <text x="780" y="779" text-anchor="middle" fill="#e3b341" font-size="11" font-weight="700">11</text>
+  <text x="792" y="772" fill="#8b949e" font-size="10.5">expert waves + read-ahead</text>
+
+  <!-- legend -->
+  <g font-size="11.5" fill="#8b949e">
+    <rect x="80" y="900" width="12" height="12" rx="3" fill="#58a6ff"/><text x="100" y="911">Python server</text>
+    <rect x="220" y="900" width="12" height="12" rx="3" fill="#d2a8ff"/><text x="240" y="911">Engine</text>
+    <rect x="320" y="900" width="12" height="12" rx="3" fill="#7ee787"/><text x="340" y="911">Model runtime</text>
+    <rect x="460" y="900" width="12" height="12" rx="3" fill="#79c0ff"/><text x="480" y="911">Shared ops</text>
+    <rect x="580" y="900" width="12" height="12" rx="3" fill="#ff7b72"/><text x="600" y="911">Metal / GPU</text>
+    <rect x="700" y="900" width="12" height="12" rx="3" fill="#e3b341"/><text x="720" y="911">SSD</text>
+    <line x1="800" y1="906" x2="840" y2="906" stroke="#3fb950" stroke-width="2.5"/><text x="848" y="911">request path</text>
+    <line x1="960" y1="906" x2="1000" y2="906" stroke="#58a6ff" stroke-width="2.5"/><text x="1008" y="911">token return path</text>
+  </g>
+</svg>
+
+  <div class="steps">
+    <div><span class="n">1</span> <b>HTTP in</b> — route, auth, deadline set (server.py)</div>
+    <div><span class="n">2</span> <b>Prepare</b> — chat template, image resize, tokenize (frontend.py)</div>
+    <div><span class="n">3</span> <b>Submit</b> — request object with priority + deadline (backend.py)</div>
+    <div><span class="n">4</span> <b>Frame encode</b> — token ids + pixels → binary frame (protocol.py)</div>
+    <div><span class="n">5</span> <b>Pipe</b> — frame written to native child stdin</div>
+    <div><span class="n">6</span> <b>Admit</b> — engine takes ownership of the request</div>
+    <div><span class="n">7</span> <b>Prefix lookup</b> — KV + recurrent-state cache → resume boundary</div>
+    <div><span class="n">8</span> <b>Resource grant</b> — memory governor grants KV pages</div>
+    <div><span class="n">9</span> <b>BatchPlan</b> — scheduler issues prefill chunk / decode step</div>
+    <div><span class="n">10</span> <b>Execute</b> — draft → verify → accept; ops → Metal → GPU</div>
+    <div><span class="n">11</span> <b>Expert streaming</b> — missing MoE experts read from SSD in waves</div>
+    <div><span class="n">12</span> <b>Stream out</b> — token frames → pipe → SSE chunks → client</div>
+  </div>
+</div>
+</body>
+</html>

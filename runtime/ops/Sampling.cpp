@@ -26,6 +26,7 @@ EffectivePolicy effectivePolicy(const SamplingPolicy &policy) noexcept {
 constexpr uint32_t kTargetCandidates = kTargetSamplingCandidates;
 constexpr uint32_t kDraftShards = SPLASH_DRAFT_SAMPLING_SHARDS;
 constexpr uint32_t kDraftCandidates = 16;
+constexpr uint32_t kEdgeThreads = 256;
 
 } // namespace
 
@@ -167,6 +168,41 @@ void Sampling::addVerify(metal::CommandGraph &graph,
                buffers.outputTokens},
               {rows, 1, 1}, {1, 1, 1});
   }
+}
+
+void Sampling::addDraftSelector(
+    metal::CommandGraph &graph, DraftSelectorBuffers buffers,
+    std::span<const uint32_t> anchors,
+    std::span<const SamplingPolicy> policies, uint32_t proposalTokens) const {
+  if (anchors.empty() || anchors.size() != policies.size() ||
+      anchors.size() > kMaximumLanes || !proposalTokens)
+    throw std::invalid_argument("invalid draft selector batch");
+  const uint32_t lanes = static_cast<uint32_t>(anchors.size());
+  SelectorBatchParams params{};
+  params.lanes = lanes;
+  params.vocabulary = vocabulary_;
+  for (uint32_t lane = 0; lane < kMaximumLanes; ++lane) {
+    const uint32_t source = std::min(lane, lanes - 1);
+    params.anchor[lane] = anchors[source];
+    params.temperature[lane] = policies[source].temperature;
+    if (lane < lanes && policies[lane].samples())
+      params.sampling_mask |= uint32_t{1} << lane;
+  }
+  graph.add("draft_select_top16_sharded",
+            {buffers.logits, buffers.partialIds, buffers.partialValues},
+            vocabulary_,
+            {uint64_t{lanes} * proposalTokens * kDraftShards, 1, 1});
+  graph.add("draft_select_edges",
+            {buffers.partialIds, buffers.partialValues, buffers.candidates,
+             buffers.unary, buffers.selectorHidden,
+             buffers.predecessorCodebook, buffers.successorCodebook},
+            params, {uint64_t{lanes} * proposalTokens, 1, 1},
+            {kEdgeThreads, 1, 1});
+  graph.add("draft_select_dflash",
+            {buffers.candidates, buffers.unary, buffers.partialValues,
+             buffers.uniforms, buffers.proposedTokens,
+             buffers.proposalProbabilities},
+            params, {lanes, 1, 1}, {1, 1, 1});
 }
 
 void Sampling::addAcceptance(

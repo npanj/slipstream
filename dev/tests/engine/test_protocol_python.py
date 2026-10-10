@@ -15,22 +15,22 @@ ROOT = Path(__file__).parents[3]
 
 
 REQUEST_GOLDEN = (
-    "53504c4806001800010000004c0000000000000000000000efcdab8967452301"
-    "000201008098281765060040a5ae02000000000080000005000000cdcc4c3f33"
-    "33733f200000001032547698badcfe0000000000010000002a00000000000080"
-    "ffffffff"
+    "53504c480500180001000000500000000000000000000000efcdab8967452301"
+    "000201008098281765060040a5ae0200000000008000000500000000000000cd"
+    "cc4c3f3333733f200000001032547698badcfe0000000000010000002a000000"
+    "00000080ffffffff"
 )
 ERROR_GOLDEN = (
-    "53504c4806001800050100002700000000000000000000000200000000000000"
+    "53504c4805001800050100002700000000000000000000000200000000000000"
     "0000090000000c0000006770755f6661756c744d6574616c206661696c6564"
 )
 STATUS_GOLDEN = (
-    "53504c4806001800070100002d00000000000000000000002803000000000000"
+    "53504c4805001800070100002d00000000000000000000002803000000000000"
     "050000007b22736368656d615f76657273696f6e223a342c227265616479223a"
     "747275657d"
 )
 INITIAL_MASK_GOLDEN = (
-    "53504c4806001800030100001800000000000000000000005b00000000000000"
+    "53504c4805001800030100001800000000000000000000005b00000000000000"
     "06000000000000000400000000000000"
 )
 
@@ -69,6 +69,14 @@ int main() {
     request.cohort = Cohort::Constrained;
     request.constraint = ConstraintMode::TokenMask;
     show(request);
+    RequestFrame image = request;
+    image.promptTokens = {7, 3, 9};
+    image.imageSpans = {{1, 1, 2, 2, 0x1111222233334444ULL, 0x5555666677778888ULL}};
+    image.imagePixels.resize(image.imageSpans[0].pixelBytes());
+    for (size_t i = 0; i < image.imagePixels.size(); ++i) {
+        image.imagePixels[i] = static_cast<uint8_t>(i * 7 + 1);
+    }
+    show(image);
     show(CancelFrame{91});
     show(MaskResponseFrame{91, 7, {0xffffffffU, 0, 0xa5a5a5a5U}});
     show(StatusRequestFrame{808});
@@ -117,9 +125,20 @@ def example_request():
     )
 
 
+def example_image_request():
+    span = p.ImageSpan(1, 1, 2, 2, 0x1111222233334444, 0x5555666677778888)
+    return replace(
+        example_request(),
+        prompt_tokens=(7, 3, 9),
+        image_spans=(span,),
+        image_pixels=bytes((i * 7 + 1) & 0xFF for i in range(span.pixel_bytes)),
+    )
+
+
 def all_messages():
     return [
         example_request(),
+        example_image_request(),
         p.CancelFrame(91),
         p.MaskResponseFrame(91, 7, (0xFFFFFFFF, 0, 0xA5A5A5A5)),
         p.StatusRequestFrame(808),
@@ -320,7 +339,7 @@ class ProtocolPythonTests(unittest.TestCase):
         )
         frame = p.encode_message(request)
         payload = bytearray(frame.payload)
-        payload[55] = 2
+        payload[59] = 2
         with self.assertRaises(p.ProtocolError) as raised:
             p.decode_frame(p.Frame(p.FrameType.REQUEST, bytes(payload)))
         self.assertEqual(
@@ -340,13 +359,25 @@ class ProtocolPythonTests(unittest.TestCase):
         self.assertEqual(wire[:4], b"SPLH")
         self.assertEqual(
             struct.unpack_from("<HHHHQI", wire, 4),
-            (p.PROTOCOL_VERSION, 24, int(p.FrameType.REQUEST), 0, 76, 0),
+            (p.PROTOCOL_VERSION, 24, int(p.FrameType.REQUEST), 0, 80, 0),
         )
         self.assertEqual(struct.unpack_from("<Q", wire, 24)[0], request.request_id)
         self.assertEqual(struct.unpack_from("<I", wire, 24 + 31)[0], 5)
+        self.assertEqual(struct.unpack_from("<I", wire, 24 + 35)[0], 0)
         self.assertEqual(
-            struct.unpack_from("<5I", wire, 24 + 56), request.prompt_tokens
+            struct.unpack_from("<5I", wire, 24 + 60), request.prompt_tokens
         )
+
+        image = example_image_request()
+        wire = p.serialize_message(image)
+        span_offset = 24 + 60 + 4 * len(image.prompt_tokens)
+        self.assertEqual(struct.unpack_from("<I", wire, 24 + 35)[0], 1)
+        self.assertEqual(
+            struct.unpack_from("<IIIIQQ", wire, span_offset),
+            (1, 1, 2, 2, 0x1111222233334444, 0x5555666677778888),
+        )
+        self.assertEqual(wire[span_offset + 32 :], image.image_pixels)
+        self.assertEqual(p.decode_frame(parse_all(wire)[0]), image)
 
     def test_refresh_request_deadline_changes_only_the_absolute_deadline(self):
         request = example_request()

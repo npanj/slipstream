@@ -332,7 +332,7 @@ ModelDescriptor makeModelDescriptor(std::string name, TargetLayout target) {
             ExecutionLimits::draftContextTokens,
         };
         result.targetKvLayout = layout.q8Layout();
-        result.stateLayout = {layout.gdnStateLayout()};
+        result.stateLayout = {layout.gdnStateLayout(), {}};
       },
       target);
   return result;

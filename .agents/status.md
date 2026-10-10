@@ -1,76 +1,118 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-04 23:45 PDT by antigravity.
+**Updated:** 2026-10-09 19:25 PDT by antigravity (Swift-27B DFlash Neural Drafter Restored; Decode 46.8 tok/s; Zero Regressions on Flash-Next V3).
 **Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`, app `npanj/slipstream-menubar` `v26.10.7`, tap `npanj/homebrew-tap`).
 
 ## In one line
 
-Downloading official 4-bit weights (`Swift-1.5-Qwen3.8-27B-Q4_K_M.gguf`, 16.24 GB) and vision projector (`mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf`, 0.86 GB) into `~/models/swift-qwen38-27b-q4-gguf/`. Updated menu bar app to recognize it locally. All 20 CPU engine test suites, 94 Swift tests, and 171 Python server tests pass 100% green.
-
+Restored DFlash draft context prefill and decode KV advancement in `Runtime.mm` for Swift-27B (quadrupling decode from 11.0 to 46.8 tok/s at 45.7% acceptance rate), verified zero regressions on Flash-Next V3 MoE, with 100% test pass rate and ports 8090/8000 idle and free.
 
 ---
 
-## How to use it
+## Executed Qwen Optimization Roadmap (P0–P3)
 
+| Priority | Track | Implementation | Verification |
+|---|---|---|---|
+| **P0** | **Python Boundary & SSE Optimization** | • Cached `_disconnect_selector` on `FrontendHandler`, eliminating per-token `DefaultSelector()` allocations and kqueue descriptors.<br>• Fast-path string formatting for text deltas in `put_text()`, bypassing dictionary serialization.<br>• Instrumented `sse_decode_ms` vs `engine_decode_ms` (`decode_gap_ms`) in `/metrics` and `/timings`. | `test_server.py` (172/172 PASS in 128s) |
+| **P1** | **Agent-Loop & Telemetry Audit** | • Added cumulative prefix cache hit-rate telemetry (`total_prompt_tokens`, `cached_prompt_tokens`) in `SlipstreamAgent` and displayed in `/stats`.<br>• Incremental tool-parse cursor tracking in streaming speculative execution to prevent redundant `json.loads` calls.<br>• Tool output cap set to 30,000 characters across `cap_tool_output` and `compress_tool_output`. | `test_agent.py` & `test_launcher.py` (59/59 PASS in 4.9s) |
+| **P2** | **Kernel Verification Pass** | • Sampler readback: confirmed `Runtime.mm:1657-1691` reads exactly `laneResult.retained` tokens (1 token steady state, up to $K$ accepted drafts), never full logits.<br>• Split-KV + GQA packing: confirmed in `attention_q8.metal` (`QueryHeadsPerKVHead`, threadgroup partitioning across KV heads and history splits).<br>• Radix top-k: confirmed 4-pass 8-bit radix histogram in `qsa_select.metal` with 256 atomic bins and parallel chunk-wise tie scans. | Code & kernel audit confirmed; bit-exact outputs |
+| **P3** | **Metal PSO Pointer Caching & Makefile Audit** | • Added `-DNDEBUG` to `ENGINE_CXXFLAGS` in `Makefile`.<br>• Added `pipelineMap` (`std::unordered_map`) and `cachedPipeline` pointer in `MetalBackend.{hpp,mm}`, bypassing `NSString` allocations and Obj-C dictionary lookups in hot decode loops. | `make test-engine-cpu` (24/24 PASS) |
+
+---
+
+## Agent Timeout & Generation Wait Reference
+
+1. **Unbounded Generation by Default**:
+   - `SlipstreamAgent` defaults to `timeout = None`, executing pure blocking socket/HTTP I/O (`sock.settimeout(None)`).
+   - The model can take as long as it needs on multi-thousand token reasoning chains (`thinking: high/max`) or long prompt prefills (>32k tokens) without timing out.
+   - Steer, interrupt, or cancel anytime with `Ctrl+C` or `Enter`.
+2. **CLI Flags**:
+   - `--no-timeout`: Explicitly forces unbounded generation time (default).
+   - `--timeout <seconds>`: Optional watchdog timer (pass e.g. `--timeout 300` or `0` for none).
+   - `SLIPSTREAM_AGENT_TIMEOUT`: Environment variable control (`0`, `none`, or seconds).
+
+---
+
+## Agent Session Continuity & Vault Reference
+
+### 1. Automatic Checkpointing
+- Every turn completion, manual interruption (`Ctrl+C`), and generation error automatically saves an atomic JSON snapshot to `~/.cache/slipstream/agent_vaults/<session_id>.json` and updates `latest.json`.
+- State captured includes full conversation history, active execution checklist (`todos`), model configuration, token consumption telemetry, working directory, and the last prompt.
+
+### 2. Resuming Previous Work
+- **CLI Commands**:
+  - `./slipstream code -c` or `./slipstream code --continue`: Restores and resumes the most recent session (`latest.json`).
+  - `./slipstream code --resume [id]`: Restores a specific session ID (or short prefix).
+  - `./slipstream code --sessions`: Displays a formatted table of recent vault sessions and exits.
+- **In-Session Slash Commands**:
+  - `/continue` (or plain `continue` / `c`): Continues interrupted work or executes the next pending plan task.
+  - `/retry`: Re-dispatches the last failed or timed-out user prompt.
+  - `/resume [id]`: In-place restore of another session without restarting the agent process.
+  - `/sessions`: Displays saved sessions table in-session.
+  - `/save`: Explicitly snapshots the active session to disk.
+
+---
+
+## Architecture: Engine IPC vs Agent Sockets
+
+1. **Tier 1 — C++ Native Engine ↔ Server (`runtime/engine/FdTransport.cpp` ↔ `server/runtime.py`)**:
+   - **Pure binary IPC** using Unix pipes/file descriptors and shared-memory doorbells.
+   - Zero TCP, zero HTTP, zero socket overhead. Uses `CompletionWake` with atomic `wakePending` flag coalescing and adaptive `yield` spin handoff directly to Apple Silicon Metal GPU scheduler.
+2. **Tier 2 — Agent Harness ↔ Server (`server/agent/agent.py` ↔ `server/server.py`)**:
+   - Decoupled process allowing the ~30–40 GB model to remain hot in unified RAM while the agent CLI exits and re-enters.
+   - Uses local UNIX domain sockets (`/tmp/slipstream-8090.sock`) to bypass the TCP loopback stack, with `settimeout(None)` for unconstrained local generation.
+
+---
+
+## Agent Bottom Panel & Status Display
+
+The interactive CLI harness (`./slipstream code`) displays full contextual awareness at all times in the bottom panel:
+
+1. **Active Turn / Action State (`is_generating.is_set()` is True)**:
+   - Badges: `[spin] ACTION` (when running tool commands/functions), `[spin] THINKING` (during reasoning/planning), or `[spin] STREAMING` (streaming answer).
+   - Detail: `• ⚡ Action: <tool> <args> (<elapsed>s)`
+   - Live Context: `• 📚 ctx:<cur_ctx:,>/<max_c // 1024>k (<c_pct:.1f>%)` color-coded dynamically (cyan `< 50%`, yellow `< 80%`, red `≥ 80%`).
+   - Steering: `• 🛑 Press Ctrl+C or Enter to steer`
+
+2. **Idle / Ready State (`is_generating.is_set()` is False)**:
+   - Badge: `⚡ READY`
+   - Config: `• 💭 think:<effort> • 🌊 stream:<mode>`
+   - Live Context: `• 📚 ctx:<cur_ctx:,>/<max_c // 1024>k (<c_pct:.1f>%)`
+   - Turn Stats: `• ⏱ <dt>s • ⚡ <tok/s> • 📤 ~<tok> • 🎯 Turn #<N>`
+
+3. **Inline Tool Action Panels (`out_console.print(Panel(...))`):**
+   - Displays: `❯ <tool> <arg> · <dt>ms · ctx:<cur_ctx:,>/<max_c // 1024>k ✔`
+
+---
+
+## Agent Streaming & Suppression Modes
+
+| Mode | CLI Flag | Slash Command | Behavior | Best For |
+|---|---|---|---|---|
+| **Option A: Smart Hybrid** *(Default)* | `--stream hybrid` | `/stream hybrid` | Uses `stream: false` during tool-calling exploration turns (zero JSON delta SSE churn, instant tool execution); streams live text during direct conversational answers. | Maximum coding speed + responsive conversational feel. |
+| **Option B: Complete Suppression** | `--no-stream` or `--stream never` | `/no-stream` or `/stream batch` | Suppresses streaming deltas across all turns. Assistant renders exclusively via formatted Markdown Panels upon turn completion. Zero flicker, no raw stdout collision. | Highest throughput, batch workflows, zero UI flicker. |
+| **Always Streaming** | `--stream always` | `/stream always` | Streams all deltas in real-time, including thinking thoughts and tool call JSON fragments. | Debugging raw model token generation and speculative tool parsing. |
+
+---
+
+## How to Launch for Personal Testing
+
+Remember: **One model server at a time!** (Port 8090 is currently idle and free).
+
+### Launch Daily Recommended Model (Flash-Next V3)
 ```zsh
-# Single command to install BOTH Menu Bar App & CLI Engine:
-brew install --cask npanj/tap/slipstream
-
-# Install Slipstream CLI only:
-brew install npanj/tap/slipstream
-
-# Or one-line curl install of prebuilt binary:
-curl -fsSL https://raw.githubusercontent.com/npanj/slipstream/main/install.sh | sh
-
-# Serve Swift-Qwen3.8-Flash-Next-V3 (local directory or Hugging Face repo):
 ./slipstream serve --model ~/models/swift-qwen38-flash-next-v3 --port 8090
-./slipstream serve --model nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF --port 8090
-
-# Serve 27B models (GGUF folder, single .gguf file, MLX safetensors, or prepared package):
-./slipstream serve --model ~/models/swift-qwen38-27b-splash-hq --port 8090
-./slipstream serve --model /path/to/qwen38-27b.gguf --port 8090
-./slipstream serve --model /path/to/mlx-27b-directory --port 8090
-
-# Inspect a remote Hugging Face repository before downloading:
-./slipstream pull nitinpanj/qwen38-flash-next-v3 --check
-./slipstream pull nitinpanj/qwen38-flash-next-v3 --check --json
-
-# Backward compatibility forwarders work identically:
-./slipstream-v2 serve --model ~/models/swift-qwen38-flash-next-v3 --port 8090
-./splash serve --model ~/models/swift-qwen38-flash-next-v3 --port 8090
 ```
 
----
+### Launch Interactive Agent Harness (Default: No Timeout + Smart Hybrid)
+```zsh
+./slipstream code --port 8090
+```
 
-## Head-to-Head Benchmarks: llama.cpp Fork vs. Slipstream (Flash-Next V3)
-
-Across 6 standard reasoning and coding tasks (temperature 0.0, M5 Pro 64 GB):
-
-| Task | Category | llama.cpp Fork | Slipstream | Speedup | llama.cpp TTFT | Slipstream TTFT |
-|---|---|---:|---:|---:|---:|---:|
-| `gsm8k_math` | Math Reasoning | 24.0 tok/s | **43.6 tok/s** | **1.82x** | 4,024 ms | **2,337 ms** |
-| `math500_series` | Math Derivation ($p - q$) | 24.3 tok/s | **43.1 tok/s** | **1.77x** | 1,655 ms | **1,587 ms** |
-| `constraint_logic`| Constraint Logic | 25.4 tok/s | **46.0 tok/s** | **1.81x** | 1,469 ms | **1,042 ms** |
-| `python_intervals`| Python Coding | 19.7 tok/s | **35.0 tok/s** | **1.77x** | 1,507 ms | **1,070 ms** |
-| `rust_csv` | Systems Coding | 22.7 tok/s | **37.5 tok/s** | **1.65x** | 1,257 ms | **859 ms** |
-| `tech_explanation`| Technical Writing | 22.5 tok/s | **39.4 tok/s** | **1.75x** | 1,267 ms | **843 ms** |
-| **OVERALL AVG** | Across all 6 tasks | **23.1 tok/s** | **40.8 tok/s** | **1.76x** | **1,863 ms** | **1,290 ms** |
-
----
-
-## Head-to-Head Quality: Plain Flash-Next V3 vs. Swift-Flash-Next V3
-
-Completed across 145 paired items (seed 1234, temperature 0.0), run sequentially under memory guard:
-
-| Domain / Benchmark | Items | Swift-Flash-Next-V3 | Plain Flash-Next V3 | Accuracy Delta | Swift Decode | Plain Decode |
-|---|---:|---:|---:|---:|---:|---:|
-| **AIME 2025** | 20 | **45.0% (9/20)** | **45.0% (9/20)** | 0.0% | 44.3 tok/s | 44.3 tok/s |
-| **MATH-500 (L4-5)** | 35 | **62.9% (22/35)** | 60.0% (21/35) | **+2.9%** | 44.8 tok/s | 44.8 tok/s |
-| **GPQA Diamond** | 35 | **54.3% (19/35)** | 45.7% (16/35) | **+8.6%** | 44.8 tok/s | 44.8 tok/s |
-| **GSM8K** | 25 | **96.0% (24/25)** | **96.0% (24/25)** | 0.0% | 45.6 tok/s | 45.6 tok/s |
-| **HumanEval** | 25 | **92.0% (23/25)** | **92.0% (23/25)** | 0.0% | 40.6 tok/s | 40.6 tok/s |
-| **Hard Systems & Logic**| 5 | **100.0% (5/5)** | **100.0% (5/5)** | 0.0% | 39.2 tok/s | 39.2 tok/s |
-| **TOTAL / OVERALL** | **145** | **70.3% (102/145)** | **67.6% (98/145)** | **+2.8%** | **44.4 tok/s** | **43.9 tok/s** |
+### Launch Interactive Agent Harness Resuming Previous Session
+```zsh
+./slipstream code --port 8090 -c
+```
 
 ---
 

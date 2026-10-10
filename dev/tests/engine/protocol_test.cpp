@@ -126,6 +126,18 @@ RequestFrame exampleRequest() {
   return request;
 }
 
+RequestFrame exampleImageRequest() {
+  RequestFrame request = exampleRequest();
+  request.promptTokens = {7, 3, 9};
+  request.imageSpans = {
+      {1, 1, 2, 2, 0x1111222233334444ULL, 0x5555666677778888ULL}};
+  request.imagePixels.resize(request.imageSpans[0].pixelBytes());
+  for (size_t index = 0; index < request.imagePixels.size(); ++index) {
+    request.imagePixels[index] = static_cast<uint8_t>(index * 7 + 1);
+  }
+  return request;
+}
+
 void testRequestWireAndRoundTrip() {
   constexpr std::string_view test = "request wire and round trip";
   RequestFrame request = exampleRequest();
@@ -136,28 +148,46 @@ void testRequestWireAndRoundTrip() {
   const auto &wire = *serialized.value;
 
   CHECK(test, wire.size() ==
-                  kFrameHeaderBytes + 56 + request.promptTokens.size() * 4);
+                  kFrameHeaderBytes + 60 + request.promptTokens.size() * 4);
   CHECK(test, std::string(wire.begin(), wire.begin() + 4) == "SPLH");
   CHECK(test, loadU16(wire, 4) == kProtocolVersion);
   CHECK(test, loadU16(wire, 6) == kFrameHeaderBytes);
   CHECK(test, loadU16(wire, 8) == static_cast<uint16_t>(FrameType::Request));
   CHECK(test, loadU16(wire, 10) == 0);
-  CHECK(test, loadU64(wire, 12) == 56 + request.promptTokens.size() * 4);
+  CHECK(test, loadU64(wire, 12) == 60 + request.promptTokens.size() * 4);
   CHECK(test, loadU32(wire, 20) == 0);
   CHECK(test, loadU64(wire, kFrameHeaderBytes) == request.requestId);
   CHECK(test,
         loadU32(wire, kFrameHeaderBytes + 31) == request.promptTokens.size());
-  CHECK(test, loadU32(wire, kFrameHeaderBytes + 56) == 0);
-  CHECK(test, loadU32(wire, kFrameHeaderBytes + 56 + 16) == 0xffffffffU);
+  CHECK(test, loadU32(wire, kFrameHeaderBytes + 35) == 0);
+  CHECK(test, loadU32(wire, kFrameHeaderBytes + 60) == 0);
+  CHECK(test, loadU32(wire, kFrameHeaderBytes + 60 + 16) == 0xffffffffU);
 
   RequestFrame decoded = roundTrip(request);
   CHECK(test, decoded == request);
 
+  RequestFrame withImage = exampleImageRequest();
+  auto imageWire = serializeMessage(Message{withImage});
+  CHECK(test, imageWire);
+  if (!imageWire)
+    return;
+  const size_t spanOffset =
+      kFrameHeaderBytes + 60 + withImage.promptTokens.size() * 4;
+  CHECK(test, imageWire.value->size() ==
+                  spanOffset + 32 + withImage.imagePixels.size());
+  CHECK(test, loadU32(*imageWire.value, kFrameHeaderBytes + 35) == 1);
+  CHECK(test, loadU32(*imageWire.value, spanOffset) == 1);
+  CHECK(test, loadU32(*imageWire.value, spanOffset + 4) == 1);
+  CHECK(test, loadU32(*imageWire.value, spanOffset + 8) == 2);
+  CHECK(test, loadU32(*imageWire.value, spanOffset + 12) == 2);
+  CHECK(test, loadU64(*imageWire.value, spanOffset + 16) ==
+                  withImage.imageSpans[0].digestLo);
+  CHECK(test, roundTrip(withImage) == withImage);
 }
 
 std::vector<Message> everyOtherMessage() {
   return {
-      Message{exampleRequest()},
+      Message{exampleImageRequest()},
       CancelFrame{91},
       MaskResponseFrame{91, 7, {0xffffffffU, 0, 0xa5a5a5a5U}},
       StatusRequestFrame{808},

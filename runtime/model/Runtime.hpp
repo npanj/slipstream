@@ -49,6 +49,8 @@ public:
   [[nodiscard]] uint64_t reclaimIdleState() noexcept override;
   void provideMask(uint64_t requestId,
                    std::span<const uint32_t> words) override;
+  void setDraftContextPlan(uint64_t requestId, DraftContextPlan plan) override;
+  [[nodiscard]] bool hasDraft() const noexcept override;
   void end(uint64_t requestId) override;
 
   [[nodiscard]] WarmupStepResult warmupPrefill(uint32_t rows) override;

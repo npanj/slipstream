@@ -115,6 +115,30 @@ uint32_t verifySplits(VerifyAttentionConfig configuration) {
 
 std::string_view verifySplitPipeline(KernelLayout layout,
                                      VerifyAttentionConfig configuration) noexcept {
+  static const bool kvCompressedEnv =
+      (std::getenv("SPLASH_COMPRESSED_KV") != nullptr &&
+       std::string_view(std::getenv("SPLASH_COMPRESSED_KV")) != "0") ||
+      (std::getenv("SPLASH_KV_COMPACT") != nullptr &&
+       std::string_view(std::getenv("SPLASH_KV_COMPACT")) != "0");
+
+  const AttentionFormat effectiveFormat =
+      (kvCompressedEnv && configuration.format == AttentionFormat::Q8)
+          ? AttentionFormat::Q4Direct
+          : configuration.format;
+
+  if (effectiveFormat == AttentionFormat::Q4Direct) {
+    return pipeline(layout,
+                    "verify_attention_q4_split",
+                    "verify_attention_q4_split_kv2_g8",
+                    "verify_attention_q4_split_kv2_g12");
+  }
+  if (effectiveFormat == AttentionFormat::Q3Polar) {
+    return pipeline(layout,
+                    "verify_attention_q3_split",
+                    "verify_attention_q3_split_kv2_g8",
+                    "verify_attention_q3_split_kv2_g12");
+  }
+
   const bool cooperative =
       configuration.scalePlacement == AttentionScalePlacement::Cooperative;
   return pipeline(layout,

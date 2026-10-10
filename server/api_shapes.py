@@ -43,14 +43,18 @@ def _text_content(content):
 
 
 def _image_part(url):
-    raise APIError(400, "image input is not supported: this model reads text only")
+    if not isinstance(url, str):
+        raise APIError(400, "invalid image content part")
+    return {"type": "image_url", "image_url": {"url": url}}
 
 
 def _user_content(content, document_budget=None):
-    """User content as one text string; image parts are rejected."""
+    """Text for plain user content; a canonical parts list when it carries
+    images, so the chat template places each image where the author put it."""
     if not isinstance(content, list):
         return _text_content(content)
     parts = []
+    images = 0
     for part in content:
         if not isinstance(part, dict):
             raise APIError(400, "message content parts must be objects")
@@ -59,6 +63,7 @@ def _user_content(content, document_budget=None):
             image_url = part.get("image_url")
             url = image_url.get("url") if isinstance(image_url, dict) else image_url
             parts.append(_image_part(url))
+            images += 1
         elif kind in ("text", "input_text"):
             text = part.get("text", "")
             if not isinstance(text, str):
@@ -67,11 +72,14 @@ def _user_content(content, document_budget=None):
         elif kind == "file":
             rendered = file_content(part.get("file"), budget=document_budget)
             parts.extend(rendered)
+            images += sum(p["type"] == "image_url" for p in rendered)
         elif kind in ("video", "video_url", "input_audio"):
             raise APIError(400, f"{kind} content is not supported")
         else:
             raise APIError(400, "unsupported message content part")
-    return "".join(part["text"] for part in parts)
+    if not images:
+        return "".join(part["text"] for part in parts)
+    return parts
 
 
 _JSON_NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
@@ -994,7 +1002,7 @@ def finish_reason(result, tool_calls):
 
 
 def completion_response(model, job, result, message, tool_calls):
-    return {
+    resp = {
         "id": f"chatcmpl-{job.public_id}",
         "object": "chat.completion",
         "created": job.created_at,
@@ -1010,6 +1018,9 @@ def completion_response(model, job, result, message, tool_calls):
         "metrics": metrics_dict(result),
         "timings": timings_dict(result),
     }
+    if job.session_id:
+        resp["session_id"] = job.session_id
+    return resp
 
 
 def stream_chunk(

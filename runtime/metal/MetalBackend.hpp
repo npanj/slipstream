@@ -147,6 +147,7 @@ struct ComputeDispatch {
   std::vector<BytesBinding> bytes;
   DispatchSize threadgroups;
   DispatchSize threadsPerThreadgroup;
+  mutable void *cachedPipeline = nullptr;
 };
 
 struct CommandTiming {

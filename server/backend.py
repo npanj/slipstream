@@ -74,6 +74,110 @@ class NativeResult:
 
 
 @dataclass
+class AgentSession:
+    """Stateful, append-only session tracker for co-located coding agents.
+
+    Allows incremental turns to verify prefix continuity and compute token deltas,
+    bypassing full KV recomputation.
+    """
+
+    session_id: str
+    active_tokens: list[int] = field(default_factory=list)
+    immutable_prefix_len: int = 0
+    last_disposition: str = "none"
+    turns_completed: int = 0
+    created_at: float = field(default_factory=time.monotonic)
+    updated_at: float = field(default_factory=time.monotonic)
+
+    def compute_delta(self, new_tokens: list[int]) -> tuple[bool, int, list[int]]:
+        """Verify prefix continuity and return (is_continuation, matched_count, delta_tokens)."""
+        curr = self.active_tokens
+        if not curr:
+            return False, 0, new_tokens
+        # Check if new_tokens extends curr
+        prefix_len = min(len(curr), len(new_tokens))
+        if new_tokens[:prefix_len] == curr[:prefix_len]:
+            if len(new_tokens) >= len(curr):
+                return True, len(curr), new_tokens[len(curr):]
+            return True, len(new_tokens), []
+        # Fallback: check immutable prefix continuity
+        if self.immutable_prefix_len > 0 and len(new_tokens) >= self.immutable_prefix_len:
+            if new_tokens[:self.immutable_prefix_len] == curr[:self.immutable_prefix_len]:
+                return True, self.immutable_prefix_len, new_tokens[self.immutable_prefix_len:]
+        return False, 0, new_tokens
+
+    def update(self, prompt_tokens: list[int], completion_tokens: list[int], disposition: str):
+        self.active_tokens = list(prompt_tokens) + list(completion_tokens)
+        self.last_disposition = disposition
+        self.turns_completed += 1
+        self.updated_at = time.monotonic()
+
+    def compact_middle(
+        self, target_tokens: int, summary_tokens: list[int], preserve_recent: int = 1000
+    ) -> bool:
+        """Radix-preserving context compactor: preserves Zone 1 immutable prefix and recent turns,
+        replacing middle history with summary tokens."""
+        if len(self.active_tokens) <= target_tokens:
+            return False
+        z1_len = self.immutable_prefix_len
+        if z1_len <= 0:
+            z1_len = min(500, len(self.active_tokens) // 4)
+        if len(self.active_tokens) <= z1_len + preserve_recent:
+            return False
+        zone1 = self.active_tokens[:z1_len]
+        recent = self.active_tokens[-preserve_recent:]
+        self.active_tokens = zone1 + list(summary_tokens) + recent
+        self.updated_at = time.monotonic()
+        return True
+
+    def save_vault(self, vault_dir: str | None = None) -> str:
+        """Checkpoint active session tokens and state to an APFS fast-storage vault file."""
+        import json
+        from pathlib import Path
+
+        target_dir = Path(vault_dir) if vault_dir else Path.home() / ".cache" / "slipstream" / "vaults"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        vault_file = target_dir / f"{self.session_id}.json"
+        data = {
+            "session_id": self.session_id,
+            "active_tokens": self.active_tokens,
+            "immutable_prefix_len": self.immutable_prefix_len,
+            "turns_completed": self.turns_completed,
+            "last_disposition": self.last_disposition,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+        vault_file.write_text(json.dumps(data), encoding="utf-8")
+        return str(vault_file)
+
+    @classmethod
+    def load_vault(cls, session_id: str, vault_dir: str | None = None) -> "AgentSession | None":
+        """Restore active session tokens and state from an APFS vault file."""
+        import json
+        from pathlib import Path
+
+        target_dir = Path(vault_dir) if vault_dir else Path.home() / ".cache" / "slipstream" / "vaults"
+        vault_file = target_dir / f"{session_id}.json"
+        if not vault_file.is_file():
+            return None
+        try:
+            data = json.loads(vault_file.read_text(encoding="utf-8"))
+            session = cls(
+                session_id=data["session_id"],
+                active_tokens=data.get("active_tokens", []),
+                immutable_prefix_len=data.get("immutable_prefix_len", 0),
+                last_disposition=data.get("last_disposition", "none"),
+                turns_completed=data.get("turns_completed", 0),
+                created_at=data.get("created_at", time.monotonic()),
+                updated_at=data.get("updated_at", time.monotonic()),
+            )
+            return session
+        except Exception:
+            return None
+
+
+
+@dataclass
 class Job:
     request_id: int
     prompt_tokens: list
@@ -100,6 +204,9 @@ class Job:
     cache: CacheInfo = field(default_factory=CacheInfo)
     # Image placeholder spans with their grids and digests, plus the
     # concatenated resized pixels the engine encodes during prefill.
+    image_spans: tuple = ()
+    image_pixels: bytes = b""
+    image_owner: object | None = None
     public_id: str = ""
     created_at: int = field(default_factory=lambda: int(time.time()))
     response_store: bool = False
@@ -109,6 +216,9 @@ class Job:
     response_previous_id: str | None = None
     response_history_items: list | None = None
     return_progress: bool = False
+    # AgentSession tracking
+    session_id: str | None = None
+    delta_prefill_tokens: int | None = None
 
 
 class CallbackStreamer:
@@ -164,6 +274,7 @@ class CallbackStreamer:
     def put_tokens(self, token_ids):
         if self.stop_sequence is not None:
             return
+        accumulated_text = []
         for token_id in token_ids:
             token_id = int(token_id)
             self.token_ids.append(token_id)
@@ -180,9 +291,14 @@ class CallbackStreamer:
                 self.decode_stream = None
                 continue
             if text:
-                self._emit(text)
-                if self.stop_sequence is not None:
-                    break
+                if not self.stop_sequences:
+                    accumulated_text.append(text)
+                else:
+                    self._emit(text)
+                    if self.stop_sequence is not None:
+                        break
+        if accumulated_text:
+            self._send("".join(accumulated_text))
 
     def end(self):
         if self.stop_sequence is not None:
@@ -258,12 +374,124 @@ class NativeBackend:
         self.status_refresh_failures = 0
         self.status_refresh_after = 0.0
         self.terminals = queue.Queue()
+        self.agent_sessions: dict[str, AgentSession] = {}
         self.finalizer = threading.Thread(
             target=self._finalize_loop,
             name="slipstream-http-finalizer",
             daemon=True,
         )
         self.finalizer.start()
+        # Mooncake-Style Predictive Background Promotion: worker thread monitoring
+        # draft buffer / keystroke pings and speculatively promoting candidate session
+        # pages/tokens from APFS fast vault into unified RAM before prompt completion.
+        self.promotion_queue = queue.Queue()
+        self.promotion_stats = {
+            "promotions_total": 0,
+            "promotions_hits": 0,
+            "promotion_latency_ms": 0.0,
+        }
+        self.promotion_worker = threading.Thread(
+            target=self._promotion_loop,
+            name="slipstream-mooncake-promoter",
+            daemon=True,
+        )
+        self.promotion_worker.start()
+
+    def _promotion_loop(self):
+        """Mooncake-Style Predictive Background Promotion loop.
+        Monitors candidate session activity and speculatively loads session vault tokens
+        from APFS fast disk storage into unified RAM before prompt completion."""
+        while not self.closing:
+            try:
+                item = self.promotion_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            session_id, vault_dir = item
+            t0 = time.perf_counter()
+            with self.lock:
+                already_resident = session_id in self.agent_sessions
+            if not already_resident:
+                session = AgentSession.load_vault(session_id, vault_dir=vault_dir)
+                if session is not None:
+                    with self.lock:
+                        self.agent_sessions[session_id] = session
+                        self.promotion_stats["promotions_hits"] += 1
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            with self.lock:
+                self.promotion_stats["promotions_total"] += 1
+                self.promotion_stats["promotion_latency_ms"] = dt_ms
+            self.promotion_queue.task_done()
+
+    def promote_session_async(self, session_id: str, vault_dir: str | None = None) -> bool:
+        """Asynchronously enqueue predictive promotion of a session from vault storage into RAM."""
+        if not session_id or self.closing:
+            return False
+        self.promotion_queue.put((session_id, vault_dir))
+        return True
+
+    def promote_session_sync(self, session_id: str, vault_dir: str | None = None) -> AgentSession | None:
+        """Synchronously promote a session from vault storage into RAM if not already resident."""
+        with self.lock:
+            session = self.agent_sessions.get(session_id)
+            if session is not None:
+                return session
+        t0 = time.perf_counter()
+        session = AgentSession.load_vault(session_id, vault_dir=vault_dir)
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        with self.lock:
+            if session is not None:
+                self.agent_sessions[session_id] = session
+                self.promotion_stats["promotions_hits"] += 1
+            self.promotion_stats["promotions_total"] += 1
+            self.promotion_stats["promotion_latency_ms"] = dt_ms
+        return session
+
+    def get_or_create_session(self, session_id: str, immutable_prefix_len: int = 0) -> AgentSession:
+        with self.lock:
+            self._prune_sessions_locked()
+            session = self.agent_sessions.get(session_id)
+            if session is None:
+                # Vault fallback: check if vault exists on APFS disk
+                session = AgentSession.load_vault(session_id)
+                if session is None:
+                    session = AgentSession(
+                        session_id=session_id,
+                        immutable_prefix_len=immutable_prefix_len,
+                    )
+                self.agent_sessions[session_id] = session
+            elif immutable_prefix_len > 0 and session.immutable_prefix_len == 0:
+                session.immutable_prefix_len = immutable_prefix_len
+            return session
+
+    def get_session(self, session_id: str) -> AgentSession | None:
+        with self.lock:
+            session = self.agent_sessions.get(session_id)
+            if session is not None:
+                return session
+        session = AgentSession.load_vault(session_id)
+        if session is not None:
+            with self.lock:
+                self.agent_sessions[session_id] = session
+        return session
+
+    def close_session(self, session_id: str) -> bool:
+        with self.lock:
+            return self.agent_sessions.pop(session_id, None) is not None
+
+    def _prune_sessions_locked(self, max_idle_seconds: float = 3600.0, max_sessions: int = 128):
+        now = time.monotonic()
+        expired = [
+            sid for sid, s in self.agent_sessions.items()
+            if now - s.updated_at > max_idle_seconds
+        ]
+        for sid in expired:
+            del self.agent_sessions[sid]
+        if len(self.agent_sessions) > max_sessions:
+            sorted_sessions = sorted(self.agent_sessions.items(), key=lambda kv: kv[1].updated_at)
+            for sid, _ in sorted_sessions[: len(self.agent_sessions) - max_sessions]:
+                del self.agent_sessions[sid]
 
     def can_submit(self):
         with self.lock:
@@ -462,6 +690,9 @@ class NativeBackend:
             cohort=cohort,
             constraint=constraint,
             mask_provider=self._mask_provider(job),
+            image_spans=job.image_spans,
+            image_pixels=job.image_pixels,
+            image_owner=job.image_owner,
             return_progress=job.return_progress,
         )
 
@@ -482,6 +713,12 @@ class NativeBackend:
             self.tokenizer, emit, job.stop_sequences, stop_matched
         )
         state = _JobState(job, streamer)
+        if job.session_id:
+            with self.lock:
+                session = self.get_or_create_session(job.session_id)
+                is_cont, matched, delta = session.compute_delta(job.prompt_tokens)
+                if is_cont:
+                    job.delta_prefill_tokens = len(delta)
         try:
             request = self._generation_request(job)
         except APIError as error:
@@ -686,6 +923,15 @@ class NativeBackend:
             result = None
             error = APIError(503, "server is shutting down", "server_shutdown")
         self._record(job, result=result, error=error)
+        if result is not None and job.session_id:
+            with self.lock:
+                session = self.agent_sessions.get(job.session_id)
+                if session is not None:
+                    session.update(
+                        job.prompt_tokens,
+                        state.streamer.token_ids,
+                        job.cache.status,
+                    )
         job.events.put(("error", error) if error else ("done", result))
 
     @staticmethod
@@ -793,3 +1039,5 @@ class NativeBackend:
                 state.job.events.put(("error", error))
             self.terminals.put(None)
             self.finalizer.join()
+            self.promotion_queue.put(None)
+            self.promotion_worker.join()

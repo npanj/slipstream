@@ -12,6 +12,10 @@ constexpr uint32_t kMaximumLanes = SPLASH_MAXIMUM_BATCH_WIDTH;
 constexpr uint32_t kDecodeRows = SPLASH_TARGET_VERIFY_ROWS;
 static_assert(kMaximumLanes == 4);
 
+auto shapeKey(DraftAttentionShape s) noexcept {
+  return std::tuple{s.hiddenSize, s.dynamicSize, s.qkvSize, s.attentionSize,
+                    s.queryHeads, s.kvHeads, s.headDimension};
+}
 auto shapeKey(MoeShape s) noexcept {
   return std::tuple{s.hiddenSize, s.experts, s.expertsPerToken,
                     s.expertIntermediateSize};
@@ -64,6 +68,12 @@ Configuration configurationFor(const std::vector<Choice> &choices,
 
 constexpr std::array attentionFields{
     &AttentionWorkspace::partialsBytes, &AttentionWorkspace::statisticsBytes};
+constexpr std::array draftFields{
+    &DraftAttentionWorkspace::convolutionBytes,
+    &DraftAttentionWorkspace::qkvBytes,
+    &DraftAttentionWorkspace::groupedQueriesBytes,
+    &DraftAttentionWorkspace::queryKeysBytes,
+    &DraftAttentionWorkspace::queryValuesBytes};
 constexpr std::array moeFields{
     &MoeWorkspace::selectedExpertsBytes, &MoeWorkspace::routingWeightsBytes,
     &MoeWorkspace::tileDescriptorsBytes, &MoeWorkspace::tileCountBytes,
@@ -84,6 +94,15 @@ void include(Workspace &bound, const Workspace &required,
 
 } // namespace
 
+std::strong_ordering DraftAttentionWorkload::operator<=>(
+    const DraftAttentionWorkload &other) const noexcept {
+  return std::tuple{shapeKey(shape), lanes} <=>
+         std::tuple{shapeKey(other.shape), other.lanes};
+}
+bool DraftAttentionWorkload::operator==(
+    const DraftAttentionWorkload &other) const noexcept {
+  return (*this <=> other) == 0;
+}
 std::strong_ordering MoeWorkload::operator<=>(
     const MoeWorkload &other) const noexcept {
   return std::tuple{shapeKey(shape), rows, phase} <=>
@@ -114,6 +133,9 @@ void ExecutionPlans::install(const OperatorChoices &choices) {
                                    attentionLayout(w.shape), histories,
                                    choice.configuration);
   }
+  for (const auto &choice : pending.draftAttention)
+    (void)DraftAttention::plan(choice.workload.shape, choice.workload.lanes,
+                               choice.configuration);
   for (const auto &choice : pending.moe) {
     const auto &w = choice.workload;
     if (w.phase == MoePhase::Prefill)
@@ -125,6 +147,7 @@ void ExecutionPlans::install(const OperatorChoices &choices) {
   }
   sortUnique(pending.prefillAttention);
   sortUnique(pending.verifyAttention);
+  sortUnique(pending.draftAttention);
   sortUnique(pending.moe);
   // All potentially throwing work is above. No partial table install can
   // affect a production lookup if validation or allocation fails.
@@ -150,6 +173,15 @@ VerifyAttentionPlan ExecutionPlans::verifyAttention(
   return PagedAttention::verifyPlan(
       lanes, queryHeads, layout, historyTokens,
       configurationFor(choices_.verifyAttention, workload, VerifyAttentionConfig{}));
+}
+
+DraftAttentionPlan ExecutionPlans::draftAttention(DraftAttentionShape shape,
+                                                 uint32_t lanes) const {
+  return DraftAttention::plan(
+      shape, lanes,
+      configurationFor(choices_.draftAttention,
+                       DraftAttentionWorkload{shape, lanes},
+                       DraftAttentionConfiguration{}));
 }
 
 MoePlan ExecutionPlans::moePrefill(MoeShape shape, uint32_t rows) const {
@@ -207,6 +239,22 @@ AttentionWorkspace ExecutionPlans::verifyAttentionWorkspacePerLane(
       include(bound, PagedAttention::verifyWorkspace(
                          w.lanes, queryHeads, layout, choice.configuration),
               attentionFields, w.lanes);
+  }
+  return bound;
+}
+
+DraftAttentionWorkspace ExecutionPlans::draftAttentionWorkspacePerLane(
+    DraftAttentionShape shape) const {
+  DraftAttentionWorkspace bound;
+  for (uint32_t lanes = 1; lanes <= kMaximumLanes; ++lanes)
+    include(bound, DraftAttention::plan(shape, lanes).workspace(), draftFields,
+            lanes);
+  for (const auto &choice : choices_.draftAttention) {
+    const auto &w = choice.workload;
+    if (w.shape == shape)
+      include(bound, DraftAttention::plan(shape, w.lanes,
+                                          choice.configuration).workspace(),
+              draftFields, w.lanes);
   }
   return bound;
 }

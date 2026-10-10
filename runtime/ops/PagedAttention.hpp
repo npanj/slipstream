@@ -163,6 +163,12 @@ struct PrefillAttentionConfig final {
   bool operator==(const PrefillAttentionConfig &) const = default;
 };
 
+enum class AttentionFormat : uint8_t {
+  Q8 = 0,
+  Q4Direct = 1,
+  Q3Polar = 2,
+};
+
 enum class VerifySplitCount : uint32_t {
   One = 1,
   Eight = 8,
@@ -172,8 +178,121 @@ enum class VerifySplitCount : uint32_t {
 struct VerifyAttentionConfig final {
   VerifySplitCount splitCount = VerifySplitCount::ThirtyTwo;
   AttentionScalePlacement scalePlacement = AttentionScalePlacement::Softmax;
+  AttentionFormat format = AttentionFormat::Q8;
+  bool questSparsity = false;
+  float questTopKRatio = 0.20f; // Retain top 20% pages + recency window
+  bool duoAttention = false;    // DuoAttention head splitting (ICLR 2025)
+  uint32_t retrievalHeadMask = 0xFFFFFFFFu; // Default: all heads retrieval
+  uint32_t sinkTokens = 4;      // Initial attention sink tokens
+  uint32_t streamingWindow = 256; // 8 pages of 32 tokens
+  bool miniCache = false;       // MiniCache depth merging (NeurIPS 2024)
+  uint32_t miniCacheStartLayer = 16; // Mid-to-deep layers start at layer 16
+  float miniCacheThreshold = 0.90f; // Minimum cosine similarity to merge layer pairs
+  bool tieredCompressedKv = false;  // Tiered Cold-Page Compressed KV (Q8 hot window, Q4/Q3 cold history)
+  uint32_t hotWindowTokens = 4096;  // Tokens retained in full Q8 precision
   bool operator==(const VerifyAttentionConfig &) const = default;
 };
+
+namespace compressed_tier {
+
+// Cold-Page Tiered Compression:
+// Queries falling outside the immediate hot recency window (e.g. older than 4k tokens)
+// are routed to compressed Q4/Q3 attention representations, saving memory bandwidth
+// and register pressure on deep context verification.
+
+[[nodiscard]] constexpr bool isPageCold(uint32_t pageIndex, uint32_t totalPages,
+                                        uint32_t hotWindowPages) noexcept {
+  if (totalPages <= hotWindowPages) return false;
+  return pageIndex < (totalPages - hotWindowPages);
+}
+
+[[nodiscard]] constexpr uint32_t coldPagesCount(uint32_t totalPages,
+                                               uint32_t hotWindowPages) noexcept {
+  if (totalPages <= hotWindowPages) return 0;
+  return totalPages - hotWindowPages;
+}
+
+} // namespace compressed_tier
+
+namespace duo {
+
+// DuoAttention (ICLR 2025): Dual-head attention splitting.
+// Classifies heads into Retrieval Heads (full KV chain) and Streaming Heads
+// (local circular ring buffer + sink tokens).
+
+[[nodiscard]] constexpr bool isRetrievalHead(uint32_t headIndex,
+                                             uint32_t retrievalHeadMask) noexcept {
+  return (retrievalHeadMask & (1u << (headIndex % 32))) != 0;
+}
+
+[[nodiscard]] constexpr bool isStreamingHead(uint32_t headIndex,
+                                             uint32_t retrievalHeadMask) noexcept {
+  return !isRetrievalHead(headIndex, retrievalHeadMask);
+}
+
+[[nodiscard]] constexpr bool isTokenVisible(
+    uint32_t token, uint32_t visibleTokens, bool isRetrieval,
+    uint32_t sinkTokens = 4, uint32_t streamingWindow = 256) noexcept {
+  if (token >= visibleTokens) return false;
+  if (isRetrieval) return true;
+  if (token < sinkTokens) return true;
+  if (visibleTokens <= streamingWindow) return true;
+  return (token >= visibleTokens - streamingWindow);
+}
+
+[[nodiscard]] constexpr uint32_t requiredPages(
+    uint32_t visibleTokens, bool isRetrieval,
+    uint32_t sinkTokens = 4, uint32_t streamingWindow = 256,
+    uint32_t pageTokens = 32) noexcept {
+  const uint32_t totalPages = (visibleTokens + pageTokens - 1) / pageTokens;
+  if (isRetrieval) return totalPages;
+  const uint32_t sinkPages = (sinkTokens + pageTokens - 1) / pageTokens;
+  const uint32_t windowPages = (streamingWindow + pageTokens - 1) / pageTokens;
+  return std::min(totalPages, sinkPages + windowPages);
+}
+
+[[nodiscard]] constexpr uint32_t circularRingPage(
+    uint32_t logicalPage, uint32_t sinkPages, uint32_t windowPages) noexcept {
+  if (logicalPage < sinkPages) {
+    return logicalPage;
+  }
+  return sinkPages + ((logicalPage - sinkPages) % windowPages);
+}
+
+} // namespace duo
+
+namespace minicache {
+
+// MiniCache (NeurIPS 2024): Cross-layer KV state sharing.
+// Merges adjacent layers (L, L+1) in mid-to-deep layers using SLERP directional vectors.
+
+[[nodiscard]] constexpr bool isLayerMerged(uint32_t layerIndex,
+                                           uint32_t mergeStartLayer,
+                                           uint32_t totalLayers) noexcept {
+  return layerIndex >= mergeStartLayer && layerIndex < totalLayers;
+}
+
+[[nodiscard]] constexpr uint32_t mergedPairIndex(uint32_t layerIndex,
+                                                 uint32_t mergeStartLayer) noexcept {
+  if (layerIndex < mergeStartLayer) return layerIndex;
+  return mergeStartLayer + ((layerIndex - mergeStartLayer) / 2);
+}
+
+[[nodiscard]] constexpr bool isSecondInPair(uint32_t layerIndex,
+                                            uint32_t mergeStartLayer) noexcept {
+  if (layerIndex < mergeStartLayer) return false;
+  return ((layerIndex - mergeStartLayer) % 2) == 1;
+}
+
+[[nodiscard]] constexpr uint32_t effectiveStoredLayers(uint32_t totalLayers,
+                                                       uint32_t mergeStartLayer) noexcept {
+  if (mergeStartLayer >= totalLayers) return totalLayers;
+  const uint32_t unmerged = mergeStartLayer;
+  const uint32_t merged = (totalLayers - mergeStartLayer + 1) / 2;
+  return unmerged + merged;
+}
+
+} // namespace minicache
 
 // Immutable factory-built plans are shared by allocation, measurement and
 // encoding. Each prefill uses one split dispatch followed by one reduction.

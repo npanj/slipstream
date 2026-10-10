@@ -27,6 +27,10 @@ public:
   void indexPrompt(std::span<const uint32_t> promptTokens,
                    uint32_t nGramSize = kDefaultNGram);
 
+  /// Ingests external reference tokens (e.g. view_file tool output, AST slices)
+  /// directly into the n-gram index for speculative code proposal matching.
+  void ingestReferenceTokens(std::span<const uint32_t> referenceTokens);
+
   /// Appends newly generated tokens to the active history and index.
   void appendToken(uint32_t token);
 
@@ -39,6 +43,19 @@ public:
                                 uint32_t maxDrafts,
                                 uint32_t minMatchLength = 3,
                                 bool requireUnambiguous = false) const;
+
+  /// Proposes multiple candidate branches when an n-gram has alternative continuations.
+  /// Used for multi-branch tree speculation (EAGLE-2 tree verification).
+  struct BranchProposal {
+    std::vector<uint32_t> tokens;
+    uint32_t matchLength = 0;
+  };
+
+  [[nodiscard]] std::vector<BranchProposal>
+  proposeBranches(std::span<const uint32_t> recentTokens,
+                  uint32_t maxBranches = 3,
+                  uint32_t maxTokensPerBranch = 4,
+                  uint32_t minMatchLength = 2) const;
 
   /// Clears the index and token history.
   void clear() noexcept;

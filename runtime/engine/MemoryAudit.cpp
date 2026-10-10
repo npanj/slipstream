@@ -62,6 +62,8 @@ MemoryAuditResult auditActualMemory(const EngineMemoryPlan &plan,
   const uint64_t plannedStreamCache = plan.model().footprint.streamCacheBytes;
   const Category categories[] = {
       {"target weights", actual.targetWeightsBytes, budget.targetWeightsBytes},
+      {"vision weights", actual.visionWeightsBytes, budget.visionWeightsBytes},
+      {"draft weights", actual.draftWeightsBytes, budget.draftWeightsBytes},
       {"stream cache", actual.streamCacheBytes, plannedStreamCache},
       {"shared prefill", actual.sharedPrefillBytes, budget.sharedPrefillBytes},
       {"shared decode", actual.sharedDecodeBytes, budget.sharedDecodeBytes},

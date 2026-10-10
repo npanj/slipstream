@@ -14,3 +14,10 @@ struct RopeTableParams {
 
 static_assert(sizeof(RopeTableParams) == 4,
               "RoPE table parameters are 4 bytes on both sides");
+
+struct DraftRopeTableParams {
+  uint32_t draft_rows;
+};
+
+static_assert(sizeof(DraftRopeTableParams) == 4,
+              "Draft RoPE table parameters are 4 bytes on both sides");

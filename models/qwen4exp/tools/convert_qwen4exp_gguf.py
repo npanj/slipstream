@@ -699,6 +699,26 @@ def default_workers() -> int:
     return max(1, min(8, memory // WORKER_MEMORY_BYTES))
 
 
+def attach_vision_bin(vision_bin: str | Path, output_dir: str | Path) -> None:
+    """Link a packed vision tower into a prepared package, copying when the
+    source lives on another volume. A present vision/model.bin is kept as is,
+    so re-running prepare never clobbers it."""
+    vision_src = Path(vision_bin).expanduser()
+    with open(vision_src, "rb") as probe:
+        header = probe.read(16)
+    if len(header) != 16 or header[:8] != b"MDFV0001":
+        raise SystemExit(f"error: {vision_src} is not a packed vision tower")
+    vision_dst = Path(output_dir).expanduser() / "vision" / "model.bin"
+    if not vision_dst.exists():
+        vision_dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(vision_src, vision_dst)
+            print(f"Linked vision/model.bin from {vision_src} (0 extra bytes)")
+        except Exception:
+            shutil.copyfile(vision_src, vision_dst)
+            print(f"Copied vision/model.bin from {vision_src}")
+
+
 def prepare_gguf_model(
     model_dir: str | Path,
     output_dir: str | Path,
@@ -706,6 +726,7 @@ def prepare_gguf_model(
     reference_dir: str | Path | None = None,
     workers: int | None = None,
     consume_source: bool = False,
+    vision_bin: str | Path | None = None,
 ) -> None:
     """Convert the GGUF files in model_dir into a package in output_dir.
 
@@ -801,6 +822,13 @@ def prepare_gguf_model(
     if not (draft_dir / "model.bin").exists():
         write_placeholder_draft(draft_dir)
         print("Wrote placeholder draft")
+
+    # Vision is optional: the GGUF text shards carry no tower, so a packed
+    # vision/model.bin (see pack_vision.py) is linked in only when given.
+    # Without it the package serves text only and allocates zero vision
+    # memory.
+    if vision_bin is not None:
+        attach_vision_bin(vision_bin, output_dir)
 
     # The parts to convert, by output name.
     parts = {
@@ -978,6 +1006,12 @@ def main():
         help="free the GGUF files' data as it is converted and delete them once the package is "
         "complete: preparing then needs little more disk space than the model, not twice it",
     )
+    parser.add_argument(
+        "--vision-bin",
+        default=None,
+        help="packed vision/model.bin (from pack_vision.py) to attach; "
+        "without it the package serves text only",
+    )
     args = parser.parse_args()
 
     prepare_gguf_model(
@@ -987,6 +1021,7 @@ def main():
         args.reference,
         workers=args.workers,
         consume_source=args.consume_source,
+        vision_bin=args.vision_bin,
     )
 
 

@@ -43,6 +43,7 @@ public:
     return {0, StateFailure::None};
   }
   void restore(uint64_t, uint32_t, std::shared_ptr<const CompositeState>) override {}
+  void setDraftContextPlan(uint64_t, DraftContextPlan) override {}
   std::vector<ModelStepResult> prefill(const BatchPlan &,
                                           std::span<const ModelBatchItem>) {
     return {};

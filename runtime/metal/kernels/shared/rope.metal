@@ -1,5 +1,24 @@
 #include "metal/abi/KernelABI.h"
 
+kernel void rope_build_draft_tables(
+    device const uint *draft_positions [[buffer(0)]],
+    device const float *draft_inverse_frequencies [[buffer(1)]],
+    device float *draft_cosine [[buffer(2)]],
+    device float *draft_sine [[buffer(3)]],
+    constant DraftRopeTableParams &params [[buffer(4)]],
+    uint index [[thread_position_in_grid]],
+    uint grid_size [[threads_per_grid]]) {
+  const uint draft_elements = params.draft_rows * 64;
+  for (uint element = index; element < draft_elements; element += grid_size) {
+    const uint row = element / 64;
+    const uint dim = element % 64;
+    const float angle =
+        float(draft_positions[row]) * draft_inverse_frequencies[dim];
+    draft_cosine[element] = cos(angle);
+    draft_sine[element] = sin(angle);
+  }
+}
+
 kernel void rope_build_tables(
     device const uint *target_positions [[buffer(0)]],
     device const float *target_inverse_frequencies [[buffer(1)]],

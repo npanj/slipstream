@@ -24,6 +24,8 @@ enum class MemoryAuditError {
 
 struct ActualMemoryReport {
     uint64_t targetWeightsBytes = 0;
+    uint64_t visionWeightsBytes = 0;
+    uint64_t draftWeightsBytes = 0;
     // Unique physical GDN/draft allocations across active lanes, cached
     // states and idle pooled buffers.
     uint64_t stateResidentBytes = 0;

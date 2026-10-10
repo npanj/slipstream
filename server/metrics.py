@@ -239,7 +239,7 @@ def timings_dict(result):
     latency = metrics_dict(result)["request_latency"]
     prompt_ms = latency.get("start_to_first_token_ms", 0.0)
     prompt_rate = result.prefill_tokens * 1000.0 / prompt_ms if prompt_ms else 0.0
-    return {
+    res = {
         "prompt_n": result.prompt_tokens,
         "prompt_ms": prompt_ms,
         "prompt_per_second": prompt_rate if math.isfinite(prompt_rate) else 0.0,
@@ -248,6 +248,7 @@ def timings_dict(result):
         "predicted_per_second": latency.get("stream_tokens_per_second", 0.0),
         "cache_n": result.cache.matched_tokens,
     }
+    return res
 
 
 def metrics_dict(result):
@@ -264,6 +265,9 @@ def metrics_dict(result):
     for name, milliseconds in intervals:
         if math.isfinite(milliseconds) and milliseconds >= 0:
             latency[name] = milliseconds
+    if getattr(result, "sse_decode_ms", None) is not None:
+        latency["sse_decode_ms"] = result.sse_decode_ms
+        latency["decode_gap_ms"] = result.decode_gap_ms
     if (
         result.completion_tokens > 0
         and "wall_ms" in latency

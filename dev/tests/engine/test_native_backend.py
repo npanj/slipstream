@@ -814,6 +814,108 @@ class NativeBackendContractTests(unittest.TestCase):
                 error = backend_api.NativeBackend._api_error(native)
                 self.assertEqual((error.status, error.code), expected)
 
+    def test_agent_session_delta_prefill(self):
+        backend = backend_api.NativeBackend(
+            runtime=mock.MagicMock(), tokenizer=FakeTokenizer()
+        )
+        try:
+            # 1. New session creation
+            session = backend.get_or_create_session("sess-1", immutable_prefix_len=10)
+            self.assertEqual(session.session_id, "sess-1")
+            self.assertEqual(session.immutable_prefix_len, 10)
+            self.assertEqual(session.turns_completed, 0)
+
+            # 2. First turn: compute_delta on empty session returns full tokens as delta
+            prompt_turn_1 = list(range(100, 150))
+            is_cont, matched, delta = session.compute_delta(prompt_turn_1)
+            self.assertFalse(is_cont)
+            self.assertEqual(matched, 0)
+            self.assertEqual(delta, prompt_turn_1)
+
+            # Update session after turn 1 completion (model emitted 20 tokens)
+            completion_turn_1 = list(range(200, 220))
+            session.update(prompt_turn_1, completion_turn_1, "hit")
+            self.assertEqual(session.turns_completed, 1)
+            self.assertEqual(len(session.active_tokens), 70)
+
+            # 3. Second turn: prompt appends 15 tool result tokens
+            tool_delta = list(range(300, 315))
+            prompt_turn_2 = session.active_tokens + tool_delta
+            is_cont, matched, delta = session.compute_delta(prompt_turn_2)
+            self.assertTrue(is_cont)
+            self.assertEqual(matched, 70)
+            self.assertEqual(delta, tool_delta)
+
+            # 4. Partial diverge: prompt branches after immutable prefix
+            diverged_turn = session.active_tokens[:10] + [999, 998, 997]
+            is_cont, matched, delta = session.compute_delta(diverged_turn)
+            self.assertTrue(is_cont)
+            self.assertEqual(matched, 10)
+            self.assertEqual(delta, [999, 998, 997])
+
+            # 5. Session pruning / close
+            self.assertTrue(backend.close_session("sess-1"))
+            self.assertIsNone(backend.get_session("sess-1"))
+        finally:
+            backend.close()
+
+    def test_mooncake_predictive_background_promotion(self):
+        import tempfile
+        import shutil
+        from pathlib import Path
+        temp_dir = tempfile.mkdtemp(prefix="mooncake_vault_")
+        backend = backend_api.NativeBackend(
+            runtime=mock.MagicMock(), tokenizer=FakeTokenizer()
+        )
+        try:
+            # 1. Setup session and snapshot to APFS vault
+            session = backend.get_or_create_session("sess-mooncake", immutable_prefix_len=32)
+            session.update(list(range(100, 200)), list(range(200, 250)), "hit")
+            self.assertEqual(len(session.active_tokens), 150)
+            vault_file = session.save_vault(vault_dir=temp_dir)
+            self.assertTrue(Path(vault_file).is_file())
+
+            # 2. Simulate memory pressure eviction / cold start
+            del backend.agent_sessions["sess-mooncake"]
+            self.assertNotIn("sess-mooncake", backend.agent_sessions)
+
+            # 3. Synchronous promotion benchmark
+            promoted = backend.promote_session_sync("sess-mooncake", vault_dir=temp_dir)
+            self.assertIsNotNone(promoted)
+            self.assertEqual(promoted.session_id, "sess-mooncake")
+            self.assertEqual(len(promoted.active_tokens), 150)
+            self.assertIn("sess-mooncake", backend.agent_sessions)
+            self.assertGreaterEqual(backend.promotion_stats["promotions_total"], 1)
+            self.assertGreaterEqual(backend.promotion_stats["promotions_hits"], 1)
+            self.assertLess(backend.promotion_stats["promotion_latency_ms"], 50.0)
+
+            # 4. Asynchronous predictive promotion via background worker
+            session2 = backend.get_or_create_session("sess-mooncake-async", immutable_prefix_len=16)
+            session2.update(list(range(500, 600)), list(range(600, 620)), "hit")
+            session2.save_vault(vault_dir=temp_dir)
+            del backend.agent_sessions["sess-mooncake-async"]
+            self.assertNotIn("sess-mooncake-async", backend.agent_sessions)
+
+            # Enqueue predictive promotion
+            enqueued = backend.promote_session_async("sess-mooncake-async", vault_dir=temp_dir)
+            self.assertTrue(enqueued)
+            # Wait for background queue to drain
+            backend.promotion_queue.join()
+            self.assertIn("sess-mooncake-async", backend.agent_sessions)
+            restored = backend.get_session("sess-mooncake-async")
+            self.assertEqual(len(restored.active_tokens), 120)
+
+            # 5. Delta prefill calculation matches restored session
+            prompt_next_turn = restored.active_tokens + [701, 702, 703]
+            is_cont, matched, delta = restored.compute_delta(prompt_next_turn)
+            self.assertTrue(is_cont)
+            self.assertEqual(matched, 120)
+            self.assertEqual(delta, [701, 702, 703])
+        finally:
+            backend.close()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
+

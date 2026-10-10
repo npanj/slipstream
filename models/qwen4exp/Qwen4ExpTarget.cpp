@@ -400,16 +400,23 @@ void adviseMissedExperts(const Qwen4ExpExpertSource &source, const Miss *misses,
   }();
   if (!enabled || !count || source.fd < 0)
     return;
-  for (size_t i = 0; i < count; ++i) {
+  // Batch contiguous / sequential expert matrices into single F_RDADVISE calls
+  for (size_t i = 0; i < count; ) {
+    size_t run = 1;
+    while (i + run < count && misses[i + run].expert == misses[i].expert + run) {
+      ++run;
+    }
     const uint64_t expert = misses[i].expert;
+    const uint64_t totalBytes = run * stride;
     struct radvisory ra;
-    ra.ra_count = static_cast<int>(std::min<uint64_t>(stride, static_cast<uint64_t>(INT_MAX)));
+    ra.ra_count = static_cast<int>(std::min<uint64_t>(totalBytes, static_cast<uint64_t>(INT_MAX)));
     ra.ra_offset = static_cast<off_t>(source.gate + expert * stride);
     (void)::fcntl(source.fd, F_RDADVISE, &ra);
     ra.ra_offset = static_cast<off_t>(source.up + expert * stride);
     (void)::fcntl(source.fd, F_RDADVISE, &ra);
     ra.ra_offset = static_cast<off_t>(source.down + expert * stride);
     (void)::fcntl(source.fd, F_RDADVISE, &ra);
+    i += run;
   }
 #else
   (void)source;
@@ -512,15 +519,28 @@ uint16_t toBf16(float value) {
   return static_cast<uint16_t>((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
 }
 
-constexpr uint32_t kFrequencyHalfLife = 512;
-
-// Counts a use of `expert`, halving every count each kFrequencyHalfLife steps.
+// Counts a use of `expert`, halving every count each halfLife steps with a sticky floor
+// to protect foundational multi-turn experts from eviction during bursty prompts (MoE-Infinity).
 void countExpertUse(Qwen4ExpLayerExpertCache &cache, uint32_t expert) {
+  static const uint32_t halfLife = [] {
+    const char *v = std::getenv("SPLASH_EXPERT_HALF_LIFE");
+    return v ? static_cast<uint32_t>(std::atoi(v)) : 1024u;
+  }();
+  static const uint32_t stickyFloor = [] {
+    const char *v = std::getenv("SPLASH_EXPERT_STICKY_FLOOR");
+    return v ? static_cast<uint32_t>(std::atoi(v)) : 4u;
+  }();
   if (cache.frequency.empty())
     cache.frequency.assign(cache.expertToSlot.size(), 0);
   if (cache.clock >= cache.nextHalving) {
-    for (auto &count : cache.frequency) count >>= 1;
-    cache.nextHalving = cache.clock + kFrequencyHalfLife;
+    for (auto &count : cache.frequency) {
+      if (count > stickyFloor) {
+        count = std::max(stickyFloor, count >> 1);
+      } else {
+        count >>= 1;
+      }
+    }
+    cache.nextHalving = cache.clock + halfLife;
   }
   cache.frequency[expert] += 16;
 }
@@ -2407,6 +2427,19 @@ void Qwen4ExpTarget::addVerify(
           wanted.set(e);
           order.push_back(e);
         }
+
+    // Predictor v2: Prioritize predictions that are NOT already in cache,
+    // and sort candidates by vote count and historical activation frequency.
+    std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+      const bool aInCache = (cache.expertToSlot[a] >= 0);
+      const bool bInCache = (cache.expertToSlot[b] >= 0);
+      if (aInCache != bInCache) return !aInCache; // un-cached candidates first
+      if (votes[a] != votes[b]) return votes[a] > votes[b]; // higher consensus first
+      const uint64_t fA = (!cache.frequency.empty() && a < cache.frequency.size()) ? cache.frequency[a] : 0;
+      const uint64_t fB = (!cache.frequency.empty() && b < cache.frequency.size()) ? cache.frequency[b] : 0;
+      return fA > fB; // higher frequency affinity first
+    });
+
     for (const uint32_t expert : order) {
       const int16_t existing = cache.expertToSlot[expert];
       if (existing >= 0) {
@@ -2420,6 +2453,16 @@ void Qwen4ExpTarget::addVerify(
         const int32_t victim = pickVictim(cache);
         if (victim < 0)
           break;
+        // Safeguard: do not evict an existing expert if its historical frequency
+        // exceeds the candidate's frequency, protecting established hot experts.
+        const int16_t vicExp = cache.slotToExpert[victim];
+        if (vicExp >= 0 && !cache.frequency.empty()) {
+          const uint64_t vicFreq = (vicExp < static_cast<int16_t>(cache.frequency.size())) ? cache.frequency[vicExp] : 0;
+          const uint64_t candFreq = (expert < cache.frequency.size()) ? cache.frequency[expert] : 0;
+          if (vicFreq > candFreq + 4 && votes[expert] < 2) {
+            continue; // retain the established victim expert
+          }
+        }
         slot = static_cast<uint32_t>(victim);
         if (cache.slotToExpert[slot] >= 0)
           cache.expertToSlot[cache.slotToExpert[slot]] = -1;
@@ -2447,12 +2490,44 @@ void Qwen4ExpTarget::addVerify(
     char *up = static_cast<char *>(cache.cacheUp.contents());
     char *down = static_cast<char *>(cache.cacheDown.contents());
     auto owned = std::make_shared<std::vector<Miss>>(std::move(misses));
+    // Immediately issue non-blocking Darwin kernel advisory to begin NVMe DMA
+    adviseMissedExperts(source, owned->data(), owned->size(), stride);
     dispatch_group_async(cache.inflight,
                          dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
       readMissedExperts(source, owned->data(), owned->size(), stride, gate, up, down,
                         slotReads.get());
     });
     cache.pending = true;
+  };
+
+  // Multi-layer horizon advisory ($L+2 \to L+3$):
+  // Issues non-blocking fcntl(F_RDADVISE) hints 2–3 layers ahead into the macOS
+  // unified page cache, ensuring NVMe SSD pages are pre-faulted by kernel DMA
+  // well before pread is executed.
+  auto adviseHorizonPredicted = [&](uint32_t horizonLayer) {
+    if (horizonLayer >= geometry.layers)
+      return;
+    const auto &cache = weights.layers[horizonLayer].expertCache;
+    const auto &source = weights.layers[horizonLayer].expertSource;
+    if (source.fd < 0)
+      return;
+    const uint64_t stride = weights.layers[horizonLayer].ffn.expertGate.expertStrideBytes;
+
+    // Use historical activation frequency and sticky affinity to advise the
+    // highest-probability candidates for this layer that are not yet in cache
+    struct HorizonMiss { uint32_t expert; };
+    std::vector<HorizonMiss> horizonMisses;
+    if (!cache.frequency.empty()) {
+      for (uint32_t e = 0; e < weights.layout.experts && e < cache.frequency.size(); ++e) {
+        if (cache.frequency[e] >= 4 && cache.expertToSlot[e] < 0) {
+          horizonMisses.push_back({e});
+          if (horizonMisses.size() >= 8) break;
+        }
+      }
+    }
+    if (!horizonMisses.empty()) {
+      adviseMissedExperts(source, horizonMisses.data(), horizonMisses.size(), stride);
+    }
   };
 
   // Host routing for a pipelined step. The GPU stage ends at the router's
@@ -2555,11 +2630,12 @@ void Qwen4ExpTarget::addVerify(
     };
     for (uint32_t e = 0; e < experts; ++e)
       if (!waves || !pendingMissSlots[e]) addExpert(e);
-    std::vector<uint32_t> shared;
+    std::array<uint32_t, ExecutionLimits::targetVerifyRows * ExecutionLimits::maximumBatchWidth> shared{};
+    uint32_t sharedCount = 0;
     for (uint32_t r = 0; r < rows; ++r)
-      if (isLive(r)) shared.push_back(r * hostRoutesPerRow + k);
-    for (uint32_t first = 0; first < shared.size(); first += tileRows) {
-      const uint32_t count = std::min<uint32_t>(tileRows, shared.size() - first);
+      if (isLive(r) && sharedCount < shared.size()) shared[sharedCount++] = r * hostRoutesPerRow + k;
+    for (uint32_t first = 0; first < sharedCount; first += tileRows) {
+      const uint32_t count = std::min<uint32_t>(tileRows, sharedCount - first);
       tiles[tile] = MoeTileDescriptor{experts, count};
       for (uint32_t i = 0; i < tileRows; ++i) {
         const uint32_t row = tile * tileRows + i;
@@ -2720,10 +2796,6 @@ void Qwen4ExpTarget::addVerify(
     auto *hIn = static_cast<uint16_t *>(weights.mtpHin.contents());
     const auto *hidden0 = static_cast<const uint16_t *>(buffers.hidden[0].contents());
     metal::MetalBuffer X = buffers.hidden[1], Y = buffers.hidden[0];
-    const HyperConnectionParams all{kRows, hidden, geometry.hyperConnectionCount,
-                                    geometry.hyperConnectionLowRank, 1e-6f, 1, 1, 0};
-    const HyperConnectionParams single{kRows, hidden, 1,
-                                       geometry.hyperConnectionLowRank, 1e-6f, 0, 1, 0};
     const ops::LinearMatrix square{hidden, hidden};
     const ops::LinearMatrix attentionInput{geometry.packedAttentionWidth, hidden};
     const ops::LinearMatrix mixerOutput{hidden, geometry.attentionWidth};
@@ -2769,6 +2841,11 @@ void Qwen4ExpTarget::addVerify(
       }
       const auto plan = operators.verifyAttention(
           lanes, geometry.attentionQueryHeads, geometry.kvLayout, histories);
+
+      const HyperConnectionParams single{kRows, hidden, 1,
+                                         geometry.hyperConnectionLowRank, 1e-6f, 0, 1, 0};
+      const HyperConnectionParams all{kRows, hidden, geometry.hyperConnectionCount,
+                                      geometry.hyperConnectionLowRank, 1e-6f, 1, 1, 0};
 
       metal::CommandGraph a;
       ops::Embedding::add(a, weights.mtpTokens, weights.tokenEmbedding,
@@ -2901,10 +2978,14 @@ void Qwen4ExpTarget::addVerify(
             continue;
           }
         }
+        if (filled == width16) {
+          if (value < values[width16 - 1] || (value == values[width16 - 1] && id >= ids[width16 - 1])) {
+            continue;
+          }
+        }
         auto before = [&](uint32_t at) {
           return values[at] > value || (values[at] == value && ids[at] < id);
         };
-        if (filled == width16 && before(width16 - 1)) continue;
         uint32_t at = filled < width16 ? filled++ : width16 - 1;
         while (at > 0 && !before(at - 1)) {
           ids[at] = ids[at - 1]; values[at] = values[at - 1]; --at;
@@ -2916,10 +2997,14 @@ void Qwen4ExpTarget::addVerify(
           const uint32_t id = pickIds[c];
           const float value = pickValues[c];
           if (id == UINT32_MAX) continue;
+          if (filled == width16) {
+            if (value < values[width16 - 1] || (value == values[width16 - 1] && id >= ids[width16 - 1])) {
+              continue;
+            }
+          }
           auto before = [&](uint32_t at) {
             return values[at] > value || (values[at] == value && ids[at] < id);
           };
-          if (filled == width16 && before(width16 - 1)) continue;
           uint32_t at = filled < width16 ? filled++ : width16 - 1;
           while (at > 0 && !before(at - 1)) {
             ids[at] = ids[at - 1]; values[at] = values[at - 1]; --at;
@@ -2989,7 +3074,7 @@ void Qwen4ExpTarget::addVerify(
     // guessed row costs the verifier its own experts.
     static const float confident = [] {
       const char *value = std::getenv("SPLASH_MTP_P_MIN");
-      return value ? static_cast<float>(std::atof(value)) : 0.3f;
+      return value ? static_cast<float>(std::atof(value)) : 0.15f;
     }();
     // A guess only pays off if every guess before it is kept too, and each
     // row checked costs ~7 ms (its experts, many read from the SSD). So
@@ -2999,7 +3084,7 @@ void Qwen4ExpTarget::addVerify(
     // SPLASH_MTP_CHAIN_MIN=0 turns it off.
     static const float chainConfident = [] {
       const char *value = std::getenv("SPLASH_MTP_CHAIN_MIN");
-      return value ? static_cast<float>(std::atof(value)) : 0.35f;
+      return value ? static_cast<float>(std::atof(value)) : 0.20f;
     }();
     // Early-exit factor: token k only pays off if chainConfidence * P(k) >= chainConfident.
     // If chainConfidence * earlyExitFactor < chainConfident, drafting token k is almost
@@ -3013,8 +3098,27 @@ void Qwen4ExpTarget::addVerify(
       return value != nullptr && std::atoi(value) != 0;
     }();
 
-    if (treeDrafting) {
-      // Structure A Tree: 7 draft tokens
+    // EAGLE-2 (EMNLP 2024): Context-Aware Dynamic Draft Trees
+    // When entropy is high / confidence is ambiguous (top-1 < 0.75 or top-1/top-2 margin < 0.15),
+    // tree branching simultaneously explores multi-token paths.
+    // When confidence is very high (top-1 >= 0.75), deep linear chaining is preferred.
+    static const bool eagle2Enabled = [] {
+      const char *value = std::getenv("SPLASH_EAGLE2_DRAFT");
+      return value ? (std::atoi(value) != 0) : true;
+    }();
+
+    drafts[0] = step(mtp.firstPosition, mtp.rows, mtp.tokens.data());
+    draftTrace.chosen[0] = drafts[0];
+    draftCandidates[0] = lastCandidates;
+    draftProbabilities[0] = lastProbabilities;
+
+    const float top1Prob = lastProbabilities[0];
+    const float top2Prob = (lastCandidates[1] != UINT32_MAX) ? lastProbabilities[1] : 0.0f;
+    const float topMargin = top1Prob - top2Prob;
+    const bool isAmbiguous = (top1Prob < 0.75f) || (topMargin < 0.15f);
+
+    if (treeDrafting || (eagle2Enabled && isAmbiguous && mtp.temperature > 0.0f)) {
+      // Structure A Tree: 7 draft tokens across two speculative branches
       // Row 1: drafts[0] = Guess 1A (Top-1 from Anchor, parent 0)
       // Row 2: drafts[1] = Guess 2A (Top-1 from Guess 1A, parent 1)
       // Row 3: drafts[2] = Guess 3A (Top-1 from Guess 2A, parent 2)
@@ -3024,11 +3128,6 @@ void Qwen4ExpTarget::addVerify(
       // Row 7: drafts[6] = Guess 2C (Top-1 from Guess 1B, parent 6)
       const uint64_t anchorPosition = mtp.firstPosition + mtp.rows;
       const auto *y = static_cast<const uint16_t *>(Y.contents());
-
-      drafts[0] = step(mtp.firstPosition, mtp.rows, mtp.tokens.data());
-      draftTrace.chosen[0] = drafts[0];
-      draftCandidates[0] = lastCandidates;
-      draftProbabilities[0] = lastProbabilities;
 
       uint32_t guess1B = (lastCandidates[1] != UINT32_MAX) ? lastCandidates[1] : drafts[0];
       drafts[5] = guess1B;
@@ -3102,10 +3201,6 @@ void Qwen4ExpTarget::addVerify(
 
     float chainConfidence = 1.0f;
     drafted = 0;
-    drafts[0] = step(mtp.firstPosition, mtp.rows, mtp.tokens.data());
-    draftTrace.chosen[0] = drafts[0];
-    draftCandidates[0] = lastCandidates;
-    draftProbabilities[0] = lastProbabilities;
     chainConfidence *= lastConfidence;
     if (lastConfidence < confident || chainConfidence < chainConfident)
       return drafts;
@@ -3243,30 +3338,33 @@ void Qwen4ExpTarget::addVerify(
         }
       }
     }
-    // Score each guess when the token it guessed is decided. The anchor of
-    // this step is the target's token at position firstPosition + rows.
-    static std::map<uint64_t, std::array<uint32_t, 3>> guesses;
-    static std::array<uint64_t, 3> hits{}, total{};
-    const QwenMtpLane &mtp = buffers.mtp[0];
-    const uint64_t anchorPosition = mtp.firstPosition + mtp.rows;
-    if (auto found = guesses.find(anchorPosition); found != guesses.end()) {
-      for (uint32_t k = 0; k < 3; ++k)
-        if (found->second[k] != UINT32_MAX) {
-          ++total[k];
-          hits[k] += found->second[k] == anchor;
-        }
-      guesses.erase(guesses.begin(), std::next(found));
-    }
-    for (uint32_t k = 0; k < 3; ++k) {
-      auto &slot = guesses[anchorPosition + 1 + k];
-      if (slot[0] == 0 && slot[1] == 0 && slot[2] == 0) slot = {UINT32_MAX, UINT32_MAX, UINT32_MAX};
-      slot[k] = drafts[k];
-    }
+    // Score each guess when the token it guessed is decided. Only active
+    // when explicitly requested under SPLASH_STEP_TIMING to avoid std::map
+    // node allocations in the steady-state decode hot loop.
     static const bool shadowLog = std::getenv("SPLASH_STEP_TIMING") != nullptr;
-    if (shadowLog && total[0] && total[0] % 16 == 0)
-      std::cerr << "[MTP shadow] guess 1: " << hits[0] << "/" << total[0]
-                << "  guess 2: " << hits[1] << "/" << total[1]
-                << "  guess 3: " << hits[2] << "/" << total[2] << "\n";
+    if (shadowLog) {
+      static std::map<uint64_t, std::array<uint32_t, 3>> guesses;
+      static std::array<uint64_t, 3> hits{}, total{};
+      const QwenMtpLane &mtp = buffers.mtp[0];
+      const uint64_t anchorPosition = mtp.firstPosition + mtp.rows;
+      if (auto found = guesses.find(anchorPosition); found != guesses.end()) {
+        for (uint32_t k = 0; k < 3; ++k)
+          if (found->second[k] != UINT32_MAX) {
+            ++total[k];
+            hits[k] += found->second[k] == anchor;
+          }
+        guesses.erase(guesses.begin(), std::next(found));
+      }
+      for (uint32_t k = 0; k < 3; ++k) {
+        auto &slot = guesses[anchorPosition + 1 + k];
+        if (slot[0] == 0 && slot[1] == 0 && slot[2] == 0) slot = {UINT32_MAX, UINT32_MAX, UINT32_MAX};
+        slot[k] = drafts[k];
+      }
+      if (total[0] && total[0] % 16 == 0)
+        std::cerr << "[MTP shadow] guess 1: " << hits[0] << "/" << total[0]
+                  << "  guess 2: " << hits[1] << "/" << total[1]
+                  << "  guess 3: " << hits[2] << "/" << total[2] << "\n";
+    }
   }
 
   if (buffers.mtpDraftOnly)
@@ -3309,6 +3407,9 @@ void Qwen4ExpTarget::addVerify(
   double totalStageMs = 0.0;
   double totalGpuMs = 0.0;
   double totalPureGpuMs = 0.0;
+
+  static const bool collectTiming =
+      traceFile || (std::getenv("SPLASH_STEP_TIMING") != nullptr);
 
   const bool pipelined = !backend.dispatchProfiling() &&
                          !std::getenv("SPLASH_NO_PIPELINE") &&
@@ -3410,13 +3511,13 @@ void Qwen4ExpTarget::addVerify(
       const uint32_t mainStage = waves ? 2 * k : k;
       const uint32_t cachedStage = mainStage - 1;
       const uint32_t previous = waves ? (k == 1 ? 0 : 2 * (k - 1)) : k - 1;
-      const auto waitStart = AwakeClock::now();
+      const auto waitStart = collectTiming ? AwakeClock::now() : AwakeClock::time_point{};
       if (!backend.waitPipelineEvent(base + 2 * previous + 1, 60000))
         throw std::runtime_error("pipelined decode stage timed out");
       if (trace)
         waits.push_back(std::chrono::duration<double, std::milli>(
                             AwakeClock::now() - waitStart).count());
-      auto ts = AwakeClock::now();
+      const auto ts = collectTiming ? AwakeClock::now() : AwakeClock::time_point{};
       const uint32_t layer = R + k;
       const auto hostStart = ts;
       hostSelect(layer);
@@ -3430,30 +3531,39 @@ void Qwen4ExpTarget::addVerify(
         if (!pendingMisses.empty()) {
           const auto &src = layerRef(pendingLayer);
           auto &cache = src.expertCache;
-          const auto readStart = AwakeClock::now();
+          const auto readStart = collectTiming ? AwakeClock::now() : AwakeClock::time_point{};
           readMissedExperts(src.expertSource, pendingMisses.data(), pendingMisses.size(),
                             src.ffn.expertGate.expertStrideBytes,
                             static_cast<char *>(cache.cacheGate.contents()),
                             static_cast<char *>(cache.cacheUp.contents()),
                             static_cast<char *>(cache.cacheDown.contents()));
-          hostParts[1] += std::chrono::duration<double, std::milli>(
-                              AwakeClock::now() - readStart).count();
+          if (collectTiming) {
+            hostParts[1] += std::chrono::duration<double, std::milli>(
+                                AwakeClock::now() - readStart).count();
+          }
         }
       }
       // Stage k-1 also predicted layer + 1; start those reads now so they
-      // land while stage k runs.
-      if (lookahead)
+      // land while stage k runs. Also advise the kernel for layer + 2
+      // so NVMe DMA pre-faults the next horizon.
+      if (lookahead) {
         prefetchPredicted(layer + 1);
-      totalStageMs += std::chrono::duration<double, std::milli>(
-                          AwakeClock::now() - ts).count();
-      hostParts[2] += std::chrono::duration<double, std::milli>(
-                          AwakeClock::now() - hostStart).count();
+        adviseHorizonPredicted(layer + 2);
+      }
+      if (collectTiming) {
+        totalStageMs += std::chrono::duration<double, std::milli>(
+                            AwakeClock::now() - ts).count();
+        hostParts[2] += std::chrono::duration<double, std::milli>(
+                            AwakeClock::now() - hostStart).count();
+      }
       backend.signalPipelineEvent(base + 2 * mainStage);
     }
     metal::CommandTiming timing = ticket.wait();
-    totalGpuMs += std::chrono::duration<double, std::milli>(
-                      AwakeClock::now() - tg0).count();
-    totalPureGpuMs += timing.gpuSeconds * 1000.0;
+    if (collectTiming) {
+      totalGpuMs += std::chrono::duration<double, std::milli>(
+                        AwakeClock::now() - tg0).count();
+      totalPureGpuMs += timing.gpuSeconds * 1000.0;
+    }
     if (trace) {
       std::cerr << "[stage waits ms]";
       for (double w : waits) std::cerr << ' ' << std::lround(w * 10) / 10.0;
@@ -3462,10 +3572,12 @@ void Qwen4ExpTarget::addVerify(
   } else {
     // Loop through streaming layers R .. geometry.layers - 2
     for (uint32_t L = R; L < geometry.layers - 1; ++L) {
-      auto ts0 = AwakeClock::now();
+      const auto ts0 = collectTiming ? AwakeClock::now() : AwakeClock::time_point{};
       bool staged = stageActiveExperts(L);
-      auto ts1 = AwakeClock::now();
-      totalStageMs += std::chrono::duration<double, std::milli>(ts1 - ts0).count();
+      if (collectTiming) {
+        auto ts1 = AwakeClock::now();
+        totalStageMs += std::chrono::duration<double, std::milli>(ts1 - ts0).count();
+      }
 
       ops::MoeWeights cacheW = staged ? makeCacheWeights(L) : weights.layers[L].ffn;
 
@@ -3480,24 +3592,28 @@ void Qwen4ExpTarget::addVerify(
       encodeMlpHC(stepGraph, L + 1);
       encodeMoERoute(stepGraph, L + 1);
 
-      auto tg0 = AwakeClock::now();
+      const auto tg0 = collectTiming ? AwakeClock::now() : AwakeClock::time_point{};
       metal::CommandTiming timing = backend.submitCommandAsync(stepGraph.dispatches()).wait();
-      auto tg1 = AwakeClock::now();
-      totalGpuMs += std::chrono::duration<double, std::milli>(tg1 - tg0).count();
-      totalPureGpuMs += timing.gpuSeconds * 1000.0;
+      if (collectTiming) {
+        auto tg1 = AwakeClock::now();
+        totalGpuMs += std::chrono::duration<double, std::milli>(tg1 - tg0).count();
+        totalPureGpuMs += timing.gpuSeconds * 1000.0;
+      }
     }
   }
 
   const uint32_t lastL = geometry.layers - 1;
-  auto ts0 = AwakeClock::now();
+  const auto ts0 = collectTiming ? AwakeClock::now() : AwakeClock::time_point{};
   // The pipeline's last stage stopped at the last layer's router scores.
   if (pipelined)
     hostSelect(lastL);
   bool stagedLast = stageActiveExperts(lastL);
   if (pipelined)
     hostGroup();
-  auto ts1 = AwakeClock::now();
-  totalStageMs += std::chrono::duration<double, std::milli>(ts1 - ts0).count();
+  if (collectTiming) {
+    auto ts1 = AwakeClock::now();
+    totalStageMs += std::chrono::duration<double, std::milli>(ts1 - ts0).count();
+  }
 
   ops::MoeWeights cacheWLast = stagedLast ? makeCacheWeights(lastL) : weights.layers[lastL].ffn;
 

@@ -28,6 +28,9 @@ RUNTIME_DIR = paths.RUNTIME
 PORT = 8090
 BASE_URL = f"http://127.0.0.1:{PORT}"
 
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 class LauncherError(RuntimeError):
     pass
@@ -201,6 +204,12 @@ def _prepare_model(model_path: Path, consume_source: bool = False):
         ]
         if consume_source:
             cmd.append("--consume-source")
+        # A packed vision tower next to the model is attached; without one
+        # the package serves text only.
+        if arch == "qwen4exp":
+            vision_bin = model_path / "vision" / "model.bin"
+            if vision_bin.is_file():
+                cmd += ["--vision-bin", str(vision_bin)]
         prepared = subprocess.run(cmd)
         if prepared.returncode != 0:
             raise LauncherError(f"preparing {model_path} failed; see the output above")
@@ -355,6 +364,9 @@ def serve(args):
         environment = dict(
             os.environ, PYTHONUNBUFFERED="1", TRANSFORMERS_VERBOSITY="error"
         )
+        environment.setdefault("SPLASH_MAX_BATCH_WIDTH", "1")
+        environment.setdefault("SPLASH_MTP_P_MIN", "0.15")
+        environment.setdefault("SPLASH_MTP_CHAIN_MIN", "0.20")
         if args.api_key is not None:
             environment["SLIPSTREAM_V2_API_KEY"] = args.api_key
             environment["SLIPSTREAM_API_KEY"] = args.api_key
@@ -552,7 +564,74 @@ def parse_args(argv=None):
     puller.add_argument(
         "--json", action="store_true", help="with --check: print one JSON object"
     )
+    code_cmd = commands.add_parser(
+        "code", help="run the co-located high-speed coding agent harness"
+    )
+    code_cmd.add_argument(
+        "--port",
+        type=int,
+        default=PORT,
+        help=f"engine HTTP serving port (default: {PORT})",
+    )
+    code_cmd.add_argument(
+        "--model",
+        help="model name or path to request from server",
+    )
+    code_cmd.add_argument(
+        "--thinking",
+        choices=["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        default="medium",
+        help="model reasoning / thinking level (default: medium)",
+    )
+    code_cmd.add_argument(
+        "--stream",
+        choices=["hybrid", "always", "never"],
+        default="hybrid",
+        help="streaming mode: hybrid (non-streaming for tools, streaming for text), always, or never (default: hybrid)",
+    )
+    code_cmd.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="completely suppress streaming deltas (alias for --stream never / Option B: batch mode). Output renders exclusively via formatted Markdown panels.",
+    )
+    code_cmd.add_argument(
+        "-c",
+        "--continue",
+        "--resume",
+        dest="resume",
+        nargs="?",
+        const="latest",
+        default=None,
+        help="resume latest session or specified session ID from APFS disk vault (default: latest)",
+    )
+    code_cmd.add_argument(
+        "--sessions",
+        action="store_true",
+        help="list all saved agent sessions in vault and exit",
+    )
+    code_cmd.add_argument(
+        "--no-timeout",
+        action="store_true",
+        help="disable all request/socket timeouts (unlimited generation wait time)",
+    )
+    code_cmd.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="HTTP/socket request timeout in seconds (default: none / unlimited)",
+    )
+    code_cmd.add_argument(
+        "-C",
+        "--dir",
+        "--cwd",
+        "--project",
+        dest="dir",
+        metavar="PATH",
+        default=None,
+        help="project directory the agent works in (default: current directory)",
+    )
     for name in clients.INSTALL_URLS:
+
         commands.add_parser(name, help=f"connect {name} to the running server")
     args = parser.parse_args(argv)
     if args.command == "serve" and args.api_key is not None:
@@ -560,7 +639,7 @@ def parse_args(argv=None):
             parser.error("API key must contain only visible ASCII characters")
     if args.command == "pull" and args.json and not args.check:
         parser.error("--json is only supported with --check")
-    if client_args and args.command in ("serve", "pull"):
+    if client_args and args.command in ("serve", "pull", "code"):
         parser.error("arguments after -- are only supported for coding clients")
     args.client_args = client_args
     return args
@@ -573,6 +652,57 @@ def main(argv=None):
             return serve(args)
         if args.command == "pull":
             return pull(args)
+        if args.command == "code":
+            from server.agent.agent import SlipstreamAgent, run_agent_cli
+
+            if getattr(args, "sessions", False):
+                sessions = SlipstreamAgent.list_checkpoints()
+                if not sessions:
+                    print("No saved agent sessions found in vault (~/.cache/slipstream/agent_vaults).")
+                    return 0
+                from rich.console import Console
+                from rich.table import Table
+
+                c = Console()
+                t = Table(title="Saved Slipstream Agent Sessions", border_style="cyan")
+                t.add_column("Session ID", style="bold cyan")
+                t.add_column("Updated", style="dim")
+                t.add_column("Turns", justify="right")
+                t.add_column("Messages", justify="right")
+                t.add_column("Last Prompt", style="italic")
+                for s in sessions[:15]:
+                    last_p = s["last_prompt"][:45] + ("..." if len(s["last_prompt"]) > 45 else "")
+                    t.add_row(
+                        s["session_id"],
+                        s["updated_at"],
+                        str(s["turns"]),
+                        str(s["messages"]),
+                        last_p,
+                    )
+                c.print(t)
+                c.print("\n[dim]To resume a session, run:[/dim] [bold cyan]./slipstream code --resume <session_id>[/bold cyan]")
+                c.print("[dim]To resume the most recent session, run:[/dim] [bold cyan]./slipstream code -c[/bold cyan] [dim]or[/dim] [bold cyan]./slipstream code --continue[/bold cyan]")
+                return 0
+
+            stream_mode = "never" if getattr(args, "no_stream", False) else args.stream
+            kwargs = {
+                "base_url": f"http://127.0.0.1:{args.port}/v1",
+                "model": args.model,
+                "reasoning_effort": args.thinking,
+                "stream_mode": stream_mode,
+                "resume_session": args.resume,
+            }
+            if getattr(args, "dir", None):
+                workspace = Path(args.dir).expanduser()
+                if not workspace.is_dir():
+                    raise LauncherError(f"project path is not a directory: {workspace}")
+                kwargs["cwd"] = str(workspace.resolve())
+            if getattr(args, "no_timeout", False):
+                kwargs["timeout"] = 0.0
+            elif getattr(args, "timeout", None) is not None:
+                kwargs["timeout"] = args.timeout
+            return run_agent_cli(**kwargs)
+
         return coding_client(args)
     except (LauncherError, clients.ClientError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)

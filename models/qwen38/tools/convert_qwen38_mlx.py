@@ -356,9 +356,21 @@ def prepare_mlx_model(source_dir: Path, output_dir: Path) -> Path:
         cfg["text_config"].setdefault("max_position_embeddings", 262144)
     cfg_file.write_text(json.dumps(cfg, indent=2))
 
+    # Link vision tower if present in source
+    vision_src = source_dir / "vision" / "model.bin"
+    if vision_src.exists():
+        vision_dst_dir = output_dir / "vision"
+        vision_dst_dir.mkdir(parents=True, exist_ok=True)
+        vision_dst = vision_dst_dir / "model.bin"
+        if not vision_dst.exists():
+            try:
+                os.link(vision_src, vision_dst)
+            except OSError:
+                shutil.copy2(vision_src, vision_dst)
+
     # Generate manifest.json
     artifacts = []
-    for sub in ["target", "tokenizer"]:
+    for sub in ["target", "tokenizer", "vision"]:
         p = output_dir / sub
         if not p.exists():
             continue

@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Slipstream — Component Deep-Dive</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --server: #58a6ff;
+    --engine: #d2a8ff;
+    --model: #7ee787;
+    --ops: #79c0ff;
+    --metal: #ff7b72;
+    --protocol: #e3b341;
+    --install: #ffa657;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif;
+    padding: 40px 24px 80px;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 28px; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 40px; font-size: 15px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 20px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    text-decoration: none;
+    color: var(--text);
+    transition: border-color 0.2s, transform 0.15s;
+    display: block;
+  }
+  .card:hover {
+    border-color: var(--accent, var(--border));
+    transform: translateY(-2px);
+  }
+  .card .icon { font-size: 28px; margin-bottom: 12px; }
+  .card h3 { font-size: 17px; margin-bottom: 6px; color: var(--accent, var(--text)); }
+  .card p { font-size: 13px; color: var(--muted); line-height: 1.5; }
+  .card .files { margin-top: 12px; font-size: 11px; color: var(--muted); opacity: 0.7; }
+  .card .files code { background: var(--bg); padding: 2px 6px; border-radius: 4px; font-size: 10px; }
+  .back { display: inline-block; margin-bottom: 24px; color: var(--muted); text-decoration: none; font-size: 14px; }
+  .back:hover { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="../architecture-visual.html">← Architecture Overview</a>
+  <a class="back" style="margin-left:16px" href="../textbook/index.html">Visual Textbook →</a>
+  <h1>Component Deep-Dive</h1>
+  <p class="subtitle">Detailed internal structure, data flows, and responsibilities for each Slipstream component. One page per component, built from the source.</p>
+
+  <div class="grid">
+    <a class="card" href="server.html" style="--accent: var(--server)">
+      <div class="icon">🌐</div>
+      <h3>Server</h3>
+      <p>Python HTTP server. Handles OpenAI-compatible API, SSE streaming, document/image ingestion, metrics, security, and lifecycle management of the native runtime.</p>
+      <div class="files"><code>server.py</code> <code>protocol.py</code> <code>runtime.py</code> <code>documents.py</code> <code>images.py</code> <code>metrics.py</code> <code>diagnostics.py</code> <code>frontend.py</code> <code>http_security.py</code> <code>output.py</code> <code>thinking.py</code> <code>tool_schema.py</code></div>
+    </a>
+
+    <a class="card" href="engine.html" style="--accent: var(--engine)">
+      <div class="icon">⚙️</div>
+      <h3>Engine</h3>
+      <p>C++ core runtime. Request scheduling, KV cache management, memory governance, elastic pooling, state caching, and the decode/prefill execution loop.</p>
+      <div class="files"><code>Engine</code> <code>Scheduler</code> <code>KvCache</code> <code>KvPool</code> <code>MemoryGovernor</code> <code>MemoryPlan</code> <code>MemoryAudit</code> <code>Cache</code> <code>StateCache</code> <code>Bootstrap</code> <code>FdTransport</code> <code>NativeRuntime</code></div>
+    </a>
+
+    <a class="card" href="model.html" style="--accent: var(--model)">
+      <div class="icon">🧠</div>
+      <h3>Model</h3>
+      <p>Model-specific implementations. Qwen3-8B (target + draft) and Qwen4-Exp (hyper-connection, per-layer embedding). Owns their Metal kernels and execution plans.</p>
+      <div class="files"><code>Qwen3_8</code> <code>Qwen3_8Target</code> <code>Qwen4Exp</code> <code>Qwen4ExpTarget</code> <code>DraftAttention</code> <code>HyperConnection</code> <code>PerLayerEmbedding</code></div>
+    </a>
+
+    <a class="card" href="protocol.html" style="--accent: var(--protocol)">
+      <div class="icon">📡</div>
+      <h3>Protocol</h3>
+      <p>Wire format between Python server and C++ engine. JSON-based request/response framing, SSE token streaming, and the FdTransport IPC channel.</p>
+      <div class="files"><code>Protocol.cpp/hpp</code> <code>FdTransport</code> <code>Json.hpp</code> <code>server/protocol.py</code></div>
+    </a>
+
+    <a class="card" href="ops.html" style="--accent: var(--ops)">
+      <div class="icon">🔧</div>
+      <h3>Shared Ops</h3>
+      <p>Model-agnostic GPU operations. GEMM, paged attention, RoPE, sampling, Q8 page storage, prompt lookup, vision encoding, and weight management.</p>
+      <div class="files"><code>GEMM</code> <code>Attention</code> <code>PagedAttention</code> <code>PagedKv</code> <code>RoPE</code> <code>Sampling</code> <code>Q8PageStorage</code> <code>PromptLookup</code> <code>Vision</code> <code>Weights</code> <code>Rows</code></div>
+    </a>
+
+    <a class="card" href="metal.html" style="--accent: var(--metal)">
+      <div class="icon">⚡</div>
+      <h3>Metal Backend</h3>
+      <p>Apple Metal GPU layer. Kernel dispatch, command buffer management, buffer allocation, and the ABI boundary between C++ and .metal shaders.</p>
+      <div class="files"><code>MetalBackend</code> <code>CommandQueue</code> <code>BufferPool</code> <code>kernels/</code> <code>abi/</code></div>
+    </a>
+
+    <a class="card" href="install.html" style="--accent: var(--install)">
+      <div class="icon">📦</div>
+      <h3>Install & Launcher</h3>
+      <p>Python package for model discovery, download, path management, and process launching. Bridges the user-facing CLI to the native binary.</p>
+      <div class="files"><code>catalog.py</code> <code>clients.py</code> <code>launcher.py</code> <code>models.py</code> <code>paths.py</code></div>
+    </a>
+  </div>
+</div>
+</body>
+</html>

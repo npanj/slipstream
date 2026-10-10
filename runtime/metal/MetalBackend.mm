@@ -22,6 +22,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -389,6 +390,8 @@ struct MetalBackend::Impl {
     __strong id<MTLLibrary> library = nil;
     __strong NSMutableDictionary<NSString *, id<MTLComputePipelineState>>
         *pipelines = nil;
+    std::unordered_map<std::string, __strong id<MTLComputePipelineState>>
+        pipelineMap;
 
     DeviceCapabilities capabilities;
     std::array<uint8_t, 32> metallibSha256{};
@@ -503,9 +506,15 @@ struct MetalBackend::Impl {
         if (name.empty()) {
             throw MetalBackendError("Metal pipeline name must not be empty");
         }
+        auto it = pipelineMap.find(std::string(name));
+        if (it != pipelineMap.end()) return it->second;
+
         NSString *key = checkedNSString(name, "pipeline name");
         id<MTLComputePipelineState> cached = [pipelines objectForKey:key];
-        if (cached) return cached;
+        if (cached) {
+            pipelineMap.emplace(std::string(name), cached);
+            return cached;
+        }
 
         id<MTLFunction> function = [library newFunctionWithName:key];
         if (!function) {
@@ -521,6 +530,7 @@ struct MetalBackend::Impl {
                 ": " + errorDescription(error));
         }
         [pipelines setObject:result forKey:key];
+        pipelineMap.emplace(std::string(name), result);
         sampleDeviceMemory();
         return result;
     }
@@ -1282,6 +1292,9 @@ bool MetalBackend::waitPipelineEvent(uint64_t value, uint64_t timeoutMs) {
     const auto deadline = AwakeClock::now() + std::chrono::milliseconds(20);
     while (AwakeClock::now() < deadline) {
         if (impl_->pipelineEvent.signaledValue >= value) return true;
+#if defined(__aarch64__)
+        __builtin_arm_yield();
+#endif
     }
     return [impl_->pipelineEvent waitUntilSignaledValue:value timeoutMS:timeoutMs];
 }
@@ -1292,6 +1305,9 @@ bool MetalBackend::waitPipelineStageDone(uint64_t base, uint32_t stage,
     const auto deadline = AwakeClock::now() + std::chrono::milliseconds(20);
     while (AwakeClock::now() < deadline) {
         if (impl_->pipelineDoneEvent.signaledValue >= value) return true;
+#if defined(__aarch64__)
+        __builtin_arm_yield();
+#endif
     }
     return [impl_->pipelineDoneEvent waitUntilSignaledValue:value timeoutMS:timeoutMs];
 }
@@ -1424,7 +1440,12 @@ CommandTicket MetalBackend::submitCommandAsync(
     impl_->ensureHealthy();
     static_cast<void>(impl_->reapSparseUnmapsLocked());
     for (PreparedDispatch &item : prepared) {
-        item.pipeline = impl_->pipeline(item.source->pipelineName);
+        if (item.source->cachedPipeline) {
+            item.pipeline = (__bridge id<MTLComputePipelineState>)item.source->cachedPipeline;
+        } else {
+            item.pipeline = impl_->pipeline(item.source->pipelineName);
+            item.source->cachedPipeline = (__bridge void *)item.pipeline;
+        }
         if (item.threadCount >
             item.pipeline.maxTotalThreadsPerThreadgroup) {
             throw MetalBackendError(

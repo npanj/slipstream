@@ -48,14 +48,55 @@ def hold_partial(text, marker):
 
 
 class ReasoningSplitter:
-    def __init__(self, thinking):
+    def __init__(
+        self,
+        thinking,
+        max_repeat_count: int = 5,
+        ngram_size: int = 6,
+        max_reasoning_chars: int = 32768,
+    ):
         self.reasoning = thinking
         self.pending = ""
+        self.max_repeat_count = max_repeat_count
+        self.ngram_size = ngram_size
+        self.max_reasoning_chars = max_reasoning_chars
+        self._history = ""
+        self.loop_detected = False
+        self.budget_exceeded = False
+
+    def _check_runaway_loop(self, text: str) -> bool:
+        """Detect repetitive n-gram loops in reasoning."""
+        self._history += text
+        if len(self._history) < self.ngram_size * self.max_repeat_count:
+            return False
+        tail = self._history[-self.ngram_size:]
+        # Count non-overlapping occurrences of the tail in the recent window
+        window = self._history[-self.ngram_size * (self.max_repeat_count + 2):]
+        count = window.count(tail)
+        return count >= self.max_repeat_count
 
     def put(self, text):
         if not self.reasoning:
             return [("content", text)]
         self.pending += text
+
+        # Check circuit breaker if in thinking mode
+        if not self.loop_detected and self._check_runaway_loop(text):
+            self.loop_detected = True
+            # Force terminate reasoning loop
+            end = self.pending.find(THINK_END)
+            if end < 0:
+                self.pending += f"\n... [thinking loop arrested] {THINK_END}\n"
+        elif (
+            not self.budget_exceeded
+            and self.max_reasoning_chars > 0
+            and len(self._history) >= self.max_reasoning_chars
+        ):
+            self.budget_exceeded = True
+            end = self.pending.find(THINK_END)
+            if end < 0:
+                self.pending += f"\n... [reasoning budget ceiling reached] {THINK_END}\n"
+
         end = self.pending.find(THINK_END)
         if end >= 0:
             output = [("reasoning_content", self.pending[:end])]
@@ -455,10 +496,6 @@ def parse_tool_calls(text, request_id, policy=None):
                     500, "model returned malformed tool XML", "invalid_model_output"
                 )
             parameter_name = text[parameter_start:parameter_end]
-            if parameter_name in arguments:
-                raise APIError(
-                    500, "model repeated a tool parameter", "invalid_model_output"
-                )
             value_start = parameter_end + 2
             value_end = text.find(PARAMETER_CLOSE, value_start)
             if value_end < 0:

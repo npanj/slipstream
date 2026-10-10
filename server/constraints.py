@@ -32,6 +32,36 @@ class TokenConstraint:
         self.executor = executor
         self.bitmask = allocate_token_bitmask(self.MAX_ROWS, self.VOCABULARY)
 
+    def prune_drafts(self, draft_candidates: list[int]) -> list[int]:
+        """Prune draft candidate tokens violating the active grammar on the CPU before GPU/NVMe dispatch."""
+        if not draft_candidates:
+            return []
+        probe = self.matcher.deep_copy()
+        valid = []
+        for tok in draft_candidates:
+            if not 0 <= tok < self.VOCABULARY:
+                break
+            if probe.consume_token(tok):
+                valid.append(tok)
+            else:
+                break
+        return valid
+
+    def compute_jump_forward_tokens(self) -> list[int]:
+        """Compute deterministic tokens (branch factor == 1) in current grammar state.
+
+        SGLang Jump-Forward decoding: bypasses model forward passes for deterministic syntax
+        such as tool call headers, fixed JSON keys, and literal structural delimiters.
+        """
+        try:
+            if hasattr(self.matcher, "compute_ff_tokens"):
+                ff = self.matcher.compute_ff_tokens()
+                if ff:
+                    return [int(t) for t in ff if 0 <= t < self.VOCABULARY]
+        except Exception:
+            pass
+        return []
+
     def masks(self, simulation_tokens):
         if len(simulation_tokens) >= self.MAX_ROWS:
             raise NativeError("constraint_error", "too many simulation tokens")

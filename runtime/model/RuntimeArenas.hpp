@@ -36,6 +36,12 @@ inline constexpr uint32_t kMaximumPageTableEntries =
 
 struct RuntimeGeometry final {
   QwenTargetGeometry target;
+  // Draft geometry is valid only when the package ships trained draft
+  // weights; draft-less models keep hasDraft false and size no draft
+  // scratch.
+  DFlashDraftLayout draft;
+  DraftStateLayout draftState;
+  bool hasDraft = false;
 
   [[nodiscard]] static RuntimeGeometry from(const ModelPackage &package) {
     RuntimeGeometry result;
@@ -44,6 +50,11 @@ struct RuntimeGeometry final {
         package.target);
     if (!result.target.valid())
       throw std::invalid_argument("invalid model runtime geometry");
+    if (package.hasDraft()) {
+      result.draft = package.draft.layout;
+      result.draftState = package.descriptor.stateLayout.draft;
+      result.hasDraft = true;
+    }
     return result;
   }
 
@@ -51,8 +62,13 @@ struct RuntimeGeometry final {
     return (target.vocabularySize + 31) / 32;
   }
   [[nodiscard]] uint32_t projectionSumsWidth() const noexcept {
-    uint32_t maximumInput = std::max(
-        {target.hiddenSize, target.attentionWidth, target.ffnScratchWidth()});
+    uint32_t maximumInput = std::max({target.hiddenSize, target.attentionWidth,
+                                      target.capturedHiddenSize,
+                                      target.ffnScratchWidth()});
+    if (hasDraft) {
+      maximumInput = std::max({maximumInput, draft.targetHiddenSize,
+                               draft.hiddenSize, draft.intermediateSize});
+    }
     return (maximumInput + kQ4GroupElements - 1) / kQ4GroupElements;
   }
 };
@@ -130,6 +146,14 @@ enum class PrefillTensor : uint32_t {
   PleValues,
   PleGated,
   PleNormalized,
+  Captured,
+  DraftPositions,
+  DraftInverseFrequencies,
+  ContextProjected,
+  ContextHidden,
+  ContextQkv,
+  DraftRopeCos,
+  DraftRopeSin,
   Count,
 };
 
@@ -168,6 +192,17 @@ public:
       target[dim] =
           std::pow(geometry.target.rotaryTheta,
                    -static_cast<float>(dim) / geometry.target.rotaryPairs);
+    }
+    if (geometry.hasDraft) {
+      auto *draft = static_cast<float *>(
+          get(PrefillTensor::DraftInverseFrequencies).contents());
+      if (!draft)
+        throw std::logic_error("draft RoPE frequencies are not CPU-visible");
+      const uint32_t draftRotaryPairs = geometry.draftState.headDimension / 2;
+      for (uint32_t dim = 0; dim < draftRotaryPairs; ++dim) {
+        draft[dim] = std::pow(geometry.draft.rotaryTheta,
+                              -static_cast<float>(dim) / draftRotaryPairs);
+      }
     }
   }
 
@@ -218,6 +253,30 @@ enum class DecodeTensor : uint32_t {
   NextAnchor,
   AcceptedCount,
   DraftInputTokens,
+  DraftHidden0,
+  DraftHidden1,
+  DraftNormalized,
+  DraftDynamic,
+  DraftConvolved,
+  DraftProposalQkv,
+  DraftAttention,
+  DraftProjected,
+  DraftResidual,
+  DraftIntermediate,
+  DraftFinalHidden,
+  SelectorHidden,
+  DraftQueryKeys,
+  DraftQueryValues,
+  DraftRopeCos,
+  DraftRopeSin,
+  DraftPositions,
+  CapturedTargetHidden,
+  ContextProjected,
+  ContextHidden,
+  ContextQkv,
+  Unary,
+  TopPartialIds,
+  TopPartialValues,
   Candidates,
   ProposalProbs,
   ProposedTokens,

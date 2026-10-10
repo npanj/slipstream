@@ -270,7 +270,8 @@ RuntimeResources::RuntimeResources(
     std::unique_ptr<MemoryGovernor> memoryGovernor,
     std::unique_ptr<kv::Q8PageStorage> kvPages,
     std::unique_ptr<model::StateStorage> stateStorage,
-    std::unique_ptr<KvPool> kvPool, std::unique_ptr<engine::Cache> cache)
+    std::unique_ptr<KvPool> kvPool, std::unique_ptr<engine::Cache> cache,
+    uint32_t maximumImagePatches)
     : backend_(std::move(backend)), model_(std::move(model)),
       operators_(std::move(operators)),
       memoryPlan_(std::move(memoryPlan)),
@@ -278,13 +279,14 @@ RuntimeResources::RuntimeResources(
       cacheIdentity_(std::move(cacheIdentity)),
       memoryGovernor_(std::move(memoryGovernor)), kvPages_(std::move(kvPages)),
       stateStorage_(std::move(stateStorage)), kvPool_(std::move(kvPool)),
-      cache_(std::move(cache)) {}
+      cache_(std::move(cache)), maximumImagePatches_(maximumImagePatches) {}
 
 std::unique_ptr<RuntimeResources>
 RuntimeResources::create(const RuntimeResourcesConfig &config) {
   if (config.metallibPath.empty() || config.modelRoot.empty() ||
       !config.model.valid() ||
-      config.buildId.empty()) {
+      config.buildId.empty() || !config.maximumImagePatches ||
+      config.maximumImagePatches % 4) {
     throw RuntimeResourcesError(
         RuntimeResourceStage::Configuration,
         "metallib path, model root and build id are required");
@@ -381,6 +383,12 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
         modelMemoryPlan.pipelineReserveBytes,
         modelMemoryPlan.runtimeOverheadReserveBytes,
     };
+    if (package.hasVision()) {
+      footprint.visionWeightsBytes = package.vision.actualAllocatedBytes;
+    }
+    if (package.hasDraft()) {
+      footprint.draftWeightsBytes = package.draft.actualAllocatedBytes;
+    }
 
     // A target whose experts alone outgrow the working set cannot be planned
     // as if every weight were held at once. Those weights are read from the
@@ -531,7 +539,8 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
         std::move(memoryPlan),
         std::move(modelMemoryPlan), std::move(cacheIdentity),
         std::move(memoryGovernor), std::move(kvPages), std::move(stateStorage),
-        std::move(kvPool), std::move(cache)));
+        std::move(kvPool), std::move(cache),
+        config.maximumImagePatches));
     return result;
   } catch (const metal::MetalAllocationError &error) {
     throw RuntimeResourcesError(RuntimeResourceStage::StorageAllocation,
@@ -554,6 +563,7 @@ model::RuntimeContext RuntimeResources::modelContext() noexcept {
       *kvPages_,
       *stateStorage_,
       operators_,
+      maximumImagePatches_,
       budget.pipelineReserveBytes,
       budget.runtimeOverheadReserveBytes,
   };
@@ -564,6 +574,8 @@ ActualMemoryReport RuntimeResources::actualMemoryReport(
     uint64_t estimatedWarmupPeakBytes) const {
   ActualMemoryReport report;
   report.targetWeightsBytes = model_.targetActualAllocatedBytes();
+  report.visionWeightsBytes = model_.vision.actualAllocatedBytes;
+  report.draftWeightsBytes = model_.draft.actualAllocatedBytes;
   report.stateResidentBytes = modelMemory.stateActualAllocatedBytes;
   report.sharedPrefillBytes = modelMemory.sharedPrefillActualAllocatedBytes;
   report.sharedDecodeBytes = modelMemory.sharedDecodeActualAllocatedBytes;

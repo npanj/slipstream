@@ -46,7 +46,7 @@ MACOS_MIN_VERSION := 26.4
 MACOS_TARGET_FLAG := -mmacosx-version-min=$(MACOS_MIN_VERSION)
 PROD_METALFLAGS := -std=metal4.0 -O3 -Wall -Wextra -Werror -Iruntime -I. \
 	$(MACOS_TARGET_FLAG)
-ENGINE_CXXFLAGS := -std=c++20 -O3 -Wall -Wextra -Werror -Iruntime -I. \
+ENGINE_CXXFLAGS := -std=c++20 -O3 -DNDEBUG -Wall -Wextra -Werror -Iruntime -I. \
 	$(MACOS_TARGET_FLAG)
 ENGINE_OBJCXXFLAGS := $(ENGINE_CXXFLAGS) -fobjc-arc
 LIB := $(BUILD)/slipstream.metallib
@@ -216,6 +216,7 @@ BUILD_ID_CONSTANT_ARGS = \
 ENGINE_MAIN_OBJECT := $(ENGINE_BUILD)/main.o
 ENGINE_METAL_RUNTIME_OBJECT := $(ENGINE_BUILD)/metal/MetalBackend.o
 ENGINE_CPP_SOURCES := \
+	runtime/ops/DraftAttention.cpp \
 	runtime/ops/Embedding.cpp \
 	runtime/ops/ExecutionPlans.cpp \
 	runtime/ops/GDN.cpp \
@@ -248,9 +249,13 @@ ENGINE_CPP_SOURCES := \
 	models/qwen4exp/Qwen4ExpTarget.cpp \
 	models/qwen38/Qwen3_8.cpp \
 	models/qwen38/Qwen3_8Target.cpp \
+	runtime/model/QwenVision.cpp \
+	runtime/model/DFlashDraft.cpp \
+	runtime/model/DraftContextPlan.cpp \
 	runtime/model/ModelFactory.cpp \
 	runtime/model/QwenState.cpp
 ENGINE_MM_SOURCES := \
+	runtime/ops/Vision.mm \
 	runtime/model/ModelDescriptor.mm \
 	runtime/model/Runtime.mm \
 	runtime/model/RuntimeArenas.mm \

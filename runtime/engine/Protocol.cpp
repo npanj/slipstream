@@ -21,7 +21,8 @@ std::string_view failureClassName(FailureClass failureClass);
 
 constexpr std::array<uint8_t, 4> kMagic{'S', 'P', 'L', 'H'};
 
-constexpr uint64_t kRequestFixedBytes = 56;
+constexpr uint64_t kRequestFixedBytes = 60;
+constexpr uint64_t kImageSpanBytes = 32;
 constexpr uint64_t kCancelFixedBytes = 8;
 constexpr uint64_t kMaskResponseFixedBytes = 20;
 constexpr uint64_t kStatusRequestFixedBytes = 8;
@@ -71,9 +72,11 @@ std::optional<ProtocolIssue> validateLimits(const ProtocolLimits &limits) {
   }
   if (!limits.maxPromptTokens || !limits.maxLogicalOutputTokens ||
       !limits.maxTokenBatch || !limits.maxSimulationTokens ||
-      !limits.maxMaskWords) {
+      !limits.maxMaskWords || !limits.maxImageSpans ||
+      !limits.maxImagePatches) {
     return makeIssue(FailureClass::ProtocolFatal, IssueCode::LimitExceeded, 0,
-                     "all configured token and mask limits must be non-zero");
+                     "all configured token, mask, and image limits must be "
+                     "non-zero");
   }
   return std::nullopt;
 }
@@ -90,6 +93,7 @@ std::optional<PayloadBounds> payloadBounds(FrameType type,
   };
   switch (type) {
   case FrameType::Request:
+    // Image pixels dominate prompt tokens; the frame limit is the bound.
     return bounded(kRequestFixedBytes, limits.maxFramePayloadBytes);
   case FrameType::Cancel:
     return bounded(kCancelFixedBytes, kCancelFixedBytes);
@@ -214,27 +218,69 @@ public:
   void u8(uint8_t value) { bytes_.push_back(value); }
 
   void u16(uint16_t value) {
-    for (uint32_t index = 0; index < 2; ++index) {
-      u8(static_cast<uint8_t>(value >> (index * 8)));
+    const size_t oldSize = bytes_.size();
+    bytes_.resize(oldSize + 2);
+    if constexpr (std::endian::native == std::endian::little) {
+      std::memcpy(bytes_.data() + oldSize, &value, 2);
+    } else {
+      bytes_[oldSize] = static_cast<uint8_t>(value);
+      bytes_[oldSize + 1] = static_cast<uint8_t>(value >> 8);
     }
   }
 
   void u32(uint32_t value) {
-    for (uint32_t index = 0; index < 4; ++index) {
-      u8(static_cast<uint8_t>(value >> (index * 8)));
+    const size_t oldSize = bytes_.size();
+    bytes_.resize(oldSize + 4);
+    if constexpr (std::endian::native == std::endian::little) {
+      std::memcpy(bytes_.data() + oldSize, &value, 4);
+    } else {
+      bytes_[oldSize] = static_cast<uint8_t>(value);
+      bytes_[oldSize + 1] = static_cast<uint8_t>(value >> 8);
+      bytes_[oldSize + 2] = static_cast<uint8_t>(value >> 16);
+      bytes_[oldSize + 3] = static_cast<uint8_t>(value >> 24);
     }
   }
 
   void u64(uint64_t value) {
-    for (uint32_t index = 0; index < 8; ++index) {
-      u8(static_cast<uint8_t>(value >> (index * 8)));
+    const size_t oldSize = bytes_.size();
+    bytes_.resize(oldSize + 8);
+    if constexpr (std::endian::native == std::endian::little) {
+      std::memcpy(bytes_.data() + oldSize, &value, 8);
+    } else {
+      for (uint32_t index = 0; index < 8; ++index) {
+        bytes_[oldSize + index] = static_cast<uint8_t>(value >> (index * 8));
+      }
     }
   }
 
   void f32(float value) { u32(std::bit_cast<uint32_t>(value)); }
 
   void raw(std::span<const uint8_t> bytes) {
-    bytes_.insert(bytes_.end(), bytes.begin(), bytes.end());
+    if (bytes.empty())
+      return;
+    const size_t oldSize = bytes_.size();
+    bytes_.resize(oldSize + bytes.size());
+    std::memcpy(bytes_.data() + oldSize, bytes.data(), bytes.size());
+  }
+
+  void words(std::span<const uint32_t> words) {
+    if (words.empty())
+      return;
+    const size_t oldSize = bytes_.size();
+    const size_t byteCount = words.size() * sizeof(uint32_t);
+    bytes_.resize(oldSize + byteCount);
+    if constexpr (std::endian::native == std::endian::little) {
+      std::memcpy(bytes_.data() + oldSize, words.data(), byteCount);
+    } else {
+      for (size_t i = 0; i < words.size(); ++i) {
+        uint32_t val = words[i];
+        uint8_t *dst = bytes_.data() + oldSize + i * 4;
+        dst[0] = static_cast<uint8_t>(val);
+        dst[1] = static_cast<uint8_t>(val >> 8);
+        dst[2] = static_cast<uint8_t>(val >> 16);
+        dst[3] = static_cast<uint8_t>(val >> 24);
+      }
+    }
   }
 
   void text(std::string_view value) {
@@ -298,11 +344,18 @@ public:
       return false;
     }
     values.resize(count);
-    for (uint32_t &value : values) {
-      if (!u32(value))
-        return false;
+    if constexpr (std::endian::native == std::endian::little) {
+      std::memcpy(values.data(), bytes_.data() + offset_,
+                  count * sizeof(uint32_t));
+      offset_ += static_cast<size_t>(bytes);
+      return true;
+    } else {
+      for (uint32_t &value : values) {
+        if (!u32(value))
+          return false;
+      }
+      return true;
     }
-    return true;
   }
 
   bool text(uint32_t count, std::string &value) {
@@ -373,6 +426,37 @@ std::optional<ProtocolIssue> validateRequest(const RequestFrame &request,
       request.promptTokens.size() > limits.maxPromptTokens) {
     return invalid(IssueCode::LimitExceeded,
                    "prompt token count exceeds its limit");
+  }
+  if (request.imageSpans.size() > limits.maxImageSpans) {
+    return invalid(IssueCode::LimitExceeded,
+                   "image span count exceeds its limit");
+  }
+  uint64_t previousSpanEnd = 0;
+  uint64_t pixelBytes = 0;
+  for (const ImageSpanFrame &span : request.imageSpans) {
+    const uint64_t patches = uint64_t{span.gridHeight} * span.gridWidth;
+    if (span.gridHeight < 2 || span.gridWidth < 2 || span.gridHeight % 2 ||
+        span.gridWidth % 2 || patches > limits.maxImagePatches) {
+      return invalid(IssueCode::InvalidCount,
+                     "image grid must be even-sided and within the patch "
+                     "limit");
+    }
+    if (span.tokens != (span.gridHeight / 2) * (span.gridWidth / 2)) {
+      return invalid(IssueCode::InvalidCount,
+                     "image span tokens must equal the merged grid size");
+    }
+    const uint64_t end = uint64_t{span.offset} + span.tokens;
+    if (span.offset < previousSpanEnd || end > request.promptTokens.size()) {
+      return invalid(IssueCode::InvalidCount,
+                     "image spans must be sorted, non-overlapping runs inside "
+                     "the prompt");
+    }
+    previousSpanEnd = end;
+    pixelBytes += span.pixelBytes();
+  }
+  if (request.imagePixels.size() != pixelBytes) {
+    return invalid(IssueCode::InvalidCount,
+                   "image pixels do not match the image grids");
   }
   const SamplingParameters &sampling = request.sampling;
   if (!std::isfinite(sampling.temperature) || sampling.temperature < 0.0f ||
@@ -570,9 +654,13 @@ ProtocolResult<Frame> encodeRequest(const RequestFrame &request,
   }
   uint64_t payloadBytes = 0;
   uint64_t tokenBytes = 0;
+  uint64_t spanBytes = 0;
   if (!checkedMultiply(request.promptTokens.size(), sizeof(uint32_t),
                        tokenBytes) ||
+      !checkedMultiply(request.imageSpans.size(), kImageSpanBytes, spanBytes) ||
       !checkedAdd(kRequestFixedBytes, tokenBytes, payloadBytes) ||
+      !checkedAdd(payloadBytes, spanBytes, payloadBytes) ||
+      !checkedAdd(payloadBytes, request.imagePixels.size(), payloadBytes) ||
       payloadBytes > std::numeric_limits<size_t>::max()) {
     return failure<Frame>(
         makeIssue(FailureClass::RequestError, IssueCode::IntegerOverflow,
@@ -587,13 +675,22 @@ ProtocolResult<Frame> encodeRequest(const RequestFrame &request,
   writer.u64(request.remainingDeadlineMicros);
   writer.u32(request.logicalMaxOutputTokens);
   writer.u32(static_cast<uint32_t>(request.promptTokens.size()));
+  writer.u32(static_cast<uint32_t>(request.imageSpans.size()));
   writer.f32(request.sampling.temperature);
   writer.f32(request.sampling.topP);
   writer.u32(request.sampling.topK);
   writer.u64(request.seed);
   writer.u8(request.returnProgress);
-  for (uint32_t token : request.promptTokens)
-    writer.u32(token);
+  writer.words(request.promptTokens);
+  for (const ImageSpanFrame &span : request.imageSpans) {
+    writer.u32(span.offset);
+    writer.u32(span.tokens);
+    writer.u32(span.gridHeight);
+    writer.u32(span.gridWidth);
+    writer.u64(span.digestLo);
+    writer.u64(span.digestHi);
+  }
+  writer.raw(request.imagePixels);
   return success(Frame{FrameType::Request, writer.take()});
 }
 
@@ -616,8 +713,7 @@ ProtocolResult<Frame> encodeMaskResponse(const MaskResponseFrame &response,
   writer.u64(response.requestId);
   writer.u64(response.maskRequestId);
   writer.u32(static_cast<uint32_t>(response.maskWords.size()));
-  for (uint32_t word : response.maskWords)
-    writer.u32(word);
+  writer.words(response.maskWords);
   return success(Frame{FrameType::MaskResponse, writer.take()});
 }
 
@@ -684,8 +780,7 @@ ProtocolResult<Frame> encodeTokens(const TokensEvent &event,
   writer.u64(event.requestId);
   writer.u32(event.sequenceOffset);
   writer.u32(static_cast<uint32_t>(event.tokens.size()));
-  for (uint32_t token : event.tokens)
-    writer.u32(token);
+  writer.words(event.tokens);
   return success(Frame{FrameType::Tokens, writer.take()});
 }
 
@@ -701,8 +796,7 @@ ProtocolResult<Frame> encodeMaskRequest(const MaskRequestEvent &event,
   writer.u64(event.maskRequestId);
   writer.u32(event.wordsPerMask);
   writer.u32(static_cast<uint32_t>(event.simulationTokens.size()));
-  for (uint32_t token : event.simulationTokens)
-    writer.u32(token);
+  writer.words(event.simulationTokens);
   return success(Frame{FrameType::MaskRequest, writer.take()});
 }
 
@@ -774,11 +868,13 @@ ProtocolResult<Message> decodeRequest(const Frame &frame,
   uint8_t constraint = 0;
   uint8_t returnProgress = 0;
   uint32_t promptCount = 0;
+  uint32_t imageSpanCount = 0;
   if (!reader.u64(request.requestId) || !reader.u8(priority) ||
       !reader.u8(cohort) || !reader.u8(constraint) ||
       !reader.u64(request.absoluteDeadlineUnixMicros) ||
       !reader.u64(request.remainingDeadlineMicros) ||
       !reader.u32(request.logicalMaxOutputTokens) || !reader.u32(promptCount) ||
+      !reader.u32(imageSpanCount) ||
       !reader.f32(request.sampling.temperature) ||
       !reader.f32(request.sampling.topP) ||
       !reader.u32(request.sampling.topK) || !reader.u64(request.seed) ||
@@ -801,16 +897,35 @@ ProtocolResult<Message> decodeRequest(const Frame &frame,
         makeIssue(FailureClass::RequestError, IssueCode::LimitExceeded,
                   request.requestId, "prompt token count exceeds its limit"));
   }
+  if (imageSpanCount > limits.maxImageSpans) {
+    return failure<Message>(
+        makeIssue(FailureClass::RequestError, IssueCode::LimitExceeded,
+                  request.requestId, "image span count exceeds its limit"));
+  }
   if (!reader.words(promptCount, request.promptTokens)) {
     return failure<Message>(
         makeIssue(FailureClass::RequestError, IssueCode::InvalidPayloadLength,
                   request.requestId,
                   "prompt count does not match the binary token payload"));
   }
-  if (reader.remaining()) {
+  request.imageSpans.resize(imageSpanCount);
+  uint64_t pixelBytes = 0;
+  for (ImageSpanFrame &span : request.imageSpans) {
+    if (!reader.u32(span.offset) || !reader.u32(span.tokens) ||
+        !reader.u32(span.gridHeight) || !reader.u32(span.gridWidth) ||
+        !reader.u64(span.digestLo) || !reader.u64(span.digestHi) ||
+        !checkedAdd(pixelBytes, span.pixelBytes(), pixelBytes)) {
+      return failure<Message>(
+          makeIssue(FailureClass::RequestError, IssueCode::InvalidPayloadLength,
+                    request.requestId, "image span payload is malformed"));
+    }
+  }
+  if (reader.remaining() != pixelBytes ||
+      !reader.bytes(pixelBytes, request.imagePixels)) {
     return failure<Message>(
         makeIssue(FailureClass::RequestError, IssueCode::InvalidPayloadLength,
-                  request.requestId, "request payload has trailing bytes"));
+                  request.requestId,
+                  "image pixel payload does not match the image grids"));
   }
   if (auto issue = validateRequest(request, limits)) {
     return failure<Message>(std::move(*issue));
@@ -1309,6 +1424,56 @@ ProtocolResult<Message> decodeFrame(const Frame &frame,
 
 ProtocolResult<std::vector<uint8_t>>
 serializeMessage(const Message &message, const ProtocolLimits &limits) {
+  if (std::holds_alternative<TokensEvent>(message)) {
+    const auto &event = std::get<TokensEvent>(message);
+    if (auto issue = validateLimits(limits)) {
+      return failure<std::vector<uint8_t>>(std::move(*issue));
+    }
+    if (auto issue =
+            validateTokens(event, limits, FailureClass::EngineUnhealthy)) {
+      return failure<std::vector<uint8_t>>(std::move(*issue));
+    }
+    uint64_t tokenBytes = 0;
+    uint64_t payloadBytes = 0;
+    if (!checkedMultiply(event.tokens.size(), sizeof(uint32_t), tokenBytes) ||
+        !checkedAdd(kTokensFixedBytes, tokenBytes, payloadBytes)) {
+      return failure<std::vector<uint8_t>>(makeIssue(
+          FailureClass::EngineUnhealthy, IssueCode::IntegerOverflow,
+          event.requestId, "tokens payload size overflows"));
+    }
+    if (auto issue =
+            validatePayloadLength(FrameType::Tokens, payloadBytes, limits)) {
+      issue->failureClass = FailureClass::EngineUnhealthy;
+      issue->requestId = event.requestId;
+      return failure<std::vector<uint8_t>>(std::move(*issue));
+    }
+    try {
+      const size_t totalWireBytes =
+          kFrameHeaderBytes + static_cast<size_t>(payloadBytes);
+      Writer writer(totalWireBytes);
+      writer.raw(kMagic);
+      writer.u16(kProtocolVersion);
+      writer.u16(static_cast<uint16_t>(kFrameHeaderBytes));
+      writer.u16(static_cast<uint16_t>(FrameType::Tokens));
+      writer.u16(0); // flags
+      writer.u64(payloadBytes);
+      writer.u32(0); // reserved
+      writer.u64(event.requestId);
+      writer.u32(event.sequenceOffset);
+      writer.u32(static_cast<uint32_t>(event.tokens.size()));
+      writer.words(event.tokens);
+      return success(writer.take());
+    } catch (const std::bad_alloc &) {
+      return failure<std::vector<uint8_t>>(
+          makeIssue(FailureClass::EngineUnhealthy, IssueCode::AllocationFailure,
+                    0, "allocation failed while serializing protocol frame"));
+    } catch (const std::length_error &) {
+      return failure<std::vector<uint8_t>>(makeIssue(
+          FailureClass::EngineUnhealthy, IssueCode::AllocationFailure, 0,
+          "container length failed while serializing protocol frame"));
+    }
+  }
+
   auto frame = encodeMessage(message, limits);
   if (!frame) {
     return failure<std::vector<uint8_t>>(std::move(*frame.issue));

@@ -16,7 +16,9 @@ using namespace splash::engine;
 namespace {
 
 constexpr model::GdnStateLayout kTargetState{48, 3, 10'240, 48, 128, 128};
-constexpr model::CompositeStateLayout kStateLayout{kTargetState};
+constexpr model::CompositeStateLayout kStateLayout{kTargetState, {}};
+constexpr model::DraftStateLayout kDraftState{2, 2, 2048, 8};
+constexpr model::CompositeStateLayout kDraftLayout{kTargetState, kDraftState};
 
 void require(bool condition, const char *message) {
   if (!condition)
@@ -335,6 +337,68 @@ void run(const std::string &metallib) {
     require(storage.idleCells() == 0, "reclaimed buffers remain pooled");
     require(storage.actualAllocatedBytes() == 0,
             "reclaimed state cells remain accounted");
+  }
+
+  // Draft rings allocate, snapshot, and restore alongside GDN cells only
+  // when the layout carries a draft model; the draft-less layout above
+  // keeps byte-identical behavior.
+  {
+    require(kDraftLayout.hasDraft(), "draft layout should report a draft");
+    require(!kStateLayout.hasDraft(), "plain layout should report no draft");
+    constexpr uint64_t kRingTensorBytes = 2ULL * 2048 * 8 * 2;
+    constexpr uint64_t kRingBytes = 2ULL * 2 * kRingTensorBytes;
+    require(kDraftState.tensorBytes() == kRingTensorBytes,
+            "draft tensor formula is wrong");
+    require(kDraftState.ringBytes() == kRingBytes, "draft ring formula is wrong");
+    require(kDraftLayout.activeCellBytes() ==
+                kStateLayout.activeCellBytes() + kRingBytes,
+            "draft slot formula is wrong");
+    require(kDraftLayout.cachedBytes() == kStateLayout.cachedBytes() + kRingBytes,
+            "draft cache formula is wrong");
+    QwenStateStorage storage(backend, admitState, kDraftLayout);
+    require(storage.tryActivateSlot(0, 501) && storage.tryActivateSlot(1, 502),
+            "draft slot activation failed");
+    require(storage.idleRings() == 0, "active rings leaked into the pool");
+    const auto &slot0 = storage.buffers(0);
+    require(slot0.draft.size() == 2, "slot has no draft ring views");
+    require(slot0.draft[0].keys.sizeBytes() == kRingTensorBytes &&
+                slot0.draft[0].values.sizeBytes() == kRingTensorBytes,
+            "draft ring view sizes are wrong");
+    require(slot0.draft[0].keys.contents() != nullptr,
+            "draft ring is not CPU-visible");
+    require(storage.actualSlotBytes(0) >=
+                kStateLayout.activeCellBytes() + kRingBytes,
+            "draft slot allocation is below declared bytes");
+
+    // A complete 2048-token window snapshots; overfull draft metadata is
+    // rejected before any copy.
+    const QwenLogicalLengths window{2'048, 0, 2'048, 0};
+    requireThrows<std::invalid_argument>(
+        [&] { storage.updateLengths(0, {2'048, 0, 2'049, 0}); },
+        "overfull draft lengths were accepted");
+    storage.updateLengths(0, window);
+    storage.updateLengths(1, window);
+    word(slot0.draft[0].keys) = 0xd1d1d1d1;
+    std::shared_ptr<const QwenCompositeState> prefix = storage.snapshot(0);
+    require(prefix != nullptr, "draft snapshot could not obtain a slot");
+    require(prefix->bytes() == kDraftLayout.cachedBytes(),
+            "draft cache footprint is wrong");
+    word(slot0.draft[0].keys) = 0xd2d2d2d2;
+    storage.restore(1, *prefix);
+    require(storage.metadata(1).lengths == window,
+            "draft restore lost lengths");
+    require(word(storage.buffers(1).draft[0].keys) == 0xd1d1d1d1,
+            "draft restore did not deliver snapshot keys");
+    const uint64_t activeBytes = storage.actualSlotBytes(1);
+    storage.releaseSlot(0, 501);
+    require(storage.idleRings() == 1, "released ring missed the pool");
+    prefix.reset();
+    require(storage.idleRings() == 2, "dropped draft cache missed the pool");
+    static_cast<void>(storage.releaseIdle(0));
+    require(storage.idleCells() == 0 && storage.idleRings() == 0,
+            "reclaimed buffers remain pooled");
+    require(storage.actualAllocatedBytes() == activeBytes,
+            "reclaim touched the active lane");
   }
   require(backend.memoryStats().allocatedBytes == beforeStorage,
           "destroyed state slots remained in actual allocation count");

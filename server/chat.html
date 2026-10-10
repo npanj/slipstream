@@ -178,7 +178,7 @@
   let controller;
 
   const savedEffort = storageGet(effortKey) || storageGet('slipstream-v2-thinking-effort') || storageGet('splash-thinking-effort');
-  effort.value = allowedEfforts.has(savedEffort) ? savedEffort : 'xhigh';
+  effort.value = allowedEfforts.has(savedEffort) ? savedEffort : 'medium';
 
   function storageGet(key) {
     try {
@@ -477,6 +477,7 @@
       assistant.reasoning_content += delta.reasoning_content;
       const details = box.querySelector('details');
       details.hidden = false;
+      details.open = true;
       details.querySelector('.reasoning').textContent = assistant.reasoning_content;
     }
     if (delta.content) {
@@ -547,7 +548,9 @@
         note.classList.add('error');
       }
     } finally {
-      box.querySelector('details')?.removeAttribute('open');
+      if (assistant.content) {
+        box.querySelector('details')?.removeAttribute('open');
+      }
       controller = undefined;
       setRunning(false);
       input.focus();

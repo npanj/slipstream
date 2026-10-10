@@ -87,6 +87,26 @@ prefillTensorBytes(const RuntimeGeometry &geometry,
       bytesFor<float>(uint64_t{kPrefillRows} * geometry.target.rotaryPairs));
   put(PrefillTensor::RopeSin,
       bytesFor<float>(uint64_t{kPrefillRows} * geometry.target.rotaryPairs));
+  put(PrefillTensor::Captured,
+      bytesFor<uint16_t>(uint64_t{kPrefillRows} *
+                         geometry.target.capturedHiddenSize));
+  if (geometry.hasDraft) {
+    put(PrefillTensor::DraftPositions, bytesFor<uint32_t>(kPrefillRows));
+    put(PrefillTensor::DraftInverseFrequencies,
+        bytesFor<float>(geometry.draftState.headDimension / 2));
+    put(PrefillTensor::ContextProjected,
+        bytesFor<uint16_t>(uint64_t{kPrefillRows} * geometry.draft.hiddenSize));
+    put(PrefillTensor::ContextHidden,
+        bytesFor<uint16_t>(uint64_t{kPrefillRows} * geometry.draft.hiddenSize));
+    put(PrefillTensor::ContextQkv,
+        bytesFor<uint16_t>(uint64_t{kPrefillRows} * geometry.draft.qkvSize));
+    put(PrefillTensor::DraftRopeCos,
+        bytesFor<float>(uint64_t{kPrefillRows} *
+                        (geometry.draftState.headDimension / 2)));
+    put(PrefillTensor::DraftRopeSin,
+        bytesFor<float>(uint64_t{kPrefillRows} *
+                        (geometry.draftState.headDimension / 2)));
+  }
   put(PrefillTensor::ChunkKeys,
       bytesFor<uint16_t>(uint64_t{geometry.target.attentionKvHeads} *
                          kPackedAttentionRows *
@@ -237,6 +257,50 @@ decodeTensorBytes(const RuntimeGeometry &geometry,
   put(DecodeTensor::NextAnchor, sizeof(uint32_t));
   put(DecodeTensor::AcceptedCount, sizeof(uint32_t));
   put(DecodeTensor::DraftInputTokens, bytesFor<uint32_t>(r));
+  if (geometry.hasDraft) {
+    const auto draftWorkspace =
+        operators.draftAttentionWorkspacePerLane(geometry.draft.attentionShape());
+    put(DecodeTensor::DraftPositions, bytesFor<uint32_t>(r));
+    put(DecodeTensor::DraftRopeCos,
+        bytesFor<float>(r * (geometry.draftState.headDimension / 2)));
+    put(DecodeTensor::DraftRopeSin,
+        bytesFor<float>(r * (geometry.draftState.headDimension / 2)));
+    put(DecodeTensor::CapturedTargetHidden,
+        bytesFor<uint16_t>(r * geometry.draft.targetHiddenSize));
+    put(DecodeTensor::ContextProjected,
+        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+    put(DecodeTensor::ContextHidden,
+        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+    put(DecodeTensor::ContextQkv,
+        bytesFor<uint16_t>(r * geometry.draft.qkvSize));
+    put(DecodeTensor::DraftQueryKeys, draftWorkspace.queryKeysBytes);
+    put(DecodeTensor::DraftQueryValues, draftWorkspace.queryValuesBytes);
+    for (uint32_t index = 0; index < 2; ++index) {
+      put(static_cast<DecodeTensor>(
+              static_cast<uint32_t>(DecodeTensor::DraftHidden0) + index),
+          bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+    }
+    put(DecodeTensor::DraftNormalized,
+        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+    put(DecodeTensor::DraftDynamic,
+        bytesFor<uint16_t>(r * geometry.draft.dynamicSize));
+    put(DecodeTensor::DraftConvolved, draftWorkspace.convolutionBytes);
+    put(DecodeTensor::DraftProposalQkv, draftWorkspace.qkvBytes);
+    put(DecodeTensor::DraftAttention, draftWorkspace.groupedQueriesBytes);
+    put(DecodeTensor::DraftProjected,
+        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+    put(DecodeTensor::DraftResidual,
+        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+    put(DecodeTensor::DraftIntermediate,
+        bytesFor<uint16_t>(r * geometry.draft.intermediateSize));
+    put(DecodeTensor::DraftFinalHidden,
+        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+    put(DecodeTensor::SelectorHidden,
+        bytesFor<uint16_t>(r * geometry.draft.selectorRank));
+    put(DecodeTensor::Unary, selectorWorkspace.unaryBytes);
+    put(DecodeTensor::TopPartialIds, selectorWorkspace.partialIdsBytes);
+    put(DecodeTensor::TopPartialValues, selectorWorkspace.partialValuesBytes);
+  }
   put(DecodeTensor::Candidates, selectorWorkspace.candidatesBytes);
   put(DecodeTensor::ProposalProbs, selectorWorkspace.proposalProbabilitiesBytes);
   put(DecodeTensor::ProposedTokens, bytesFor<uint32_t>(kDraftProposalTokens));

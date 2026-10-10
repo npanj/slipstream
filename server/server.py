@@ -10,6 +10,7 @@ import secrets
 import selectors
 import signal
 import socket
+import socketserver
 import sys
 import threading
 import time
@@ -20,7 +21,13 @@ from urllib.parse import unquote
 from huggingface_hub.utils import validate_repo_id
 from transformers import AutoTokenizer
 
+# High-efficiency single-lane speculation defaults for workstation serving
+os.environ.setdefault("SPLASH_MAX_BATCH_WIDTH", "1")
+os.environ.setdefault("SPLASH_MTP_P_MIN", "0.15")
+os.environ.setdefault("SPLASH_MTP_CHAIN_MIN", "0.20")
+
 if __package__:
+    from . import images as image_input
     from . import runtime as engine_runtime
     from .api_shapes import (
         anthropic_response,
@@ -59,6 +66,7 @@ if __package__:
     from .thinking import ThinkingCodec, ThinkingKeyError, load_thinking_key
     from .tool_schema import strict_json_loads
 else:
+    import images as image_input
     from api_shapes import (
         anthropic_response,
         anthropic_stop,
@@ -132,6 +140,12 @@ class FrontendHandler(BaseHTTPRequestHandler):
 
     def finish(self):
         self._header_timer.cancel()
+        if getattr(self, "_disconnect_selector", None) is not None:
+            try:
+                self._disconnect_selector.close()
+            except Exception:
+                pass
+            self._disconnect_selector = None
         super().finish()
 
     def log_message(self, format, *args):
@@ -149,14 +163,14 @@ class FrontendHandler(BaseHTTPRequestHandler):
             self.send_error(505, "HTTP version not supported")
             return False
         try:
-            allowed_hosts = self.server.allowed_hosts | {
-                self.connection.getsockname()[0].lower()
-            }
+            sockname = self.connection.getsockname()
+            local_host = sockname[0].lower() if isinstance(sockname, tuple) else "localhost"
+            allowed_hosts = self.server.allowed_hosts | {local_host}
             validate_headers(self.headers, allowed_hosts)
             path = self.path.partition("?")[0]
             public = self.command == "OPTIONS" or (
                 self.command in ("GET", "HEAD")
-                and path in ("/", "/index.html", "/health", "/ready")
+                and path in ("/", "/index.html", "/health", "/ready", "/props", "/slots")
             )
             if not public:
                 authenticate(self.headers, self.server.api_key)
@@ -304,11 +318,58 @@ class FrontendHandler(BaseHTTPRequestHandler):
         if path == "/status":
             self._json(200, self.server.status())
             return
+        if path == "/v1/session/stats":
+            self._json(
+                200,
+                {
+                    "active_sessions": len(self.app.backend.agent_sessions),
+                    "promotion_stats": self.app.backend.promotion_stats,
+                },
+            )
+            return
         if path == "/metrics":
             self._send(
                 200,
                 prometheus_metrics(self.server.status()).encode(),
                 "text/plain; version=0.0.4; charset=utf-8",
+            )
+            return
+        if path == "/props":
+            n_ctx = getattr(self.app, "max_context", 131072) or 131072
+            self._json(
+                200,
+                {
+                    "model_alias": self.app.model,
+                    "default_generation_settings": {
+                        "n_ctx": n_ctx,
+                        "n_predict": getattr(self.app, "default_max_new", 16384) or 16384,
+                    },
+                    "total_slots": 1,
+                    "modalities": {"vision": getattr(self.app.backend, "has_vision", False)},
+                },
+            )
+            return
+        if path == "/slots":
+            status = self.server.status()
+            metrics = status.get("metrics") or {}
+            cur_decode = metrics.get("current_decode_batch") or {}
+            is_processing = status.get("active_requests", 0) > 0
+            cur_drafted = cur_decode.get("drafted_tokens", 0)
+            cur_accepted = cur_decode.get("accepted_draft_tokens", 0)
+            cur_acceptance = (cur_accepted / cur_drafted) if cur_drafted > 0 else 0.0
+            self._json(
+                200,
+                [
+                    {
+                        "id": 0,
+                        "is_processing": is_processing,
+                        "n_decoded": status.get("generated_tokens", 0),
+                        "n_prompt_tokens_processed": status.get("prompt_tokens", 0),
+                        "draft_acceptance_rate": metrics.get("draft_acceptance_rate", 0.0),
+                        "last_batch_tok_s": cur_decode.get("tokens_per_second", 0.0),
+                        "last_batch_acceptance": cur_acceptance,
+                    }
+                ],
             )
             return
         response_match = re.fullmatch(r"/v1/responses/(resp_[A-Za-z0-9_]+)", path)
@@ -358,7 +419,8 @@ class FrontendHandler(BaseHTTPRequestHandler):
         # turn a supported endpoint into an unknown one.
         path = self.path.partition("?")[0]
         count_tokens = path == "/v1/messages/count_tokens"
-        prompt_only = count_tokens or path in ("/tokenize", "/apply-template")
+        session_promote = path in ("/v1/session/promote", "/v1/session/prewarm")
+        prompt_only = count_tokens or session_promote or path in ("/tokenize", "/apply-template")
         anthropic = path == "/v1/messages" or count_tokens
         if path not in (
             "/v1/chat/completions",
@@ -367,6 +429,8 @@ class FrontendHandler(BaseHTTPRequestHandler):
             "/v1/messages/count_tokens",
             "/tokenize",
             "/apply-template",
+            "/v1/session/promote",
+            "/v1/session/prewarm",
         ):
             self._safe_error(APIError(404, "not found", "not_found"))
             return
@@ -396,6 +460,30 @@ class FrontendHandler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise APIError(400, "request body must be an object")
             deadline = self.app.request_deadline(body, started_at)
+            if session_promote:
+                session_id = body.get("session_id")
+                if not session_id or not isinstance(session_id, str):
+                    raise APIError(400, "session_id must be a non-empty string")
+                vault_dir = body.get("vault_dir")
+                sync_promote = body.get("sync", False)
+                if sync_promote:
+                    session = self.app.backend.promote_session_sync(session_id, vault_dir=vault_dir)
+                    promoted = session is not None
+                else:
+                    promoted = self.app.backend.promote_session_async(session_id, vault_dir=vault_dir)
+                resident = session_id in self.app.backend.agent_sessions
+                stats = self.app.backend.promotion_stats
+                self._json(
+                    200,
+                    {
+                        "session_id": session_id,
+                        "promoted": promoted,
+                        "resident": resident,
+                        "promotions_total": stats.get("promotions_total", 0),
+                        "latency_ms": stats.get("promotion_latency_ms", 0.0),
+                    },
+                )
+                return
             if path == "/tokenize":
                 self._json(200, {"tokens": self.app.tokenize(body, deadline=deadline)})
                 return
@@ -540,9 +628,12 @@ class FrontendHandler(BaseHTTPRequestHandler):
 
     def _client_disconnected(self):
         try:
-            with selectors.DefaultSelector() as selector:
+            selector = getattr(self, "_disconnect_selector", None)
+            if selector is None:
+                selector = selectors.DefaultSelector()
                 selector.register(self.connection, selectors.EVENT_READ)
-                readable = selector.select(0)
+                self._disconnect_selector = selector
+            readable = selector.select(0)
             # The body is already consumed and every response closes the
             # connection. Drain unexpected trailing bytes so they cannot hide EOF.
             return bool(readable) and not self.connection.recv(
@@ -1282,22 +1373,30 @@ class FrontendHandler(BaseHTTPRequestHandler):
                 )
             )
 
+            model_json = json.dumps(self.app.model)
+            first_token_wall = None
+
             def put_progress(progress):
                 chunk = stream_chunk(self.app.model, public_id, created, {})
                 chunk["prompt_progress"] = progress
                 self._sse(chunk)
 
             def put_text(field, text):
-                self._sse(
-                    stream_chunk(
-                        self.app.model,
-                        public_id,
-                        created,
-                        {field: text},
-                    )
+                nonlocal first_token_wall
+                if first_token_wall is None:
+                    first_token_wall = time.monotonic()
+                escaped_text = json.dumps(text)
+                fast_chunk = (
+                    f'{{"id":"chatcmpl-{public_id}","object":"chat.completion.chunk",'
+                    f'"created":{created},"model":{model_json},"choices":['
+                    f'{{"index":0,"delta":{{"{field}":{escaped_text}}},"finish_reason":null}}]}}'
                 )
+                self._sse(fast_chunk)
 
             def put_tool_delta(delta):
+                nonlocal first_token_wall
+                if first_token_wall is None:
+                    first_token_wall = time.monotonic()
                 self._sse(
                     stream_chunk(
                         self.app.model,
@@ -1316,6 +1415,12 @@ class FrontendHandler(BaseHTTPRequestHandler):
                 self._sse_keepalive,
                 put_progress,
             )
+            if first_token_wall is not None and result is not None:
+                sse_decode_ms = (time.monotonic() - first_token_wall) * 1000.0
+                engine_decode_ms = result.first_token_to_done_ms
+                decode_gap_ms = max(0.0, sse_decode_ms - engine_decode_ms)
+                setattr(result, "sse_decode_ms", sse_decode_ms)
+                setattr(result, "decode_gap_ms", decode_gap_ms)
             self._sse(
                 stream_chunk(
                     self.app.model,
@@ -1387,6 +1492,45 @@ class HttpAdmission:
             return {"active": self.active, "capacity": self.capacity}
 
 
+class UnixFrontendServer(socketserver.ThreadingUnixStreamServer):
+    daemon_threads = True
+    request_queue_size = 64
+
+    def __init__(self, socket_path, parent_server):
+        self.socket_path = socket_path
+        self.parent_server = parent_server
+        self.io_timeout = parent_server.io_timeout
+        self.api_key = parent_server.api_key
+        self.webui = parent_server.webui
+        self.clamp_output_budget = parent_server.clamp_output_budget
+        self.allowed_hosts = parent_server.allowed_hosts | {"localhost", "127.0.0.1"}
+        self.instance_id = parent_server.instance_id
+        self.started_at = parent_server.started_at
+        self.requests = parent_server.requests
+        self.token_counts = parent_server.token_counts
+        self.connections = parent_server.connections
+        self.app = parent_server.app
+        port = parent_server.server_address[1] if isinstance(parent_server.server_address, tuple) else 0
+        self.server_address = ("localhost", port)
+        if os.path.exists(socket_path):
+            try:
+                os.unlink(socket_path)
+            except OSError:
+                pass
+        super().__init__(socket_path, FrontendHandler)
+
+    def status(self):
+        return self.parent_server.status()
+
+    def server_close(self):
+        super().server_close()
+        if os.path.exists(self.socket_path):
+            try:
+                os.unlink(self.socket_path)
+            except OSError:
+                pass
+
+
 class FrontendServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -1427,6 +1571,30 @@ class FrontendServer(ThreadingHTTPServer):
         )
         super().__init__(address, FrontendHandler, bind_and_activate)
         self.app = app
+        self.unix_server = None
+        self.unix_thread = None
+        if bind_and_activate:
+            self._start_unix_server()
+
+    def _start_unix_server(self):
+        if self.unix_server is not None:
+            return
+        if isinstance(self.server_address, tuple) and len(self.server_address) > 1 and self.server_address[1] > 0:
+            sock_path = f"/tmp/slipstream-{self.server_address[1]}.sock"
+            try:
+                self.unix_server = UnixFrontendServer(sock_path, self)
+                self.unix_thread = threading.Thread(
+                    target=self.unix_server.serve_forever,
+                    name=f"slipstream-unix-{self.server_address[1]}",
+                    daemon=True,
+                )
+                self.unix_thread.start()
+            except Exception:
+                self.unix_server = None
+
+    def server_activate(self):
+        super().server_activate()
+        self._start_unix_server()
 
     def status(self):
         status = self.app.status()
@@ -1479,6 +1647,13 @@ class FrontendServer(ThreadingHTTPServer):
             self.connections.release()
 
     def server_close(self):
+        if self.unix_server is not None:
+            try:
+                self.unix_server.shutdown()
+                self.unix_server.server_close()
+            except Exception:
+                pass
+            self.unix_server = None
         super().server_close()
         self.connections.idle.wait(min(2.0, self.io_timeout))
 
@@ -1562,6 +1737,7 @@ def parse_args(argv=None):
     )
     parser.add_argument("--max-context", type=_parse_max_context, default=None)
     parser.add_argument("--max-memory", type=_parse_max_memory, default=None)
+    parser.add_argument("--max-image-pixels", type=int, default=image_input.MAX_PIXELS)
     parser.add_argument("--max-new-tokens", type=int, default=32768)
     parser.add_argument("--request-timeout", type=float, default=1800)
     parser.add_argument("--queue-size", type=int, default=32)
@@ -1617,6 +1793,11 @@ def parse_args(argv=None):
             parser.error(str(error))
     if args.max_new_tokens <= 0:
         parser.error("--max-new-tokens must be positive")
+    if not image_input.MIN_PIXELS <= args.max_image_pixels <= image_input.MAX_PIXELS:
+        parser.error(
+            "--max-image-pixels must be in "
+            f"[{image_input.MIN_PIXELS}, {image_input.MAX_PIXELS}]"
+        )
     if not is_finite_number(args.request_timeout) or args.request_timeout <= 0:
         parser.error("--request-timeout must be positive and finite")
     if args.queue_size <= 0:
@@ -1702,6 +1883,11 @@ def main():
             )
         effective_context = readiness.max_context_tokens
         constraint_factory = ConstraintFactory(tokenizer)
+        model_root = Path(args.target).parent
+        has_vision = (
+            (model_root / "vision" / "model.bin").is_file()
+            or (model_root / "prepared" / "vision" / "model.bin").is_file()
+        )
         app = Frontend(
             tokenizer,
             backend,
@@ -1711,7 +1897,9 @@ def main():
             args.request_timeout,
             readiness.max_concurrent_requests,
             constraint_factory,
+            max_image_pixels=getattr(args, "max_image_pixels", image_input.MAX_PIXELS),
             thinking_codec=thinking_codec,
+            has_vision=has_vision,
         )
         server.app = app
         server.server_activate()

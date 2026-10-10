@@ -17,6 +17,10 @@
 #define GGUF_STAGED_COLUMNS 32u
 #define GGUF_STAGED_STEP 32u
 #define GGUF_STAGED_THREADS (GGUF_TILE_COLUMNS / GGUF_STAGED_COLUMNS * 32u)
+// Decode tile of a gate/up pair of one format in one pass
+// (LinearConfig::oneGateUpPass): one simdgroup staging the same
+// GGUF_STAGED_COLUMNS columns of both tensors.
+#define GGUF_GATE_UP_THREADS 32u
 // Prefill tile of the staged kernels: GGUF_PREFILL_SIMDGROUPS simdgroups of
 // GGUF_PREFILL_SIMDGROUP_ROWS rows share one stage of GGUF_PREFILL_STEP
 // inputs of the tile's columns, which all threads dequantize.

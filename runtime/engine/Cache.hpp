@@ -76,7 +76,8 @@ public:
 
   // Pin the usable prefix before potentially evicting for active allocations.
   // Accounting is separate: failed admission retries are not extra samples.
-  [[nodiscard]] CacheLookup lookup(std::span<const uint32_t> prompt);
+  [[nodiscard]] CacheLookup lookup(std::span<const uint32_t> prompt,
+                                   std::span<const ImageSpan> images = {});
   void recordLookup(const CacheLookup &lookup);
   void restoreRequest(uint64_t requestId, const CacheLookup &lookup);
 
@@ -89,7 +90,7 @@ public:
   // completed; no active command ever aliases a writable page.
   [[nodiscard]] uint64_t publishCommittedBlocks(
       uint64_t requestId, std::span<const uint32_t> exactTokens,
-      uint32_t committedTokens);
+      uint32_t committedTokens, std::span<const ImageSpan> images = {});
   [[nodiscard]] uint64_t blockAt(uint64_t requestId, uint32_t boundary) const;
   [[nodiscard]] bool reuseCompositeState(uint64_t kvBlock, bool checkpoint = false);
   void publishCompositeState(uint64_t kvBlock,

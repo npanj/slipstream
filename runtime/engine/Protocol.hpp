@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ops/Vision.hpp"
 
 #include <array>
 #include <cstddef>
@@ -13,10 +14,11 @@
 
 namespace splash::protocol {
 
-inline constexpr uint16_t kProtocolVersion = 6;
+inline constexpr uint16_t kProtocolVersion = 5;
 inline constexpr size_t kFrameHeaderBytes = 24;
 inline constexpr uint32_t kStatusSchemaVersion = 5;
-// The largest prompt (1 Mi tokens of 4 bytes) fits with room to spare.
+// Image pixels travel inside the request frame; a multi-image agent turn can
+// carry well over 64 MiB of resized RGB bytes.
 inline constexpr uint64_t kAbsoluteMaxFramePayloadBytes =
     256ULL * 1024 * 1024;
 
@@ -106,6 +108,10 @@ struct ProtocolLimits {
   uint32_t maxTokenBatch = 4096;
   uint32_t maxSimulationTokens = 32;
   uint32_t maxMaskWords = 1U << 20;
+  uint32_t maxImageSpans = 64;
+  // Patches per image; the engine sizes its vision scratch from the same
+  // value, so a frame limit violation is never a late allocation failure.
+  uint32_t maxImagePatches = ops::kMaximumImagePatches;
 };
 
 enum class RequestPriority : uint8_t {
@@ -133,6 +139,25 @@ struct SamplingParameters {
   bool operator==(const SamplingParameters &) const = default;
 };
 
+// One image in the prompt: the run of placeholder tokens it occupies (one per
+// merged 2x2 patch group, row-major over the merged grid), the patch grid of
+// the frontend's resized pixels, and a 128-bit digest of that content.
+// Placeholder token ids are identical for every image, so cache identity keys
+// on the digest as well as the tokens.
+struct ImageSpanFrame {
+  uint32_t offset = 0;
+  uint32_t tokens = 0;
+  uint32_t gridHeight = 0;
+  uint32_t gridWidth = 0;
+  uint64_t digestLo = 0;
+  uint64_t digestHi = 0;
+
+  [[nodiscard]] uint64_t pixelBytes() const noexcept {
+    return ops::imagePixelBytes(gridHeight, gridWidth);
+  }
+  bool operator==(const ImageSpanFrame &) const = default;
+};
+
 struct RequestFrame {
   uint64_t requestId = 0;
   RequestPriority priority = RequestPriority::Normal;
@@ -145,6 +170,11 @@ struct RequestFrame {
 
   uint32_t logicalMaxOutputTokens = 0;
   std::vector<uint32_t> promptTokens;
+  // Sorted, non-overlapping image spans and their resized uint8 RGB pixels,
+  // concatenated in span order (gridHeight*16 x gridWidth*16 x 3 each).
+  // Both are empty for text-only requests.
+  std::vector<ImageSpanFrame> imageSpans;
+  std::vector<uint8_t> imagePixels;
   SamplingParameters sampling;
   uint64_t seed = 0;
   Cohort cohort = Cohort::Greedy;

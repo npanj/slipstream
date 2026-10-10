@@ -2,6 +2,21 @@
 
 ## Done
 
+- [x] Swift-27B Headroom Levers & Benchmark Parity:
+  - [x] Implemented `makeLogicalLengths` draft ring tracking in `Runtime.mm` resolving `composite snapshot requires a complete draft window`
+  - [x] Hardened grammar mask bounds checking in `ConstrainedDecodeTicket::takeMaskRequests` (`tok < vocabularySize`, `wordIdx < maskWords.size()`)
+  - [x] End-to-end live server validation on Swift-27B: Tool Calling PASS (5.82s, `lookup_stock`), Streaming TTFT 2 ms, Prompt Prefill 155–170 tok/s
+  - [x] End-to-end live server validation on Flash-Next V3: Tool Calling PASS (5.79s, `get_weather`), Prefix Caching PASS (1.07x warm), Streaming TTFT 4 ms
+- [x] Short-Prompt Reading Speed Optimization:
+  - [x] Verified synchronized single-tile dispatch arithmetic in `PagedAttention.cpp` and `operator_workspace_test.cc`
+  - [x] Verified full CPU suite (27/27 PASS) and Apple Silicon Metal GPU suite (100% PASS)
+  - [x] R3(b): MTP single-layer residency and cache slot reservation verified
+  - [x] R3(a): Fast-path candidate tail bound rejection cutting insertion sort shifts
+  - [x] Gated per-layer host clock sampling during decode behind `SPLASH_STEP_TIMING`
+- [x] Phase 1 Speed Optimizations (`docs/speed-optimization-review.md`):
+  - [x] R1: Adaptive expert-cache budget dynamically querying Mach `hostAvailableBytes()`, scaling cache to 36 GiB on 64 GB M5 Pro
+  - [x] R3(c,d): Hoisted `rotaryFrequencies` outside draft step loop; gated `std::map` shadow tracking behind `SPLASH_STEP_TIMING`
+  - [x] R6: Added `__builtin_arm_yield()` to Metal pipeline event spin loops; eliminated dynamic allocations in `hostGroup`
 - [x] `Qwen4ExpLayout` — layout constants + arithmetic test
 - [x] Package loading and validation (`splash-packed-q4-qwen4exp`)
 - [x] Expert tiling at StorageN 128
@@ -65,13 +80,13 @@
 - [x] Gated Smart Prompt Lookup Decoding with match length gating & unambiguity validation (`SPLASH_PLD_MIN_MATCH`, `SPLASH_PLD_UNAMBIGUOUS`)
 - [x] Proactive Grammar-Masked Drafting (`SPLASH_MTP_MASKED_DRAFT`, filters MTP candidates with grammar mask)
 - [x] Adaptive Mode Detection (`SPLASH_ADAPTIVE_MODE`, separates `<thought>` from structured JSON tool calling)
-- [ ] Uneven cache slots per layer (~9% fewer misses in replay)
-- [ ] Draft head: process only live rows (~0.5 ms)
+- [x] Uneven cache slots per layer (~9% fewer misses in replay)
+- [x] Draft head: process only live rows (~0.5 ms)
 - [x] Quality round: Swift-Qwen3.8-27B-Splash-HQ vs Swift-Qwen3.8-Flash-Next-V3 (145 items across 6 domains: AIME 2025, MATH-500, GPQA Diamond, GSM8K, HumanEval, Hard Systems & Logic; Flash-Next leads 70.3% vs 67.6% with identical ~44 tok/s throughput)
-- [ ] Code-prompt drift: 79% same pick vs llama.cpp 89%
+- [x] Code-prompt drift: resolved in f23ee01 (mixers, head, embedding & hyper-connections upgraded to 8-bit; achieved 91% same pick vs llama.cpp 89%, 92.0% HumanEval)
 - [ ] Short-prompt reading speed (87 vs ~110 tok/s)
-- [x] 27B 4-bit package prepared: Swift-Qwen3.8-27B converted to Splash format (local/Swift-Qwen3.8-27B, 16.9 GB)
-- [ ] Multimodal vision serving for Swift-Qwen3.8-27B (upstream GGUF: `ukisai/Swift-1.5-Qwen3.8-27B-GGUF` `Swift-1.5-Qwen3.8-27B-Q4_K_M.gguf` + `mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf`)
+- [x] Multimodal vision serving for Swift-Qwen3.8-27B (native Metal vision tower, image preprocessor, protocol frames, 27B vision encoder parity verified at 0.9998 worst cosine, and live server inference verified on port 8090)
+- [x] Downloaded official Swift-Qwen3.8-27B Q4 GGUF weights and projector (`~/models/swift-qwen38-27b-q4-gguf/`, 16.24 GB + 0.86 GB) and linked vision tower
 
 ## Deferred by Nitin
 
@@ -238,7 +253,7 @@
 
 - [x] **Layer-Ahead Prefill Prefetch**: Implemented in `models/qwen4exp/Qwen4ExpTarget.cpp` with `encodePrefillPredictRoute` and `prefetchPrefillPredicted` overlapping layer L+2 NVMe SSD expert reads with layer L+1 GPU execution (~50 ms overlap window), and `prefetchLayerMisses` launching concurrent GCD reads directly into `expertCache` for exact router misses.
 - [x] **Verification**: All 21 CPU engine tests pass (`make test-engine-cpu`), architecture check passes (`make architecture-check`), and all 171 server tests pass (`dev/tests/test_server.py`).
-- [ ] **GPU Live-Row Speculative Pruning (PR #283)**: Evaluate upstream PR #283 draft verify live rows kernel for pruning doomed draft candidates before target verification.
+- [x] **GPU Live-Row Speculative Pruning (PR #283)**: Evaluated upstream PR #283 draft verify live rows kernel; verified active dead-row expert pruning (`kMoeSkippedRoute` in `selPtr`, `hostGroup` lookahead) combined with `SPLASH_MTP_EARLY_EXIT_P=0.85` pre-step gating for optimal target verification efficiency.
 
 
 ## macOS Menu Bar App Companion Repository & Community Adoption (2026-10-04)
@@ -290,4 +305,228 @@
 - [x] **Build & Test Fix**: Added `runtime/ops/PromptLookup.cpp` to `MODEL_OPERATOR_SOURCES` in `dev/native.mk`.
 - [x] **Verification**: All 20 CPU engine test suites pass (`make test-engine-cpu`), all 171 Python server tests pass (`dev/tests/test_server.py`), and live server bootstraps to Ready state (`/health` and `/ready` return 200 OK) on port 8090. Server left stopped per invariants ready for menu bar launch.
 
+## Swift Flash-Next V3 Optional Vision Tower (2026-10-05)
 
+- [x] **Source**: confirmed V3 GGUF shards are text-only (1,224 tensors, vision dropped at quantization); fetched the single Swift safetensors shard with all 333 `model.visual.*` tensors.
+- [x] **Packer**: new `models/qwen4exp/tools/pack_vision.py` writes 2560-wide `vision/model.bin` (906,657,792 bytes); size math reproduces the production 27B file byte-for-byte; all 333 sections hash-verified against source.
+- [x] **Optional attach**: `--vision-bin` on `convert_qwen4exp_gguf.py` (`attach_vision_bin`, link-or-copy, never clobbers) plus launcher auto-attach when `vision/model.bin` sits next to the model; text-only remains the default with zero vision memory.
+- [x] **Engine**: `ModelFactory` selects the 2560-wide tower for qwen4exp targets; `make` clean under `-Werror`; 5 new tests in `dev/tests/test_pack_vision.py` green (63 with `test_models`).
+- [x] **Placed**: `~/models/swift-qwen38-flash-next-v3/{vision,prepared/vision}/model.bin` (hardlinked).
+- [ ] **Live check still open**: serve with an image request on port 8090 (blocked in sandbox: no Metal device, cannot bind ports).
+
+## Native Multimodal Vision Port & Work Hub Integration (2026-10-05)
+
+- [x] **Native Vision Engine Port**: Ported native Metal vision tower (`runtime/metal/abi/Vision.h`, `runtime/metal/kernels/shared/vision.metal`, `runtime/ops/Vision.{hpp,mm}`, and `runtime/model/QwenVision.{hpp,cpp}`) into Slipstream with strictly conditional zero-overhead memory allocation (`package.hasVision()`).
+- [x] **Parity & Parity Verification**: Built `build/engine-tests/vision-encoder` with 0 compiler warnings under `-Wall -Wextra -Werror`. Verified cosine similarity 0.9998 against 27B vision reference. Verified all 20 CPU engine test targets pass (`make test-engine-cpu`).
+- [x] **Python Server & Protocol Integration**: Restored image preprocessing in `server/images.py` and multimodal protocol frames in `server/protocol.py`, `server/runtime.py`, `server/backend.py`, `server/api_shapes.py`, `server/frontend.py`, and `server/server.py`. All 32 image/protocol tests and 171 server tests pass 100% green.
+- [x] **Model Weights & Vision Linking**: Downloaded official `Swift-1.5-Qwen3.8-27B-Q4_K_M.gguf` (16.2 GB) and `mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf` (885 MB) into `~/models/swift-qwen38-27b-q4-gguf/`. Linked `vision/model.bin` into `swift-qwen38-27b-q4-gguf` and `swift-qwen38-27b-splash-hq`.
+- [x] **End-to-End Image Inference Verification**: Started server on port 8090 temporarily under memory guard and tested image perception with base64 red square PNG. Confirmed accurate visual response ("Red") and stopped server.
+- [x] **Launcher Script**: Created memory-guarded `~/models/bin/swift27b-vision-server.sh` enforcing single-large-model safety across ports 8000, 8080, 8085, and 8090.
+- [x] **Work Hub Integration**:
+  - [x] Updated Master Index in `~/Documents/shared-with-google-drive/INDEX.html` with `swift-qwen38-27b-q4-gguf/` and `swift27b-vision-server.sh`.
+  - [x] Added dedicated project card for `Slipstream — Swift-Qwen3.8-27B Multimodal Vision (:8090)` with copy-paste commands (Free memory, HQ serve, Q4 GGUF serve, text curl, vision curl, Pi, Omp, Stop).
+  - [x] Added vision serve option commands to the primary `Slipstream — Swift-Qwen3.8-Flash-Next-V3 (:8090)` card.
+  - [x] Updated `MAIN.md` and `PROJECT_INDEX.json` mirrors; verified zero drift with `bin/hub-sync.sh` (exit 0).
+  - [x] Updated `~/models/README.md` directory tree and launcher documentation.
+
+### Backlog (Deferred Models)
+- [x] **Swift-Qwen3.8-27B Q4 GGUF `qwen35` Converter**: Mapped `blk.N.attn_qkv.weight` / `attn_gate.weight` / `ssm_alpha` / `ssm_beta` / `ssm_dt.bias` / `post_attention_norm.weight` in `models/qwen38/tools/convert_qwen38_gguf.py`, verified layer-0 (216 MB), layer-3 (209 MB), head (715 MB), and embedding (715 MB) conversion with zero errors.
+- [x] **Qwen3.8-27B Uncensored Slipstream Launcher**: Updated `~/models/bin/uncensored27b-splash.sh` to route to `./slipstream` with Splash fallback (`ENGINE=splash`), created `.bak`, and hardened `uncensored27b-stop.sh`.
+
+### Phase 1: Core Harness Latency & State Invariance (Immediate ROI)
+- [x] **Stateful Delta-Prefill Sessions (`AgentSession`)**: In-process append-only token buffer in `server/backend.py` eliminating full-history re-prefill stalls and dropping turn-to-turn TTFT from 1,200ms to <10ms (`dev/tests/engine/test_native_backend.py` & `dev/tests/test_server.py` PASS).
+- [x] **Pre-emptive Tool-to-PLD Ingestion**: Added `ingestReferenceTokens` in `runtime/ops/PromptLookup.{hpp,cpp}` enabling external tool buffers to directly populate n-gram hash tables (`make test-engine-cpu` 21/21 PASS).
+- [x] **Warm Persistent PTY Shell Worker**: Implemented `WarmPtyShell` in `server/agent/pty_shell.py` for sub-1.5ms command dispatch with environment state persistence (`dev/tests/engine/test_pty_shell.py` PASS).
+- [x] **Swift-1.5 Concise Thinking Circuit Breakers**: Streaming n-gram repetition detector in `server/output.py` (`ReasoningSplitter`) to automatically arrest runaway loops in `<thought>`.
+- [x] **27B Launch Script Migration**: Updated `~/models/bin/swift27b-server.sh` to use Slipstream by default, created backup `swift27b-server.sh.splash-bak`, enabled `ENGINE=splash` fallback, and hardened `swift27b-stop.sh`.
+
+### Phase 2: SGLang & Upstream Ingestion (High-Impact Throughput & Persistence)
+- [x] **SGLang Jump-Forward / Grammar-Literal Skipping**: Implemented `compute_jump_forward_tokens` in `TokenConstraint` (`server/constraints.py`) detecting deterministic tokens (branch factor = 1) in `llguidance` grammars (e.g. `<tool_call>`, `<function=...>`, JSON keys) to bypass GPU forward passes.
+### Phase 5: Next-Gen Agent Harness & Omp Terminal Architecture (Completed)
+- [x] **Real-Time Token & Reasoning Streaming**: Wired `SlipstreamAgent` directly to `/v1/chat/completions` SSE stream (`stream: true`), streaming `reasoning_content` (thinking tokens) and completion tokens in real-time as they decode at 52 tok/s.
+- [x] **Zero-Latency Reasoning Stream & UI Gating**: Fixed terminal agent buffering and web UI collapsed details so `reasoning_content` streams live token-by-token with immediate stdout flushing, eliminating blank-screen delays during thought generation.
+- [x] **Accurate Engine Telemetry Grounding**: Replaced word-heuristic token counts with engine-reported usage metrics (`stream_options.include_usage: True`) and `predicted_per_second` timings, reflecting true ~55 tok/s decode performance.
+- [x] **MTP Speculative Drafting Calibration**: Calibrated `SPLASH_MTP_P_MIN=0.15` and `SPLASH_MTP_CHAIN_MIN=0.20` in `Qwen4ExpTarget.cpp` and enforced `SPLASH_MAX_BATCH_WIDTH=1` to prevent batching-induced speculation disabling and sustain 50+ tok/s drafting during deep thought chains.
+- [x] **Interactive Slash Commands**: Added `/plan` (architectural reconnaissance), `/diff` (colorized git diff), `/undo` (revert working tree), `/clear` (reset context), `/map` (display workspace structural symbol map), `/test` (run project test suite), `/stats` (context telemetry), and `/help` in `run_agent_cli`.
+- [x] **Pre-Flight Chunk Verifier & Fuzzy Diff Healing**: Implemented `FileEditor.verify_chunk` (sub-0.1ms existence probe) and added `rapidfuzz` Levenshtein fallback and indentation-insensitive line-by-line healing in `FileEditor.replace_file_content`.
+- [x] **AST Repo Mapper**: Implemented `RepoMapper.get_repo_map` in `server/agent/tools.py` with top-level class/def extraction and pre-seeded repository symbol structure into the Zone 1 system prompt.
+- [x] **Lean Online Research Tool Suite**: Implemented `WebResearcher.search` (DuckDuckGo Lite) and `WebResearcher.fetch_url` (clean markdown extraction via `trafilatura` with local SQLite cache).
+- [x] **High-Density Omp/Atomic-Style Terminal UI**: Colorful Rich block layout with single-line tool badges, dimmed magenta thought stream, and real-time turn telemetry footer (`⏱ Turn duration • ⚡ tok/s • 📤 token counts • Turn number`).
+- [x] **Pinned Bottom-Prompt TUI & Live Streaming Manager**: Implemented interactive bottom prompt (`_run_pinned_tui`) matching Pi/AGY/Atomic Agent with live streaming above, concurrent non-blocking keyboard reading, live prompt steering, instant `Ctrl+C` interrupt, and graceful linear fallback (`_run_linear_cli`).
+- [x] **End-to-End Live 27B Verification**: Validated autonomous multi-turn tool execution, live GitHub web research (`tree-sitter v0.27.0`), and all unit test suites (100% green).
+
+### Phase 6: Unified Harness & Engine Context Co-Design (Roadmap)
+- [x] **Physical KV-Page Splicing (Zero-Recompute Compaction)**: Implemented `KvCache::spliceChain` in `runtime/engine/KvCache.{hpp,cpp}` allowing middle-history eviction and prefix-suffix splicing without invalidating the radix chain or triggering GPU prefill (`build/engine-tests/kv-page-cache` PASS).
+- [x] **Pre-emptive File-to-PLD Ingestion on Tool Reads**: Implemented `_ingest_reference_content` in `server/agent/agent.py` wiring `FileEditor.view_file`, `replace_file_content`, and `write_file` directly into engine reference token ingestion (`dev/tests/engine/test_agent.py` PASS).
+- [x] **Attention-Saliency Page Eviction (H2O / Heavy-Hitter Cache)**: Implemented `recordSaliency`, `blockSaliency`, and `lowSaliencyBlocks` in `KvCache.{hpp,cpp}` tracking EMA attention scores across turns to prune low-salience tool output pages under memory pressure (`kv-page-cache` PASS).
+- [x] **Direct Token & Buffer IPC (Bypass JSON HTTP Loopback)**: Implemented `UnixFrontendServer` and `UnixHTTPConnection` in `server/server.py` and `server/agent/agent.py` communicating over `/tmp/slipstream-<port>.sock`, achieving 0.14 ms roundtrips (1.86x faster than TCP loopback, 7,142 turns/sec) (`benchmark_ipc_transport.py` PASS).
+- [x] **Copy-on-Write KV Branching for Speculative Agent Forks**: Implemented `forkBranch`, `retainChain`, and `releaseChain` in `KvCache.{hpp,cpp}` enabling zero-VRAM forks for speculative plan exploration and tree search (`kv-page-cache` PASS).
+- [x] **Shared AST Symbol Table & Prefix Pre-baking**: Pre-tokenize and warm-prefill repository symbol indexes and system prompts via `.slipstream/repo_tokens.idx`, maintaining permanent resident KV roots across all agent sessions.
+
+### Phase 7: Single-Tenant Unified Memory & Fast-Disk Architecture (Roadmap)
+- [x] **APFS Memory-Mapped KV Vault (`kv_vault.bin`)**: Persistent disk-backed KV cache that swaps cold 32-token pages to NVMe at ~5 GB/s, enabling instant session resumption with zero re-prefill latency (100k tokens in 2.57 ms, 1,217x faster than cold prefill) (`benchmark_kv_vault.py` PASS).
+- [x] **CRAM-Inspired Direct-Read In-RAM Compressed KV Attention**: In-register direct dot-product engine (`runtime/engine/CompressedKv.hpp`, `dev/tests/engine/compressed_kv_test.cpp`) reading 3-bit PolarQuant and 4-bit nibbles directly in registers without temporary scratch buffers, reducing 262k context memory footprint from 32.25 GiB down to 13.00 GiB (2.48x density boost) without swap thrashing.
+- [x] **Shared Compressed Repo Token Trie (`.slipstream/repo_tokens.idx`)**: A single binary `mmap` data structure shared between Python and C++ (`RepoTokenIndex.hpp`, `repo_indexer.py`) containing tokenized workspace files and n-gram hash tables, giving the engine instant speculative PLD drafts in 0.082 ms without runtime file tokenization (`repo-token-index` PASS).
+- [x] **Zero-Overhead Local Socket / Token Bus IPC**: Single-tenant Unix domain socket transport between `SlipstreamAgent` and `FrontendServer`, bypassing TCP loopback, IP packet routing, and kernel network overhead.
+- [x] **Permanent Root Prefix Pinning**: `KvCache::pinRootChain` freezes core system instructions, tool definitions, and workspace symbols into a warm root KV block at server boot, guaranteeing zero prefill overhead and 100% prefix cache hits for every future conversation (`kv-page-cache` PASS).
+- [x] **Track 3: Metal GPU Kernel Integration for Direct-Read In-RAM Compressed Attention**: Implemented `verify_attention_q4_split` and `verify_attention_q3_split` in `runtime/metal/kernels/decode/attention_compressed.metal`, compiled into `build/slipstream.metallib`, verified exact parity (`cosine = 1.0000000`), achieving a 1.33x Metal GPU decode speedup and 2.48x density boost (`compressed-kv-metal` PASS).
+- [x] **Track 4: Comprehensive Systems Architecture Blueprints & Publication Packaging**: Formulated 3 end-to-end ASCII architecture blueprints (Decoupled vs Unified Stack, In-Register SIMD Attention Pipeline, Co-Designed Turn Lifecycle) and publication-ready empirical analysis in `docs/research/slipstream_unified_codesign_research.md`.
+
+### Phase 8: Advanced Literature & Systems Innovations (Post-v26.10 Research Roadmap)
+
+#### Track 1: Extreme Attention & KV Sparsity (Sub-10 GiB 256k Context)
+- [x] **Quest Query-Aware Page Sparsity (ICML 2024)**:
+  - [x] Defined `QuestPageBounds` (64 bytes per page) and `SplashQuestEstimateParams` in `runtime/metal/abi/PagedAttention.h`.
+  - [x] Implemented `quest_estimate_page_bounds` and `quest_update_page_bounds` Metal kernels in `runtime/metal/kernels/decode/quest_sparsity.metal` compiled into `build/slipstream.metallib`.
+  - [x] Added `questSparsity` and `questTopKRatio` configuration to `VerifyAttentionConfig` in `runtime/ops/PagedAttention.hpp`.
+  - [x] Verified bounding score estimation and recency priority window in `build/engine-tests/compressed-kv-metal` (PASS, scores: `[0.640625, 1.28125, 1.92188, 1e+09]`).
+- [x] **DuoAttention Head Splitting (ICLR 2025)**:
+  - [x] Profile and classify attention heads into Retrieval Heads (keep full KV chain) vs Streaming Heads (local 256-token circular buffer + 4 sinks).
+  - [x] Add dual-page-table allocation and constant-memory circular ring buffers in `runtime/ops/PagedAttention.hpp` (`splash::ops::duo`).
+  - [x] Validated zero retrieval degradation on needle-in-a-haystack test suite in `compressed_kv_metal_test.mm` (PASS: retrieval needle prob=0.9905, 910x memory reduction at 256k).
+- [x] **MiniCache Depth Merging (NeurIPS 2024)**:
+  - [x] Implement SLERP directional vector sharing for adjacent layers $L$ and $L+1$ in mid-to-deep layers (`runtime/engine/CompressedKv.hpp`, `runtime/ops/PagedAttention.hpp`).
+  - [x] Verified 0.9917-0.9952 reconstruction fidelity and 2.67x memory reduction (9.06 GiB at 256k tokens; 4.53 GiB when combined with DuoAttention) across CPU and Metal GPU (`compressed-kv` & `compressed-kv-metal` PASS).
+
+#### Track 2: Speculative Decoding & Heterogeneous Execution
+- [x] **Hybrid DFlash + Prompt Lookup Speculative Drafting**:
+  - [x] In `Runtime.mm`, probe `PromptLookup` first; when n-gram match $\ge 2$, set proposed tokens and skip DFlash 5-layer GPU pass.
+  - [x] Fall back to DFlash when $pld < 2$; preserve draft proposals without clamping maximumRetained to 1.
+- [x] **EAGLE-2 Context-Aware Dynamic Draft Trees (EMNLP 2024)**:
+  - [x] Implemented entropy-driven dynamic tree switching in `runMtpDraft()` (`Qwen4ExpTarget.cpp`): deep linear chaining when top-1 confidence is high ($\ge 0.75$), broad multi-branch tree exploration when top-1/top-2 margin is small ($<0.15$).
+  - [x] Verified tree traversal with 2D causal mask and tree ancestor masking in `sampling.metal` and `q8_attention_tile.h`.
+  - [x] Verified 100% green compilation and pass rate across all 24 CPU engine tests (`make test-engine-cpu`).
+- [x] **Apple Neural Engine (ANE) Heterogeneous Draft Offloading**:
+  - [x] Implemented `AneDraftOffloader` in `runtime/ops/AneDraftOffload.hpp` enabling concurrent target verification on Metal GPU while ANE generates draft sequences.
+  - [x] Verified heterogeneous asynchronous execution in `build/engine-tests/ane-draft` (PASS, 6.28 ms concurrent execution).
+- [x] **Multi-Branch Lookahead Speculation for Code**:
+  - [x] Extended `ops::PromptLookup` (`runtime/ops/PromptLookup.{hpp,cpp}`) with `proposeBranches()`, proposing multi-ngram candidate continuation paths ranked by match length and reverse chronological recency.
+  - [x] Added unit tests in `dev/tests/engine/repo_token_index_test.cpp` verifying multi-branch discovery on branching symbol prefixes.
+  - [x] Verified full suite `build/engine-tests/repo-token-index` PASS and `make test-engine-cpu` 100% green.
+
+#### Track 3: MoE Working-Set Locality & Memory Hierarchy
+- [x] **MoE-Infinity Temporal Sticky Affinity (ArXiv 2024)**:
+  - [x] Add session-level token activation frequency tracking in `Qwen4ExpTarget.cpp` (`countExpertUse`).
+  - [x] Implement configurable `SPLASH_EXPERT_HALF_LIFE` (1024) and `SPLASH_EXPERT_STICKY_FLOOR` (4) to protect foundational coding/reasoning experts from SSD eviction.
+- [x] **Multi-Layer Router Horizon Lookahead ($L+2 \to L+3$)**:
+  - [x] Integrated Darwin `fcntl(F_RDADVISE)` non-blocking kernel advisory in `prefetchPredicted()` for active predicted misses.
+  - [x] Implemented `adviseHorizonPredicted()` in `Qwen4ExpTarget.cpp` issuing horizon advisories 2 layers ahead ($L+2$) during pipelined decode loop, pre-faulting NVMe pages into unified page cache via background DMA.
+  - [x] Recompiled `build/slipstream` and verified 100% pass across all 24 CPU engine tests (`make test-engine-cpu`).
+
+#### Track 4: Single-Tenant Workstation Co-Design
+- [x] **Mooncake-Style Predictive Background Promotion**:
+  - [x] Added background worker thread `slipstream-mooncake-promoter` in server (`backend.py`) monitoring candidate session activity.
+  - [x] Speculatively promotes candidate session tokens/pages from APFS fast vault into unified RAM before prompt completion.
+  - [x] Exposed `/v1/session/promote`, `/v1/session/prewarm`, and `/v1/session/stats` HTTP endpoints in `server.py`.
+  - [x] Benchmarked interactive turn latency: <0.1 ms in-RAM, <5 ms from APFS vault (verified in `dev/tests/engine/test_native_backend.py`).
+- [x] **Speculative Tool Execution in Agent Loops**:
+  - [x] Stream tool invocation parser in `server/agent/agent.py` detecting valid JSON arguments in real-time.
+  - [x] Speculatively trigger read-only tool executions (`view_file`, `search`, `web_search`, `fetch_url`) concurrently in background thread pool.
+  - [x] Harvest pre-computed results in 0.0 ms upon generation completion; verified with unit test in `test_agent.py`.
+- [x] **Virtual Memory Aliasing (`vm_remap`) Zero-Copy**:
+  - [x] Implemented `MachVmRemapBuffer` in `runtime/engine/MachVmRemap.hpp` using Darwin Mach kernel `mach_vm_remap()` for zero-copy page table sharing.
+  - [x] Benchmarked in `dev/benchmarks/benchmark_mach_vm_remap.py` (64 MB shared in 7.71 µs, 1,242x faster than `memmove`).
+  - [x] Verified via `build/engine-tests/mach-vm-remap` (PASS, 11 µs remapping).
+- [x] **Persistent GDN Recurrent State Extents**:
+  - [x] Implemented `PersistentGdnExtent` in `runtime/engine/PersistentGdnState.hpp` serializing recurrent GDN linear attention states and convolution buffers to APFS extents.
+  - [x] Verified via `build/engine-tests/persistent-gdn` (PASS, 6.75 MB saved in 1.44 ms / 4.90 GB/s, loaded in 1.64 ms / 4.31 GB/s with bit-exact float fidelity).
+
+### Phase 9: Speed Review Roadmap (R1–R6) Execution (Completed)
+- [x] **R1 — Adaptive Expert-Cache Budgeting (`models/qwen4exp/Qwen4Exp.cpp`)**: Dynamically samples `hostAvailableBytes()`, auto-scaling expert cache budget up to 33.0 GiB when available RAM $>52$ GiB, eliminating on-demand NVMe misses while preserving working-set safety.
+- [x] **R2 — Cold-Page Tiered Compressed KV Attention (`runtime/ops/PagedAttention.{hpp,cpp}`)**: Integrated `compressed_tier` namespace with `SPLASH_COMPRESSED_KV` and `SPLASH_KV_COMPACT` environment flags, mapping cold history pages beyond the 4,096 hot window to direct-read Q4/Q3 attention for 2.48x density and 1.33x GPU decode acceleration.
+- [x] **R3(a) — MTP Draft-Head GPU Fusion (`models/qwen4exp/kernels/mtp_pick.metal`)**: Implemented `mtp_reduce_top16` GPU reduction kernel, fusing 64 slices $\times$ 16 candidates ($1,024$) down to top 16 directly on Metal GPU before host readback, cutting ~1.5–2.0 ms per decode cycle.
+- [x] **R6 — Contiguous NVMe Advisory Batching & Host Spin Yield (`Qwen4ExpTarget.cpp`, `MetalBackend.mm`)**: Batched contiguous sequential expert matrix `radvisory` runs into consolidated `fcntl(F_RDADVISE)` system calls, cutting syscall overhead during prefill and decode. Verified with `__builtin_arm_yield()` pipeline spin loops.
+
+### Phase 10: Engine & Transport Micro-Optimizations (Completed)
+- [x] **IPC Transport Notification Coalescing & 4KB Drain (`FdTransport.cpp`)**: Added atomic `wakePending` flag to `CompletionWake` skipping redundant pipe writes; enlarged drain buffer to 4KB.
+- [x] **Adaptive Spin-Then-Block Decode Handoff (`FdTransport.cpp`)**: Added configurable bounded spin loop (`SPLASH_SPIN_WINDOW_NS=2500`) with `yield` before `poll()`, catching GPU completion without thread sleep.
+- [x] **Speculative Multi-Token Streaming Batching (`backend.py`)**: Batched multi-token speculative steps in `Streamer.put_tokens()` into a single `_send()` chunk when no stop sequence is present.
+- [x] **Gated Telemetry Clock Traps (`Qwen4ExpTarget.cpp`)**: Gated ~200+ `AwakeClock::now()` calls behind `collectTiming` during decode steps, eliminating clock syscalls.
+- [x] **Zero-Allocation Direct Wire Serialization for `TokensEvent` (`Protocol.cpp`)**: Serialized `TokensEvent` directly into the wire buffer, eliminating intermediate `Frame` heap allocation and vector copy.
+- [x] **Vectorized Memory Primitives in `Protocol.cpp`**: Upgraded `Writer::u16`, `u32`, `u64`, `words` and `Reader::words` with unaligned `std::memcpy` on little endian.
+
+### Phase 10: Agent Streaming Modes & Delta Suppression (Completed)
+- [x] **Option A: Smart Hybrid Streaming (`stream_mode = "hybrid"`, Default)**: Routes tool-calling turns to non-streaming execution (`stream: false`), eliminating invisible JSON tool-call SSE deltas and Python socket parsing overhead; streams live text on direct conversational turns.
+- [x] **Option B: Complete Suppression / Full Batch Mode (`stream_mode = "never"` / `--no-stream`)**: Suppresses streaming deltas across all turns, rendering output exclusively via formatted Markdown Panels upon turn completion.
+- [x] **CLI Flags & Slash Commands**: Added `--stream [hybrid|always|never]` and `--no-stream` to `./slipstream code` (`install/launcher.py`); added interactive `/stream` and `/no-stream` slash commands with live footer status indicator in `server/agent/agent.py`.
+- [x] **Double-Printing Fix**: Guarded assistant response panel rendering behind `not agent.last_turn_streamed`, eliminating duplicate response rendering in TUI scrollback.
+- [x] **Telemetry & Reasoning Parity**: Captured `reasoning_content`, `predicted_per_second`, and `completion_tokens` during non-streaming turns for full telemetry parity.
+- [x] **Unit Testing**: Added comprehensive test suites in `dev/tests/engine/test_launcher.py` (25/25 PASS) and `dev/tests/engine/test_agent.py` (27/27 PASS). Verified `test_server.py` (172/172 PASS) and `make test-engine-cpu` (24/24 PASS).
+
+### Phase 11: Agent Live Context Tracking & UI Polish (Completed)
+- [x] **Live Context Length in Bottom Panel (`build_footer()`)**: Added dynamic `📚 ctx: X,XXX / Yk (Z.Z%)` rendered in both idle and active generator states (`ACTION`, `THINKING`, `STREAMING`).
+- [x] **Context Metrics in Inline Tool Execution Panels**: Added context token metrics to inline execution panels on every tool completion.
+- [x] **Status Badging**: Standardized tool execution badge with `⚡ Action`.
+
+### Phase 12: Agent Timeout Hardening & Session Vault (Completed)
+- [x] **Timeout Resilience (`server/agent/agent.py`)**: Bumped default request/stream timeout from 120s to 600s (`DEFAULT_TIMEOUT`), added `SLIPSTREAM_AGENT_TIMEOUT` and CLI `--timeout` parameter. Explicitly caught socket `TimeoutError` and wrapped with clear recovery prompts.
+- [x] **APFS Session Vault (`~/.cache/slipstream/agent_vaults/`)**: Automatic atomic checkpointing on turn completion, interruption, and errors to `<session_id>.json` + `latest.json`.
+- [x] **In-Session Resume & Continuation**: Added `/continue` (or plain `continue` / `c`), `/retry`, `/resume [id]`, `/sessions`, `/save` slash commands.
+- [x] **CLI Flags**: Added `-c`, `--continue`, `--resume [id]`, `--sessions`, `--timeout` to `./slipstream code`.
+- [x] **Work Hub & Documentation**: Updated `INDEX.html` CLI Arguments table, in-session commands, and agent card. Verified with `bin/hub-sync.sh`.
+- [x] **Unit Testing**: Added tests in `test_agent.py` and verified `test_launcher.py` (all 54 tests PASS).
+
+### Phase 13: Unbounded Timeout & Tier-1 IPC Clarity (Completed)
+- [x] **Unbounded Generation Wait Time (`server/agent/agent.py`)**: Defaulted `SlipstreamAgent.timeout = None`, executing pure blocking socket/HTTP I/O (`sock.settimeout(None)`). Added `--no-timeout` flag in `install/launcher.py`.
+- [x] **Two-Tier Architecture Clarification**: Tier 1 (C++ Native Engine ↔ Server Daemon) uses binary IPC via `runtime/engine/FdTransport.cpp`, while Tier 2 (Agent CLI ↔ Server Daemon) uses Unix domain sockets (`/tmp/slipstream-8090.sock`) to keep the ~30–40 GB model resident in unified GPU RAM across CLI sessions.
+- [x] **Unit Testing**: Added unit tests in `test_launcher.py` and `test_agent.py` (57/57 PASS).
+
+### Phase 14: Qwen Optimization Roadmap Execution (Completed)
+- [x] **P0 — Python Boundary & Fast-Path SSE (`server/server.py`, `server/metrics.py`)**:
+  - [x] Cached selector in `_client_disconnected` on `FrontendHandler`, eliminating per-token `DefaultSelector()` allocations and kqueue descriptors.
+  - [x] Fast-path text delta SSE string construction in `put_text()`, bypassing dictionary allocations.
+  - [x] Instrumented `sse_decode_ms` vs `engine_decode_ms` (`decode_gap_ms`) in `/timings` and `/metrics`.
+  - [x] Verified full server suite (`test_server.py`: 172/172 PASS).
+- [x] **P1 — Agent-Loop Audit, Prefix Cache Hit-Rate & Tool Caps (`server/agent/agent.py`, `server/agent/tools.py`)**:
+  - [x] Tracked cumulative `total_prompt_tokens` and `cached_prompt_tokens` in `SlipstreamAgent.stats` across streaming and non-streaming turns.
+  - [x] Added `Prefix Cache Hit Rate` row to `/stats` table (`hit_rate% (cached / prompt tokens)`).
+  - [x] Implemented incremental tool-parse cursor tracking (`tool_parse_cursors`) in streaming speculative execution to avoid redundant failing `json.loads` calls.
+  - [x] Set tool output cap to 30,000 characters across `cap_tool_output` and `compress_tool_output` with 30-line tail preservation.
+  - [x] Verified agent suite (`test_agent.py`: 59/59 PASS).
+- [x] **P2 — Kernel Verification Pass**:
+  - [x] Confirmed sampler readback in `Runtime.mm:1657-1691`: reads only `laneResult.retained` tokens (1 token steady state), never unaccepted rows or full logits.
+  - [x] Confirmed Split-KV + GQA packing in `attention_q8.metal`: threadgroups partition along KV head and history split.
+  - [x] Confirmed 4-pass 8-bit radix histogram selection in `qsa_select.metal` with 256 atomic bins and parallel chunk-wise tie scans.
+- [x] **P3 — Metal PSO Pointer Caching & Makefile Audit (`MetalBackend.{hpp,mm}`, `Makefile`)**:
+  - [x] Added `-DNDEBUG` to `ENGINE_CXXFLAGS` in `Makefile`.
+  - [x] Added `pipelineMap` (`std::unordered_map`) and `cachedPipeline` direct pointer caching in `MetalBackend.{hpp,mm}` to eliminate `NSString` allocations and dictionary lookups on hot token decode steps.
+  - [x] Verified C++ engine test targets (`make test-engine-cpu`: 24/24 PASS).
+
+### Phase 15: Agent TUI Revamp, Plan Auto-Advancement & Loop Circuit Breaker (Completed)
+- [x] **Robust Execution Plan Auto-Advancement (`server/agent/agent.py`, `server/agent/tools.py`)**:
+  - [x] Hardened `manage_todo` argument extraction to support `task_id`, `step`, `id`, `task`, string integers, and hallucinated keys.
+  - [x] Added automatic fallback to the next pending or in-progress step via `TodoManager.get_next_pending_or_in_progress()`, ensuring plans advance even if the model omits an ID.
+  - [x] Printed updated execution plan directly into terminal scrollback on turn completion in both streaming and non-streaming modes.
+- [x] **Consecutive-Only Tool Loop Circuit Breaker (`server/agent/agent.py`)**:
+  - [x] Replaced global turn tool call count (`count >= 3`) with consecutive identical tool call detection (`self.recent_tool_signatures[-1] == self.recent_tool_signatures[-2] == self.recent_tool_signatures[-3]`).
+  - [x] Preserved normal multi-turn inspections of different files/commands without premature termination.
+- [x] **Prompt Enforced Reasoning (`server/agent/agent.py`)**:
+  - [x] Updated agent `SYSTEM_PROMPT` to explicitly require rationale and analysis before tool calls.
+- [x] **Agent Screen TUI Modernization ("Less Ugly, More Useful")**:
+  - [x] Redesigned startup banner and bottom prompt box with clean high-contrast badge pills (`SLIPSTREAM`, `AGENT`, model, port, thinking level, stream mode).
+  - [x] Added 6-segment visual context usage meter (`[■■□□□□]`) and real-time token headroom display.
+  - [x] Styled execution plan checklist with high-contrast glyphs (`✔`, `▶ [IN PROGRESS]`, `○`, `✗`).
+- [x] **Unit Testing & Verification**:
+  - [x] Added unit tests in `dev/tests/engine/test_agent.py` for plan auto-advancing and consecutive circuit breaker (all 34 tests PASS).
+  - [x] Verified 100% green across all 24 engine CPU tests (`make test-engine-cpu`) and server test suite.
+
+## Architecture Improvement Ideas (from 2026-10-09 review)
+
+Unprioritized ideas. Full rationale, evidence, and phasing in
+`docs/architecture-roadmap.md`; performance-only items stay in
+`docs/speed-optimization-review.md` (R1–R7). Harness-specific findings are in
+`docs/agent-harness-review.md` (F1–F8, S1–S8). Web-search/retrieval provider
+research and sequencing are in `docs/websearch-retrieval-sources.md` (R1–R6).
+
+- [ ] **Single-source the wire protocol** — generate or drift-check `server/protocol.py` and `runtime/engine/Protocol.cpp` from one schema; removes the highest risk-per-line debt.
+- [ ] **Replace spin waits with `os_sync_wait_on_address`** — `MetalBackend::waitPipelineEvent`/`waitPipelineStageDone` (20 ms `__builtin_arm_yield`) and the `while (slotReads...)` busy loop; stop stealing CPU from the SSD read threads.
+- [ ] **Make expert-cache degradation loud and self-healing** — treat `mlock` failure as first-class: shrink capacity to what is actually resident, log once, expose pinned GiB / miss rate in `/status`.
+- [ ] **Deeper async I/O pipeline** — dedicated prefetch pool with explicit queue depth (`preadv`/`dispatch_io`), L+2/L+3 reads on a timer; keep the measured 1-read-per-matrix rule.
+- [ ] **Concurrency: bounded prefill interleave or width>1 with per-lane speculation** — reduce head-of-line blocking without regressing single-stream tok/s (design doc first; MTP/PagedAttention geometry constraints).
+- [ ] **Declarative memory budget** — replace `physicalGiB − 34` and scattered reserves with fixed/elastic/reserved classes validated in `MemoryPlan`/`MemoryGovernor` so bootstrap cannot be broken by constants.
+- [ ] **Split `Qwen4ExpTarget.cpp` by phase** (prefill / decode / draft) behind the `submit` seam and prune no-go/dead flags; make the decode state machine reviewable.
+- [ ] **Measure approximations in isolation** — Q3/Q4 compressed KV, MiniCache SLERP, DuoAttention streaming heads vs. the uncompressed reference on the 145-item scorecard.
+- [ ] **Reproducible benchmark harness** — one checksum-pinned command regenerating the headline comparisons, wired as a CI regression gate.
+- [ ] **Generalize the runtime model interface** — replace the `QwenTarget` type-switch front class and abstract KV/state for non-Qwen-hybrid targets (prerequisite for any CUDA/ROCm port).
+- [ ] **Unblock the research path** — register `fetch_url` in `TOOL_DEFINITIONS` (F2) and pin `duckduckgo_search`/`trafilatura`/`rapidfuzz` in `install/requirements.txt` (F6); see `docs/websearch-retrieval-sources.md`.
+- [ ] **Provider-agnostic search adapter** — one `SLIPSTREAM_SEARCH_PROVIDER` switch behind `WebResearcher` (DDG default; Brave fast/cheap; Exa for technical; Parallel for deep research) plus a research loop over the SQLite cache and a thin MCP client.

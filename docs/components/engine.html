@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Engine — Slipstream Component Deep-Dive</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2128;
+    --border: #30363d; --text: #e6edf3; --muted: #8b949e;
+    --server: #58a6ff; --engine: #d2a8ff; --model: #7ee787;
+    --ops: #79c0ff; --metal: #ff7b72; --protocol: #e3b341;
+    --install: #ffa657; --accent: #d2a8ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif;
+    padding: 40px 24px 80px; line-height: 1.6; }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 28px; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 32px; font-size: 15px; }
+  h2 { font-size: 20px; margin: 40px 0 16px; }
+  h2 .tag { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 8px; }
+  h3 { font-size: 16px; margin: 24px 0 10px; }
+  p { margin: 10px 0; font-size: 14.5px; }
+  code { background: var(--panel2); padding: 2px 6px; border-radius: 4px; font-size: 12.5px;
+    font-family: "SF Mono", Menlo, monospace; }
+  .back { display: inline-block; margin-bottom: 24px; color: var(--muted); text-decoration: none; font-size: 14px; }
+  .back:hover { color: var(--text); }
+  .grid { display: grid; gap: 16px; }
+  .grid.c2 { grid-template-columns: 1fr 1fr; }
+  .grid.c3 { grid-template-columns: 1fr 1fr 1fr; }
+  .box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; }
+  .box .name { font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .box .path { font-family: "SF Mono", Menlo, monospace; font-size: 11px; color: var(--muted); }
+  .box .desc { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .box.b-engine { border-left: 4px solid var(--engine); }
+  .box.b-model { border-left: 4px solid var(--model); }
+  .box.b-metal { border-left: 4px solid var(--metal); }
+  .box.b-protocol { border-left: 4px solid var(--protocol); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .tree { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 20px; font-family: "SF Mono", Menlo, monospace; font-size: 12.5px;
+    line-height: 1.8; overflow-x: auto; }
+  .tree .f { color: var(--engine); }
+  .tree .n { color: var(--muted); }
+  .tree .c { color: var(--muted); font-style: italic; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+  .chip { display: inline-block; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 3px 10px; font-size: 11.5px; margin: 3px 4px 3px 0;
+    font-family: "SF Mono", Menlo, monospace; }
+  .note { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 18px; margin: 16px 0; font-size: 13px; color: var(--muted); }
+  .note b { color: var(--text); }
+  .steps { display: flex; flex-direction: column; gap: 0; margin: 16px 0; }
+  .step { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 16px; margin-bottom: 4px; }
+  .step .head { display: flex; justify-content: space-between; align-items: center; }
+  .step .title { font-weight: 700; font-size: 13.5px; }
+  .step .fn { font-size: 11px; color: var(--engine); font-family: "SF Mono", Menlo, monospace; }
+  .step .body { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .step .body ul { margin: 6px 0 0 18px; }
+  .step .body li { margin: 3px 0; }
+  .step .body code { font-size: 11.5px; }
+  .phase { display: inline-block; padding: 3px 10px; border-radius: 5px; font-size: 11.5px;
+    font-weight: 600; margin: 2px; }
+  .phase.queued { background: #1c2128; color: #8b949e; }
+  .phase.waiting { background: #2d1b69; color: #d2a8ff; }
+  .phase.prefill { background: #1a3a2a; color: #7ee787; }
+  .phase.decode { background: #1a2a3a; color: #58a6ff; }
+  .phase.mask { background: #3a2a1a; color: #ffa657; }
+  .phase.terminal { background: #2a1a1a; color: #ff7b72; }
+  .svg-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; margin: 16px 0; overflow-x: auto; }
+  .svg-wrap svg { width: 100%; height: auto; }
+  .navbar { display: flex; justify-content: space-between; margin-bottom: 24px; }
+  .navbar a { color: var(--muted); text-decoration: none; font-size: 13px; }
+  .navbar a:hover { color: var(--text); }
+  .kv-diagram { display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
+  .kv-cell { background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 12px; font-size: 11px; font-family: "SF Mono", Menlo, monospace; text-align: center; }
+  .kv-cell .lbl { color: var(--muted); font-size: 9px; text-transform: uppercase; margin-bottom: 4px; }
+  .kv-cell.resident { border-color: #7ee787; }
+  .kv-cell.free { border-color: #30363d; }
+  .kv-cell.prefix { border-color: #e3b341; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="navbar">
+    <a href="server.html">← Server</a>
+    <a href="model.html">Next: Model →</a>
+  </div>
+
+  <h1>The Engine <span style="color:var(--engine)">C++</span></h1>
+  <p class="subtitle">Component deep-dive · Scheduling, KV cache, and memory policy. It never names a concrete model — it drives any <code>model::Model</code> through the same loop.</p>
+
+  <h2>File Map</h2>
+  <div class="tree">runtime/engine/
+├── <span class="f">Engine.cpp / .hpp</span>        <span class="n">~1056 / ~224 lines</span>  <span class="c">request admission, tick loop, apply/finish, reclaim</span>
+├── <span class="f">Scheduler.cpp / .hpp</span>      <span class="c">phase FSM, batch packing, priority, deadlines</span>
+├── <span class="f">Cache.cpp / .hpp</span>          <span class="c">content-addressed KV + state cache facade</span>
+├── <span class="f">KvCache.cpp / .hpp</span>        <span class="c">KV block graph (content-addressed prefix tree)</span>
+├── <span class="f">KvPool.cpp / .hpp</span>         <span class="c">physical page pool, extents, residency</span>
+├── <span class="f">StateCache.cpp / .hpp</span>     <span class="c">recurrent state leases attached to KV blocks</span>
+├── <span class="f">CacheRecency.hpp</span>          <span class="c">LRU-ish eviction ordering</span>
+├── <span class="f">MemoryGovernor.cpp / .hpp</span> <span class="c">host pressure policy, byte reservations</span>
+├── <span class="f">MemoryPlan.cpp / .hpp</span>     <span class="c">startup budget: weights + KV + state + scratch</span>
+├── <span class="f">MemoryAudit.cpp / .hpp</span>    <span class="c">post-warmup actual-vs-planned audit</span>
+├── <span class="f">Protocol.cpp / .hpp</span>       <span class="c">binary frame codec (C++ side, v5)</span>
+├── <span class="f">NativeRuntime.cpp / .hpp</span>  <span class="c">protocol ↔ Engine boundary, event sink, main loop</span>
+├── <span class="f">Bootstrap.cpp / .hpp</span>      <span class="c">startup stages: assemble → warmup → audit → Ready</span>
+├── <span class="f">FdTransport.cpp / .hpp</span>    <span class="c">POSIX pipe transport, nonblocking, control wake</span>
+├── <span class="f">RuntimeResources.cpp / .mm</span> <span class="c">device + backend + governor assembly</span>
+├── <span class="f">Status.cpp / .hpp</span>         <span class="c">StatusJson snapshot (schema v5)</span>
+├── <span class="f">Json.hpp</span>                  <span class="c">minimal JSON writer for status</span>
+├── <span class="f">Checked.hpp</span>               <span class="c">checked arithmetic helpers</span>
+├── <span class="f">Types.hpp</span>                 <span class="c">EngineRequest, EngineEventSink, snapshots</span>
+└── <span class="f">AwakeClock.hpp</span>            <span class="c">idle-sleep suppression while holding requests</span>
+</div>
+
+  <h2>Layered Structure</h2>
+  <div class="svg-wrap">
+    <svg viewBox="0 0 900 560" xmlns="http://www.w3.org/2000/svg">
+      <!-- FdTransport -->
+      <rect x="40" y="20" width="820" height="70" rx="10" fill="#161b22" stroke="#e3b341" stroke-width="2"/>
+      <text x="60" y="48" fill="#e3b341" font-size="14" font-weight="700">FdTransport</text>
+      <text x="60" y="68" fill="#8b949e" font-size="12">POSIX pipe · nonblocking read · drains all available frames per iteration · control-wake fd for reclaim pacing · async-signal-safe shutdown</text>
+
+      <line x1="450" y1="90" x2="450" y2="115" stroke="#8b949e" stroke-width="2" marker-end="url(#ae)"/>
+
+      <!-- NativeRuntime -->
+      <rect x="40" y="115" width="820" height="80" rx="10" fill="#161b22" stroke="#e3b341" stroke-width="2"/>
+      <text x="60" y="143" fill="#e3b341" font-size="14" font-weight="700">NativeRuntime</text>
+      <text x="60" y="163" fill="#8b949e" font-size="12">protocol::Message → Engine calls (submit / cancel / provideMask / status)</text>
+      <text x="60" y="180" fill="#8b949e" font-size="12">EngineEventSink → protocol frames (Start / Tokens / MaskRequest / Done / Error / CapacityExhausted / PromptProgress)</text>
+
+      <line x1="450" y1="195" x2="450" y2="220" stroke="#8b949e" stroke-width="2" marker-end="url(#ae)"/>
+
+      <!-- Engine -->
+      <rect x="40" y="220" width="820" height="110" rx="10" fill="#161b22" stroke="#d2a8ff" stroke-width="2"/>
+      <text x="60" y="248" fill="#d2a8ff" font-size="14" font-weight="700">Engine</text>
+      <text x="60" y="268" fill="#8b949e" font-size="12">tick(now) — the single heartbeat: health check → deadline expiry → admission → prepare → apply → finish → sweep</text>
+      <text x="60" y="288" fill="#8b949e" font-size="12">admit() — cache lookup → state cell → KV pages → suspend/resume under memory pressure</text>
+      <text x="60" y="308" fill="#8b949e" font-size="12">reclaimMemory() — model idle state → cache eviction → signal resource progress</text>
+
+      <line x1="250" y1="330" x2="250" y2="360" stroke="#8b949e" stroke-width="2" marker-end="url(#ae)"/>
+      <line x1="450" y1="330" x2="450" y2="360" stroke="#8b949e" stroke-width="2" marker-end="url(#ae)"/>
+      <line x1="650" y1="330" x2="650" y2="360" stroke="#8b949e" stroke-width="2" marker-end="url(#ae)"/>
+
+      <!-- Three sub-components -->
+      <rect x="60" y="360" width="240" height="90" rx="10" fill="#161b22" stroke="#d2a8ff"/>
+      <text x="180" y="388" text-anchor="middle" fill="#d2a8ff" font-size="13" font-weight="700">Scheduler</text>
+      <text x="180" y="408" text-anchor="middle" fill="#8b949e" font-size="11">phase FSM per request</text>
+      <text x="180" y="424" text-anchor="middle" fill="#8b949e" font-size="11">batch packing (prefill/decode)</text>
+      <text x="180" y="440" text-anchor="middle" fill="#8b949e" font-size="11">priority + deadline ordering</text>
+
+      <rect x="330" y="360" width="240" height="90" rx="10" fill="#161b22" stroke="#d2a8ff"/>
+      <text x="450" y="388" text-anchor="middle" fill="#d2a8ff" font-size="13" font-weight="700">Cache</text>
+      <text x="450" y="408" text-anchor="middle" fill="#8b949e" font-size="11">KvCache (block graph)</text>
+      <text x="450" y="424" text-anchor="middle" fill="#8b949e" font-size="11">KvPool (pages + residency)</text>
+      <text x="450" y="440" text-anchor="middle" fill="#8b949e" font-size="11">StateCache (recurrent state)</text>
+
+      <rect x="600" y="360" width="240" height="90" rx="10" fill="#161b22" stroke="#d2a8ff"/>
+      <text x="720" y="388" text-anchor="middle" fill="#d2a8ff" font-size="13" font-weight="700">MemoryGovernor</text>
+      <text x="720" y="408" text-anchor="middle" fill="#8b949e" font-size="11">host pressure sampling</text>
+      <text x="720" y="424" text-anchor="middle" fill="#8b949e" font-size="11">byte reservations (RAII)</text>
+      <text x="720" y="440" text-anchor="middle" fill="#8b949e" font-size="11">reclaim directives</text>
+
+      <!-- Model boundary -->
+      <line x1="450" y1="450" x2="450" y2="480" stroke="#8b949e" stroke-width="2" marker-end="url(#ae)"/>
+      <text x="460" y="470" fill="#8b949e" font-size="10">model::Model interface — the only model dependency</text>
+
+      <rect x="40" y="480" width="820" height="60" rx="10" fill="#161b22" stroke="#7ee787" stroke-width="2"/>
+      <text x="60" y="505" fill="#7ee787" font-size="14" font-weight="700">model::Model (concrete: Qwen3-8B / Qwen4-Exp)</text>
+      <text x="60" y="525" fill="#8b949e" font-size="12">begin / prefillAsync / decodeAsync / suspend / resume / restore / reclaimIdleState / checkHealth</text>
+
+      <defs>
+        <marker id="ae" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <path d="M0,0 L8,3 L0,6" fill="#8b949e"/>
+        </marker>
+      </defs>
+    </svg>
+  </div>
+
+  <h2>The Tick Loop <span class="tag">Engine::tick(now)</span></h2>
+  <p>Everything in the engine happens from one heartbeat. <code>NativeRuntime</code> calls <code>tick()</code> after every drained pipe frame and after every GPU command completion. The loop is strictly ordered:</p>
+
+  <div class="steps">
+    <div class="step">
+      <div class="head"><span class="title">1 · Health check</span><span class="fn">model_.checkHealth()</span></div>
+      <div class="body">At most once per second (<code>kHealthCheckIntervalMilliseconds = 1000</code>). The model reports GPU/driver health; a failure fails all in-flight requests.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">2 · Expire deadlines</span><span class="fn">scheduler_.expireDeadlines(now)</span></div>
+      <div class="body">Any non-terminal request whose <code>deadlineMilliseconds</code> has passed → <code>Phase::Failed</code>. Finalized immediately (even mid-command) so late masks/cancels become no-ops.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">3 · Resource-wait timeouts</span><span class="fn">per active request</span></div>
+      <div class="body">Requests in <code>WaitingResources</code> past <code>resourceWaitTimeoutMilliseconds</code> (default 30 s) → failed with <code>resource_timeout</code>. Skipped entirely while <code>drainingForRecovery()</code> — suspended peers must finish first.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">4 · Sweep terminal</span><span class="fn">sweepTerminal()</span></div>
+      <div class="body">If anything changed: remove terminal requests from the scheduler and <code>requests_</code> map, releasing their state cells and cache references.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">5 · Pending command in flight?</span><span class="fn">pending_ != nullopt</span></div>
+      <div class="body">
+        <ul>
+          <li>Forward any <code>MaskRequest</code>s the model ticket took (engine pauses in WaitingMask until Python answers)</li>
+          <li>On command completion: <code>apply(plan, results)</code> — commit KV writes, advance phases, emit token events</li>
+          <li>Clear <code>pending_</code>, take the next batch</li>
+        </ul>
+      </div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">6 · Admit queued work</span><span class="fn">admitQueued(now)</span></div>
+      <div class="body">
+        <ul>
+          <li>While <code>recoveringResources_</code>: only retry <b>suspended</b> requests, one lane at a time (prevents B4 admission/preemption churn)</li>
+          <li>Otherwise: walk <code>admissionOrder()</code> (priority, then arrival order) and <code>admit()</code> each</li>
+        </ul>
+      </div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">7 · Take next batch</span><span class="fn">scheduler_.next()</span></div>
+      <div class="body">If no command is in flight: pick the next <code>BatchPlan</code> (decode preferred over prefill at equal priority, alternating at command boundaries), <code>prepare()</code> it, dispatch to the model.</div>
+    </div>
+  </div>
+
+  <h2>Request Admission <span class="tag">Engine::admit()</span></h2>
+  <p>Admission is a <b>transaction</b>: either the request gets its state cell + KV pages and starts, or it goes to <code>WaitingResources</code> with a retry. Nothing is half-committed.</p>
+  <div class="steps">
+    <div class="step">
+      <div class="head"><span class="title">Cache lookup</span><span class="fn">cache_.lookup(...)</span></div>
+      <div class="body">Content-addressed search: how many prompt tokens are already cached? Returns <code>CacheLookup { kvBoundary, state }</code> — the longest reusable KV prefix plus an optional recurrent-state lease (resume boundary). A resume skips re-prefilling everything before the state boundary.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">Model begin</span><span class="fn">model_.begin(request)</span></div>
+      <div class="body">Allocates the request's recurrent <b>state cell</b> (Qwen linear-attention state, draft context). Fails with <code>StateFailure::MemoryPressure</code> or <code>ConcurrencyLimit</code> → request goes to <code>WaitingResources</code>.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">KV page acquisition</span><span class="fn">admitKv(active, workEnd)</span></div>
+      <div class="body">Acquires physical KV pages for the work window. On failure: <code>TokenAdmission</code> carries the failure class. <code>budgetMayRecover()</code> checks the governor — if host pressure is the cause, the request waits; if it's hard capacity, it fails with <code>CapacityExhausted</code>.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">Suspend / resume</span><span class="fn">suspendForGrowth()</span></div>
+      <div class="body">Under memory pressure, a <b>running</b> request can be suspended: its state cell is evicted to the StateCache, KV pages released, phase → <code>WaitingResources</code>. On retry it resumes from the exact token boundary (<code>active.exactTokens</code>) with restored state. Provisional in-flight writes are invisible until the command drains, so suspension is safe.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">State boundaries armed</span><span class="fn">configureStateBoundaries()</span></div>
+      <div class="body">Checkpoints (every <code>prefillCheckpointTokens</code>, default 4096) + replay boundaries (page-aligned) + junctions (where a cached prefix ends mid-prompt). These are the points where the engine publishes reusable state into the cache.</div>
+    </div>
+  </div>
+
+  <h2>Scheduler: Phase FSM</h2>
+  <div class="svg-wrap">
+    <svg viewBox="0 0 880 340" xmlns="http://www.w3.org/2000/svg">
+      <!-- Queued -->
+      <rect x="30" y="40" width="130" height="50" rx="8" fill="#1c2128" stroke="#8b949e"/>
+      <text x="95" y="62" text-anchor="middle" fill="#8b949e" font-size="12" font-weight="700">Queued</text>
+      <text x="95" y="78" text-anchor="middle" fill="#8b949e" font-size="10">submitted, ordered</text>
+
+      <!-- WaitingResources -->
+      <rect x="220" y="40" width="150" height="50" rx="8" fill="#2d1b69" stroke="#d2a8ff"/>
+      <text x="295" y="62" text-anchor="middle" fill="#d2a8ff" font-size="12" font-weight="700">WaitingResources</text>
+      <text x="295" y="78" text-anchor="middle" fill="#8b949e" font-size="10">state/KV denied, retry</text>
+
+      <!-- Prefill -->
+      <rect x="430" y="40" width="130" height="50" rx="8" fill="#1a3a2a" stroke="#7ee787"/>
+      <text x="495" y="62" text-anchor="middle" fill="#7ee787" font-size="12" font-weight="700">Prefill</text>
+      <text x="495" y="78" text-anchor="middle" fill="#8b949e" font-size="10">prompt chunks</text>
+
+      <!-- Decode -->
+      <rect x="620" y="40" width="130" height="50" rx="8" fill="#1a2a3a" stroke="#58a6ff"/>
+      <text x="685" y="62" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="700">Decode</text>
+      <text x="685" y="78" text-anchor="middle" fill="#8b949e" font-size="10">draft→verify→accept</text>
+
+      <!-- WaitingMask -->
+      <rect x="620" y="140" width="130" height="50" rx="8" fill="#3a2a1a" stroke="#ffa657"/>
+      <text x="685" y="162" text-anchor="middle" fill="#ffa657" font-size="12" font-weight="700">WaitingMask</text>
+      <text x="685" y="178" text-anchor="middle" fill="#8b949e" font-size="10">tool-call grammar</text>
+
+      <!-- Terminals -->
+      <rect x="30" y="240" width="130" height="50" rx="8" fill="#1a3a2a" stroke="#7ee787"/>
+      <text x="95" y="262" text-anchor="middle" fill="#7ee787" font-size="12" font-weight="700">Completed</text>
+      <text x="95" y="278" text-anchor="middle" fill="#8b949e" font-size="10">stop / max tokens</text>
+
+      <rect x="220" y="240" width="130" height="50" rx="8" fill="#2a1a1a" stroke="#ff7b72"/>
+      <text x="285" y="262" text-anchor="middle" fill="#ff7b72" font-size="12" font-weight="700">Cancelled</text>
+      <text x="285" y="278" text-anchor="middle" fill="#8b949e" font-size="10">client cancel</text>
+
+      <rect x="430" y="240" width="130" height="50" rx="8" fill="#2a1a1a" stroke="#ff7b72"/>
+      <text x="495" y="262" text-anchor="middle" fill="#ff7b72" font-size="12" font-weight="700">Failed</text>
+      <text x="495" y="278" text-anchor="middle" fill="#8b949e" font-size="10">deadline / error</text>
+
+      <!-- Arrows -->
+      <line x1="160" y1="65" x2="220" y2="65" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ap)"/>
+      <text x="190" y="58" text-anchor="middle" fill="#8b949e" font-size="9">admit fails</text>
+      <line x1="295" y1="90" x2="295" y2="130" stroke="#8b949e" stroke-width="1.5"/>
+      <line x1="295" y1="130" x2="495" y2="130" stroke="#8b949e" stroke-width="1.5"/>
+      <line x1="495" y1="130" x2="495" y2="90" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ap)"/>
+      <text x="400" y="124" text-anchor="middle" fill="#8b949e" font-size="9">admit succeeds</text>
+
+      <line x1="560" y1="65" x2="620" y2="65" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ap)"/>
+      <text x="590" y="58" text-anchor="middle" fill="#8b949e" font-size="9">prompt done</text>
+
+      <line x1="685" y1="90" x2="685" y2="140" stroke="#ffa657" stroke-width="1.5" marker-end="url(#am)"/>
+      <text x="700" y="120" fill="#ffa657" font-size="9">mask needed</text>
+      <line x1="685" y1="190" x2="685" y2="215" stroke="#8b949e" stroke-width="1.5"/>
+      <line x1="685" y1="215" x2="685" y2="90" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ap)"/>
+      <text x="700" y="210" fill="#8b949e" font-size="9">mask applied</text>
+
+      <line x1="685" y1="90" x2="685" y2="265" stroke="#8b949e" stroke-width="1.5" stroke-dasharray="4,3"/>
+      <line x1="685" y1="265" x2="560" y2="265" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ap)"/>
+      <text x="620" y="258" text-anchor="middle" fill="#8b949e" font-size="9">stop token</text>
+
+      <line x1="495" y1="90" x2="495" y2="240" stroke="#8b949e" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#ap)"/>
+      <line x1="295" y1="90" x2="295" y2="240" stroke="#8b949e" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#ap)"/>
+      <line x1="95" y1="90" x2="95" y2="240" stroke="#8b949e" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#ap)"/>
+
+      <defs>
+        <marker id="ap" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#8b949e"/></marker>
+        <marker id="am" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#ffa657"/></marker>
+      </defs>
+    </svg>
+  </div>
+
+  <h3>Batch Packing Rules</h3>
+  <div class="grid c2">
+    <div class="box b-engine">
+      <div class="name"><span class="dot" style="background:var(--engine)"></span>Prefill packing</div>
+      <div class="desc">Shortest-remaining-first into an actual-row budget (<code>prefillChunkTokens</code> rows per command). A lane yields to later arrivals after at most <code>maximumBatchWidth − 1</code> consecutive prefill commands (<code>kMaximumOvertakes</code>) so no lane starves. Contended prefills (&gt;500 ms) shrink the budget; minimum 64 rows.</div>
+    </div>
+    <div class="box b-engine">
+      <div class="name"><span class="dot" style="background:var(--engine)"></span>Decode packing</div>
+      <div class="desc">Fixed-width batches up to <code>maximumBatchWidth</code> (env <code>SPLASH_MAX_BATCH_WIDTH</code>). Cohorts: <code>Greedy</code> / <code>Sampling</code> / <code>Constrained</code> — a batch is one cohort only. <code>DecodeStage::ApplyInitialMask</code> requests are classified one at a time (they can terminate or start drafting); regular decode batches freely.</div>
+    </div>
+    <div class="box b-engine">
+      <div class="name"><span class="dot" style="background:var(--engine)"></span>Kind alternation</div>
+      <div class="desc">Prefill and decode use <b>different Metal command graphs</b> and cannot share a command. <code>next()</code> honors request priority first, then alternates kinds at command boundaries so equal-priority work interleaves fairly.</div>
+    </div>
+    <div class="box b-engine">
+      <div class="name"><span class="dot" style="background:var(--engine)"></span>Deadline enforcement</div>
+      <div class="desc">Deadlines are checked every tick, not at dispatch. A request that expires mid-batch still runs its in-flight command (a Metal command can't be revoked) but its results are discarded — provisional writes never publish.</div>
+    </div>
+  </div>
+
+  <h2>Cache Subsystem <span class="tag">Cache = KvCache + KvPool + StateCache</span></h2>
+
+  <h3>KvPool — Physical Pages</h3>
+  <p>The sole owner of logical KV page references and backing residency. Policy asks for pages; only the pool maps/unmaps Metal memory.</p>
+  <div class="kv-diagram">
+    <div class="kv-cell free"><div class="lbl">free unbacked</div>page 0</div>
+    <div class="kv-cell free"><div class="lbl">free unbacked</div>page 1</div>
+    <div class="kv-cell resident"><div class="lbl">free resident</div>page 2</div>
+    <div class="kv-cell prefix"><div class="lbl">prefix (pinned)</div>page 3</div>
+    <div class="kv-cell resident"><div class="lbl">active</div>page 4</div>
+    <div class="kv-cell resident"><div class="lbl">active</div>page 5</div>
+    <div class="kv-cell prefix"><div class="lbl">prefix</div>page 6</div>
+    <div class="kv-cell free"><div class="lbl">reclaimable extent</div>page 7</div>
+  </div>
+  <table>
+    <tr><th>Concept</th><th>Meaning</th></tr>
+    <tr><td><code>Extent</code></td><td>Contiguous run of pages in one Metal allocation. Free pages are handed out from the extent with the most free space first (<code>packingExtent_</code>), so a burst of allocations rescans extents only when it moves into a new one.</td></tr>
+    <tr><td><code>FreeClass</code></td><td>Each page is <code>FreeUnbacked</code> (no Metal memory), <code>FreeResident</code> (mapped, cheap to reuse), or in use. Free lists are intrusive linked lists (<code>previousFree</code>/<code>nextFree</code>).</td></tr>
+    <tr><td><code>Residency</code></td><td><code>Backing::ensureResident(page)</code> maps Metal memory on demand; <code>releaseBackingForPage()</code> is <b>asynchronous and paced</b> — while a previous unmap is still tearing down, the next empty extent stays resident instead of queueing more unmap work.</td></tr>
+    <tr><td><code>Acquisition</code></td><td><code>KvPageAcquisition</code> returns pages + failure class: <code>LogicalCapacity</code> (page index space) vs <code>PhysicalCapacity</code> (Metal memory) + the underlying <code>metal::AllocationFailure</code> (EngineBudget / HostPressure / DriverRejected).</td></tr>
+  </table>
+
+  <h3>KvCache — Content-Addressed Block Graph</h3>
+  <p>Blocks are keyed by <code>(parentBlock, indexHash, tokens, images)</code> — a hash-filtered, equality-verified prefix tree over whole KV pages. One process = one <code>CacheNamespace</code> (SHA-256 of the loaded model + build + Q8 layout), so blocks never mix models.</p>
+  <div class="grid c2">
+    <div class="box b-engine">
+      <div class="name"><span class="dot" style="background:var(--engine)"></span>Lookup</div>
+      <div class="desc">Walks the prompt page-by-page from the root. Returns the longest cached prefix (<code>kvBoundary</code>) and, if a <code>StateCache</code> lease is attached to the block at that depth, the recurrent state too (<code>resumeBoundary</code>). The junction between the two is where a "lazy junction" materialization may be needed.</div>
+    </div>
+    <div class="box b-engine">
+      <div class="name"><span class="dot" style="background:var(--engine)"></span>Eviction</div>
+      <div class="desc">An <code>EvictionOrder</code> set ordered by recency (via <code>CacheRecency</code>). Blocks with children are never evicted (their descendants reference them). Eviction releases the physical page back to the pool but keeps the block's logical identity for future re-residency.</div>
+    </div>
+  </div>
+
+  <h3>StateCache — Recurrent State Leases</h3>
+  <div class="box b-engine">
+    <div class="name"><span class="dot" style="background:var(--engine)"></span>Atomic target+draft state</div>
+    <div class="desc">Attaches one immutable <b>target-recurrent + draft-context</b> state pair to a complete target-KV block; the pair is restored atomically. This is what makes resume cheap: a request that finds a cached prefix with an attached state skips re-prefilling <i>and</i> re-warming the linear-attention state. Evicted states park their buffers in the model's pool; a pressure pass returns that memory to the host.</div>
+  </div>
+
+  <h2>Memory Governance</h2>
+  <div class="grid c2">
+    <div class="box b-engine">
+      <div class="name"><span class="dot" style="background:var(--engine)"></span>MemoryGovernor — the ledger</div>
+      <div class="desc">The sole physical-memory admission ledger. It <b>does not allocate, evict, or schedule</b> — it only hands out short-lived byte <code>Reservation</code>s (RAII: commit or release on scope exit) to callers about to commit a placement heap. Keeps policy out of <code>MetalBackend</code> and makes every growth transactional. Tracks <code>reservedBytes_</code>, <code>deniedReservations_</code>, and effective pressure.</div>
+    </div>
+    <div class="box b-engine">
+      <div class="name"><span class="dot" style="background:var(--engine)"></span>Pressure policy</div>
+      <div class="desc">Host available memory = physical − used pages, crediting pageable file-backed and purgeable pages. Three levels: <b>Normal</b> → <b>Warning</b> (growth stops within the reserve margin; paced cache-shedding passes) → <b>Critical</b> (drop every evictable thing). <code>MemoryPressurePolicy::update()</code> emits bounded <code>MemoryReclaimDirective</code>s separated by a telemetry settling interval — new pressure is never offset by bytes reclaimed earlier in the same episode.</div>
+    </div>
+  </div>
+
+  <h3>Reclaim Cascade <span class="tag">Engine::reclaimMemory(directive)</span></h3>
+  <div class="steps">
+    <div class="step">
+      <div class="head"><span class="title">1 · Model idle state</span><span class="fn">model_.reclaimIdleState()</span></div>
+      <div class="body">Evicted requests' state cells return their buffers to the model's buffer pool. Loops until the model reports nothing more idle.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">2 · Cache eviction</span><span class="fn">cache_.reclaimCache(remaining, evictAllUnpinnedPrefixes)</span></div>
+      <div class="body">Evicts KV blocks in recency order until the directive's <code>targetBytes</code> is met. Critical pressure also evicts unpinned prefixes. Even a zero-byte directive releases completely empty extents.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">3 · Return to host</span><span class="fn">model_.reclaimIdleState() again</span></div>
+      <div class="body">Evicted states parked in the model pool are returned to the host <i>now</i> rather than kept warm. Then <code>signalResourceProgress()</code> bumps <code>resourceEpoch_</code> so waiting requests retry immediately instead of their backoff timer.</div>
+    </div>
+  </div>
+
+  <h2>Apply & Finish <span class="tag">Engine::apply(plan, results)</span></h2>
+  <div class="steps">
+    <div class="step">
+      <div class="head"><span class="title">Validate results</span><span class="fn">apply()</span></div>
+      <div class="body">Result count must match plan width; each <code>result.requestId</code> must match its plan item in order. A request that failed mid-command (cancel/deadline) still gets a result slot, but its provisional writes are discarded — no cache publication, no token emission.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">Publish state boundaries</span><span class="fn">publishReachedStateBoundaries()</span></div>
+      <div class="body">As tokens cross armed boundaries (checkpoint / replay / junction), the engine publishes the new KV block + state into the cache. Deduplication: a boundary already published by a peer request is a no-op (<code>deduplicatedStatePublications</code> counter). Recycled publications (after reclaiming a cached state) are counted separately.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">Advance phases</span><span class="fn">scheduler_.complete(...)</span></div>
+      <div class="body">Prefill → Decode (or terminal if the prompt ended on a stop token). Decode → Decode, or WaitingMask (model requested a mask), or terminal (stop token / max tokens). Emits <code>Tokens</code> events to the <code>EngineEventSink</code> → protocol frames → pipe → Python → SSE.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">Finish & release</span><span class="fn">finish() → release()</span></div>
+      <div class="body">Terminal: emit <code>Done</code>/<code>Error</code>/<code>CapacityExhausted</code>, release the state cell, release KV page references (blocks stay in the cache graph for reuse), remove from <code>requests_</code>. <code>sweepTerminal()</code> does the map removal on the next tick.</div>
+    </div>
+  </div>
+
+  <h2>Startup: Bootstrap Stages</h2>
+  <div class="steps">
+    <div class="step"><div class="head"><span class="title">ResourceAssembly</span><span class="fn">RuntimeResources</span></div>
+      <div class="body">Device query → MetalBackend → MemoryGovernor (limit, host reserve, streamable-weights budget) → MemoryPlan (weights + KV pool + state + scratch must fit).</div></div>
+    <div class="step"><div class="head"><span class="title">ModelCreation</span><span class="fn">ModelFactory</span></div>
+      <div class="body">Load the <code>ModelPackage</code> (target + vision + draft weights), create the <code>RuntimeModel</code>.</div></div>
+    <div class="step"><div class="head"><span class="title">MaximumPrefill → DecodeWarmup → DraftVerifyCommit → CompositeStateRestore</span><span class="fn">model warmup</span></div>
+      <div class="body">Real GPU warmup at maximum shapes: largest prefill, widest decode batch, draft-verify-commit, composite state restore. Caches Metal pipelines and allocates scratch at worst case so no late allocation failures at runtime.</div></div>
+    <div class="step"><div class="head"><span class="title">MemoryAudit</span><span class="fn">MemoryAudit</span></div>
+      <div class="body">Compares <b>actual</b> post-warmup memory against the plan. On failure the full <code>BudgetValidationStatus</code> JSON is reported instead of a partial instance.</div></div>
+    <div class="step"><div class="head"><span class="title">AnnounceReady → Ready</span><span class="fn">ReadyEvent</span></div>
+      <div class="body">Emits the binary <code>Ready</code> frame. <b>No partially warmed instance escapes <code>start()</code></b> — the Python side only accepts the engine after this frame.</div></div>
+  </div>
+
+  <h2>Process Plumbing</h2>
+  <div class="grid c2">
+    <div class="box b-protocol">
+      <div class="name"><span class="dot" style="background:var(--protocol)"></span>FdTransport</div>
+      <div class="desc">POSIX pipe, nonblocking only while <code>run()</code> is active. Each iteration drains <b>all</b> already-available frames before advancing the backend — so mask responses can arrive while the target-forward command is in flight. A control-wake fd lets paced work (one KV extent release at a time) continue without a new notification. <code>requestShutdown()</code> is async-signal-safe. Exit codes: 0 clean EOF, 64 protocol, 70 engine, 74 IO.</div>
+    </div>
+    <div class="box b-protocol">
+      <div class="name"><span class="dot" style="background:var(--protocol)"></span>NativeRuntime</div>
+      <div class="desc">Translates protocol messages at the Engine boundary. Tracks per-request telemetry (arrived / started / first-token / last-token / emitted count). <code>holdingRequests</code> callback tells <code>main.mm</code> to suppress Mac idle sleep between requests. Owns the <code>EngineEventSink</code> → frame emission.</div>
+    </div>
+  </div>
+
+  <div class="note">
+    <b>Dependency rule:</b> the engine never names a concrete model. It depends only on <code>model::Model</code> (begin / prefillAsync / decodeAsync / suspend / resume / restore / reclaimIdleState / checkHealth) and <code>ops::</code> types. Scheduling and memory policy work for any model that implements the interface.
+  </div>
+
+  <a class="back" href="index.html">← All Components</a>
+</div>
+</body>
+</html>

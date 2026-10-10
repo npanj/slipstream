@@ -185,6 +185,12 @@ struct QwenTargetGeometry final {
   uint32_t pleEndToken = 0;
   // Key/value layers past the trunk's attention layers (the MTP head's).
   uint32_t extraKvLayers = 0;
+  // Captured residual width feeding the draft context prefill; zero for
+  // models without capture layers.
+  uint32_t capturedHiddenSize = 0;
+  // Target layers whose residuals feed the draft context; empty for models
+  // without a draft model.
+  std::array<uint32_t, 5> captureLayers{};
 
   [[nodiscard]] constexpr bool hasPerLayerEmbedding() const noexcept {
     return pleEmbeddingSize != 0;
@@ -235,6 +241,12 @@ struct QwenTargetPleBuffers final {
   metal::MetalBuffer normalized; // bf16 (history + rows) x width, per sequence
 };
 
+struct QwenTargetPrefillCapture final {
+  uint32_t sourceStart = 0;
+  uint32_t destinationStart = 0;
+  uint32_t rows = 0;
+};
+
 struct QwenTargetPrefillSequence final {
   uint32_t rowBegin = 0;
   uint32_t rows = 0;
@@ -243,6 +255,10 @@ struct QwenTargetPrefillSequence final {
   uint64_t kvOffset = 0;
   kv::Q8ChunkedPrefillParams q8;
   metal::MetalBuffer pageTable;
+  // Draft context captures into the shared Captured scratch; empty unless
+  // the runtime planned draft captures for this sequence.
+  std::array<QwenTargetPrefillCapture, 2> captures{};
+  uint32_t captureCount = 0;
   std::span<const metal::MetalBuffer> convolutionIn;
   std::span<const metal::MetalBuffer> convolutionOut;
   std::span<const metal::MetalBuffer> recurrentIn;
@@ -275,6 +291,9 @@ struct QwenTargetPrefillBuffers final {
   metal::MetalBuffer attentionOutput;
   metal::MetalBuffer projectionSums;
   metal::MetalBuffer downProjectionSums;
+  // Captured residuals feeding the draft context prefill; empty unless the
+  // runtime planned draft captures.
+  metal::MetalBuffer captured;
   metal::MetalBuffer ropeCos;
   metal::MetalBuffer ropeSin;
   metal::MetalBuffer chunkKeys;
@@ -335,6 +354,9 @@ struct QwenTargetVerifyBuffers final {
   // *mtpProposedOut) instead of drafting again.
   bool mtpDraftOnly = false;
   bool mtpDrafted = false;
+  // Captured residuals feeding the draft context commit; empty unless the
+  // package ships a trained draft model.
+  metal::MetalBuffer capturedTargetHidden;
   // The draft's distribution per proposal as the acceptance reads it: 16
   // candidate ids and their probabilities.
   metal::MetalBuffer proposalCandidates;
@@ -454,6 +476,9 @@ public:
   void addStateCommit(metal::CommandGraph &graph,
                       QwenTargetCommitBuffers buffers, uint32_t lanes) const;
   [[nodiscard]] CapturedPrefillLayers capturedPrefillLayers() const;
+  // Borrowed by the DFlash draft for its vocabulary logits; Q4 for Q4 heads,
+  // Q8 for 8-bit heads.
+  [[nodiscard]] ops::VocabularyProjection vocabularyProjection() const;
 
 private:
   using WeightView =

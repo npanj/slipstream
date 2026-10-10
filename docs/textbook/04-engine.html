@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>04 · The Engine — Slipstream Textbook</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<div class="wrap">
+  <div class="navbar">
+    <a href="03-protocol.html">← Wire Protocol</a>
+    <a href="05-model-runtime.html">Next: Model Runtime →</a>
+  </div>
+
+  <h1>The Engine (C++)</h1>
+  <p class="subtitle">Chapter 04 · Scheduling and memory policy. It never names a concrete model.</p>
+
+  <h2>File Map</h2>
+  <div class="tree">runtime/engine/
+├── <span class="f">Engine.cpp / .hpp</span>          <span class="n">1056 lines</span>   Request admission, submit/cancel
+├── <span class="f">Scheduler.cpp / .hpp</span>              Phase FSM, batch packing
+├── <span class="f">Cache.cpp / .hpp</span>                  Content-addressed KV + state cache
+├── <span class="f">KvCache.cpp / .hpp</span>                KV page graph
+├── <span class="f">KvPool.cpp / .hpp</span>                 Physical page pool + residency
+├── <span class="f">StateCache.cpp / .hpp</span>             Recurrent-state cache
+├── <span class="f">MemoryPlan.cpp / .hpp</span>             Memory budget planning
+├── <span class="f">MemoryGovernor.cpp / .hpp</span>         Host pressure, reclaim directives
+├── <span class="f">Protocol.cpp / .hpp</span>               Binary frame codec (C++ side)
+├── <span class="f">FdTransport.cpp / .hpp</span>            Pipe read/write loop
+├── <span class="f">Bootstrap.cpp / .hpp</span>              Startup stages
+├── <span class="f">RuntimeResources.cpp / .hpp</span>       Assembly point (load → plan → warm)
+├── <span class="f">NativeRuntime.cpp / .hpp</span>          Process management
+├── <span class="f">Status.cpp / .hpp</span>                 Status JSON reporting
+├── <span class="f">Types.cpp / .hpp</span>                  Shared types
+├── <span class="f">Checked.cpp / .hpp</span>                Checked arithmetic helpers
+├── <span class="f">Json.cpp / .hpp</span>                   JSON helpers
+└── <span class="f">CacheRecency.cpp / .hpp</span>           LRU / recency tracking</div>
+
+  <h2>The Scheduler: Phase State Machine</h2>
+  <p>Every request walks through a fixed set of phases (<code>enum class Phase</code>):</p>
+  <div class="flow">
+    <div class="box b-engine"><div class="name">Queued</div><div class="desc">← submit()</div></div>
+    <div class="arrow">↓</div>
+    <div class="box b-engine"><div class="name">WaitingResources</div><div class="desc">← memory governor says "not yet"</div></div>
+    <div class="arrow">↓ <span class="label">pages + state slot acquired</span></div>
+    <div class="box b-engine"><div class="name">Prefill</div><div class="desc">prompt tokens processed in chunks (prefillChunkTokens rows per command)</div></div>
+    <div class="arrow">↓</div>
+    <div class="box b-engine"><div class="name">Decode</div><div class="desc">the main loop (draft → verify → accept) · up to maxNewTokens or stop token</div></div>
+    <div class="arrow">↓</div>
+    <div class="grid c2">
+      <div class="box b-engine"><div class="name">WaitingMask</div><div class="desc">tool call → mask response from Python → resumes Decode</div></div>
+      <div class="box b-engine"><div class="name">Completed</div><div class="desc">stop token / max tokens</div></div>
+    </div>
+    <div class="arrow">↓</div>
+    <div class="box b-engine"><div class="name">Terminal</div><div class="desc">Completed | Cancelled | Failed</div></div>
+  </div>
+
+  <h2>Batch Packing</h2>
+  <div class="grid c2">
+    <div class="panel accent-engine">
+      <b>Prefill</b>
+      <ul style="margin-top:8px">
+        <li>Packs the <b>shortest</b> remaining sequences first into an actual-row budget</li>
+        <li>A bound on how often later arrivals may overtake a lane</li>
+        <li>Rows per command = <code>prefillChunkTokens</code> (package-chosen, ≤ built max)</li>
+      </ul>
+    </div>
+    <div class="panel accent-engine">
+      <b>Decode</b>
+      <ul style="margin-top:8px">
+        <li>Dispatches every ready lane immediately</li>
+        <li>Only four real shapes: <code>M8 / M16 / M24 / M32</code></li>
+        <li><code>maximumBatchWidth = 4</code> lanes</li>
+        <li>Each lane = one request's decode step</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>The Cache: Three Layers</h2>
+  <div class="flow">
+    <div class="box b-engine">
+      <div class="name">Cache <span class="path">(facade)</span></div>
+      <div class="desc">Owns active Q8 page leases, the content-addressed KV graph, and cached composite states. Physical recurrent-state cells remain model-owned.</div>
+    </div>
+    <div class="arrow">↓</div>
+    <div class="grid c3">
+      <div class="box b-engine">
+        <div class="name">KvPool</div>
+        <div class="desc">Sole owner of logical KV page references + residency. Free resident pages handed out from the extent with the most free space (best-fit).</div>
+        <div class="chips" style="margin-top:8px">
+          <span class="chip">pagesTotal</span><span class="chip">pagesFree</span><span class="chip">pagesActive</span>
+          <span class="chip">pagesPrefix</span><span class="chip">pagesResident</span><span class="chip">reclaimableExtents</span>
+        </div>
+      </div>
+      <div class="box b-engine">
+        <div class="name">KvCache</div>
+        <div class="desc">Content-addressed KV page graph. Each page keyed by (layer, token_range, content_hash). Prefix reuse: a new request with the same prefix reuses the same physical pages (no recompute).</div>
+        <div class="chips" style="margin-top:8px">
+          <span class="chip">prefillCheckpointTokens=4096</span>
+        </div>
+      </div>
+      <div class="box b-engine">
+        <div class="name">StateCache</div>
+        <div class="desc">Caches composite recurrent states (GDN cells, etc.). <code>CompositeStateLease</code>: move-only handle to a cached state at a boundary. A suspended request restores its state instead of re-prefilling.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <b>CacheLookup</b>
+<pre class="code">struct CacheLookup {
+  uint32_t  kvBoundary;   // tokens covered by cached KV pages
+  optional&lt;CompositeStateLease&gt; state;
+
+  resumeBoundary()  = state ? state-&gt;boundary() : 0;
+  junctionBoundary() = kvBoundary &gt; resumeBoundary() ? kvBoundary : 0;
+};</pre>
+  </div>
+
+  <h2>Memory Plan &amp; Governor</h2>
+  <div class="grid c2">
+    <div class="panel accent-engine">
+      <b>MemoryPlan</b>
+      <p style="color:var(--muted);font-size:13px;margin-top:8px">Input: <code>ModelMemoryFootprint</code> from the loaded model.</p>
+      <div class="chips">
+        <span class="chip">targetWeightsBytes</span><span class="chip">activeStateCellBytes</span>
+        <span class="chip">sharedPrefillBytes</span><span class="chip">sharedDecodeBytes</span>
+        <span class="chip">pipelineReserveBytes</span><span class="chip">runtimeOverheadReserveBytes</span>
+        <span class="chip">streamableWeightBytes</span><span class="chip">streamCacheBytes</span>
+        <span class="chip">visionWeightsBytes</span><span class="chip">draftWeightsBytes</span>
+      </div>
+      <p style="color:var(--muted);font-size:13px;margin-top:8px">Output: a budget the governor enforces. <code>fixedRuntimeBytes</code> = weights + state + pipeline + overhead; remainder is the KV budget. Refuses to start if budget &lt; required.</p>
+    </div>
+    <div class="panel accent-engine">
+      <b>MemoryGovernor</b>
+      <p style="color:var(--muted);font-size:13px;margin-top:8px">Sole physical-memory admission ledger. Does <b>not</b> allocate, evict, or schedule; gives a short-lived "you may use N bytes" permit.</p>
+      <ul style="margin-top:8px">
+        <li><b>Pressure:</b> Normal → Warning → Critical</li>
+        <li><b>Warning:</b> available &lt; reserve + margin → sheds cache in paced passes</li>
+        <li><b>Critical:</b> available &lt; reserve/2, or OS critical → drops every evictable entry</li>
+        <li><b>Hysteresis:</b> growth stops at reserve+margin; recovery needs the <i>larger</i> margin</li>
+        <li>Bounded shrink passes separated by a telemetry settling interval</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="note">
+    <b>EngineConfig knobs:</b> <code>maxContext</code>, <code>vocabularySize</code>, <code>prefillCheckpointTokens</code> (4096), <code>maxImagePatches</code>, <code>prefillChunkTokens</code>, <code>resourceWaitTimeoutMilliseconds</code> (30000). Live host pressure is supplied by the runtime governor and queried only on failed allocation, never on the hot path.
+  </div>
+
+  <div class="footer">Slipstream Visual Textbook · Chapter 04</div>
+</div>
+</body>
+</html>

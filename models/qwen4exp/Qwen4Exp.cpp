@@ -271,7 +271,21 @@ Qwen4ExpCachePlan planQwen4ExpExpertCache(const Qwen4ExpLayout &layout,
   size_t length = sizeof(physical);
   (void)sysctlbyname("hw.memsize", &physical, &length, nullptr, 0);
   const double physicalGiB = double(physical) / double(1ULL << 30);
-  double budgetGiB = std::max(8.0, physicalGiB - 28.0);
+  // Default reserve: 34 GiB reserved on a 64 GB machine leaves 30.0 GiB.
+  // The Metal recommended working set hard budget on a 64 GB Mac is 52.02 GiB.
+  // Fixed runtime with a 30.0 GiB cache is ~48.0 GiB, fitting safely under 52.02 GiB.
+  // Machines with >=96 GB RAM (physicalGiB >= 90.0) can safely scale higher.
+  double budgetGiB = std::max(8.0, physicalGiB - 34.0);
+  if (physicalGiB >= 90.0) {
+    const uint64_t avail = hostAvailableBytes();
+    if (avail > 0) {
+      const double availGiB = double(avail) / double(1ULL << 30);
+      if (availGiB > 60.0) {
+        budgetGiB = std::min(physicalGiB - 34.0, 60.0);
+      }
+    }
+  }
+
   if (const char *envGiB = getenv("SPLASH_EXPERT_CACHE_GIB"))
     budgetGiB = std::max(1.0, std::atof(envGiB));
   // The prompt staging buffer comes out of the same budget.

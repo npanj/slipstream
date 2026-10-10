@@ -15,8 +15,10 @@ from pathlib import Path
 from jinja2 import TemplateError
 
 if __package__:
+    from . import images as image_input
     from . import protocol as wire
     from .api_shapes import (
+        IMAGE_PAD_TOKEN,
         canonical_responses_input,
         normalize_messages,
         responses_to_chat_body,
@@ -36,8 +38,10 @@ if __package__:
         tool_grammar,
     )
 else:
+    import images as image_input
     import protocol as wire
     from api_shapes import (
+        IMAGE_PAD_TOKEN,
         canonical_responses_input,
         normalize_messages,
         responses_to_chat_body,
@@ -175,6 +179,8 @@ class Prompt:
 class RenderedPrompt:
     text: str
     tokens: list[int]
+    images: list
+    image_positions: list[int]
     thinking: bool
 
 
@@ -189,7 +195,9 @@ class Frontend:
         request_timeout,
         preparation_capacity,
         constraint_factory=None,
+        max_image_pixels=image_input.MAX_PIXELS,
         thinking_codec=None,
+        has_vision=None,
     ):
         if not isinstance(preparation_capacity, int) or preparation_capacity <= 0:
             raise ValueError("frontend preparation capacity must be positive")
@@ -200,6 +208,16 @@ class Frontend:
         self.default_max_new = default_max_new
         self.request_timeout = request_timeout
         self.constraint_factory = constraint_factory
+        self.max_image_pixels = max_image_pixels
+        self.images = image_input.ImageCache()
+        if has_vision is not None:
+            self.has_vision = bool(has_vision)
+        else:
+            try:
+                root = Path(self.model)
+                self.has_vision = (root / "vision" / "model.bin").is_file() or (root / "prepared" / "vision" / "model.bin").is_file()
+            except Exception:
+                self.has_vision = False
         self.ids = count(1)
         self.preparation_capacity = preparation_capacity
         self.preparation_slots = threading.BoundedSemaphore(preparation_capacity)
@@ -222,7 +240,144 @@ class Frontend:
         if self.constraint_factory is not None:
             status["grammar_cache"] = self.constraint_factory.stats()
         status["response_store"] = self.response_store.stats()
+        status["image_cache"] = self.images.stats()
         return status
+
+    def _prepare_images(self, messages, *, check_context=True):
+        """Prepared images in template render order: content parts in message
+        order, images in document order."""
+        parts = [
+            part
+            for message in messages
+            if isinstance(message.get("content"), list)
+            for part in message["content"]
+            if part.get("type") == "image_url"
+        ]
+        if parts and not self.has_vision:
+            raise APIError(400, "image input is not supported: this model reads text only")
+        limit = wire.ProtocolLimits().max_image_spans
+        if len(parts) > limit:
+            raise APIError(400, f"requests support at most {limit} images")
+        prepared = self.images.request_batch()
+        tokens = pixel_bytes = 0
+        for part in parts:
+            try:
+                payload = image_input.decode_data_url(part["image_url"]["url"])
+                image = self.images.prepare(payload, self.max_image_pixels)
+                tokens += image.tokens
+                pixel_bytes += len(image.pixels)
+                self._check_image_request_size(
+                    tokens,
+                    len(prepared) + 1,
+                    pixel_bytes,
+                    check_context=check_context,
+                    image_tokens_only=True,
+                )
+                prepared.append(image)
+            except image_input.ImageCapacityError as error:
+                raise APIError(503, str(error), "frontend_overloaded") from error
+            except image_input.ImageError as error:
+                raise APIError(400, str(error)) from error
+        return prepared
+
+    def _check_image_request_size(
+        self,
+        tokens,
+        image_count,
+        pixel_bytes,
+        *,
+        check_context=True,
+        image_tokens_only=False,
+    ):
+        if check_context and tokens >= self.max_context:
+            raise ContextLengthError(
+                tokens, self.max_context, image_tokens_only=image_tokens_only
+            )
+        frame_bytes = (
+            wire.REQUEST_FIXED_BYTES
+            + 4 * tokens
+            + wire.IMAGE_SPAN_BYTES * image_count
+            + pixel_bytes
+        )
+        if frame_bytes > wire.ABSOLUTE_MAX_FRAME_PAYLOAD_BYTES:
+            raise APIError(400, "images exceed the request size limit")
+
+    def _render_image_tokens(self, messages, template):
+        """Track placeholders emitted by the template, not quoted in input text.
+
+        A temporary render marker is removed before tokenization, so the pinned
+        template's final text and token IDs remain unchanged. Token offsets tie
+        each real image to its placeholder even when a coding agent has read
+        documentation or source containing literal vision tokens.
+        """
+        source = self.tokenizer.get_chat_template(tools=template.get("tools"))
+        marker = f"__slipstream_image_{secrets.token_hex(16)}__"
+        rendered = self._apply_chat_template(
+            messages,
+            {
+                **template,
+                "tokenize": False,
+                "chat_template": source.replace(IMAGE_PAD_TOKEN, marker),
+            },
+        )
+        parts = rendered.split(marker)
+        image_offsets = set()
+        offset = 0
+        for part in parts[:-1]:
+            offset += len(part)
+            image_offsets.add((offset, offset + len(IMAGE_PAD_TOKEN)))
+            offset += len(IMAGE_PAD_TOKEN)
+        rendered = IMAGE_PAD_TOKEN.join(parts)
+        encoded = self.tokenizer(
+            rendered,
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+        )
+        positions = [
+            index
+            for index, span in enumerate(encoded["offset_mapping"])
+            if tuple(span) in image_offsets
+        ]
+        return list(encoded["input_ids"]), positions, rendered
+
+    def _image_token_count(self, prompt_tokens, prepared, positions):
+        pad_id = self.tokenizer.convert_tokens_to_ids(IMAGE_PAD_TOKEN)
+        if len(positions) != len(prepared) or any(
+            prompt_tokens[position] != pad_id for position in positions
+        ):
+            raise APIError(400, "image count does not match the rendered template")
+        return len(prompt_tokens) + sum(image.tokens - 1 for image in prepared)
+
+    def _expand_image_pads(self, prompt_tokens, prepared, positions):
+        """Widens the template's single placeholder per image to the image's
+        merged token count and returns the spans the engine injects into."""
+        token_count = self._image_token_count(prompt_tokens, prepared, positions)
+        # Validate lengths before expanding tokens or copying repeated pixels.
+        # HTTP body and image-cache limits do not bound decoded request size.
+        self._check_image_request_size(
+            token_count,
+            len(prepared),
+            sum(len(image.pixels) for image in prepared),
+        )
+        expanded, spans, cursor = [], [], 0
+        pad_id = self.tokenizer.convert_tokens_to_ids(IMAGE_PAD_TOKEN)
+        for position, image in zip(positions, prepared):
+            expanded.extend(prompt_tokens[cursor:position])
+            spans.append(
+                wire.ImageSpan(
+                    len(expanded),
+                    image.tokens,
+                    image.grid_height,
+                    image.grid_width,
+                    image.digest_lo,
+                    image.digest_hi,
+                )
+            )
+            expanded.extend([pad_id] * image.tokens)
+            cursor = position + 1
+        expanded.extend(prompt_tokens[cursor:])
+        pixels = b"".join(image.pixels for image in prepared)
+        return expanded, tuple(spans), pixels
 
     def request_deadline(self, body, started_at=None):
         if started_at is None:
@@ -248,7 +403,9 @@ class Frontend:
         with self._preparation(deadline):
             prompt = self._prepare_prompt(body, deadline=deadline)
             rendered = self._render_prompt(prompt, deadline, check_context=False)
-            return len(rendered.tokens)
+            return self._image_token_count(
+                rendered.tokens, rendered.images, rendered.image_positions
+            )
 
     def tokenize(self, body, *, deadline=None):
         content = body.get("content")
@@ -317,8 +474,9 @@ class Frontend:
             self.preparation_slots.release()
 
     def _prepare_prompt(self, body, tool_namespaces=None, *, deadline=None):
-        if body.get("model", self.model) != self.model:
-            raise APIError(404, f"model {body['model']} not found", "model_not_found")
+        req_model = body.get("model")
+        if req_model and req_model not in (self.model, "default", "local"):
+            raise APIError(404, f"model {req_model} not found", "model_not_found")
         reasoning_effort = body.get("reasoning_effort")
         # Clients built for vLLM / llama.cpp (omp among them) switch thinking
         # with enable_thinking, top level or in chat_template_kwargs, and may put
@@ -416,9 +574,19 @@ class Frontend:
             template["preserve_thinking"] = prompt.preserve_thinking
         if prompt.tools:
             template["tools"] = prompt.tools
+        images = self._prepare_images(prompt.messages, check_context=check_context)
+        remaining_request_time(deadline)
+        if images and self.tokenizer.convert_tokens_to_ids(IMAGE_PAD_TOKEN) is None:
+            raise APIError(400, "the tokenizer does not define the image pad token")
+        positions = []
         try:
-            rendered = self._apply_chat_template(prompt.messages, template)
-            tokens = self.tokenizer(rendered, add_special_tokens=False)["input_ids"]
+            if images:
+                tokens, positions, rendered = self._render_image_tokens(
+                    prompt.messages, template
+                )
+            else:
+                rendered = self._apply_chat_template(prompt.messages, template)
+                tokens = self.tokenizer(rendered, add_special_tokens=False)["input_ids"]
         except APIError:
             raise
         except Exception as error:
@@ -447,7 +615,7 @@ class Frontend:
             raise APIError(
                 400, "chat template does not support the requested thinking mode"
             )
-        return RenderedPrompt(rendered, tokens, thinking)
+        return RenderedPrompt(rendered, tokens, images, positions, thinking)
 
     def _prepare(self, body, tool_namespaces, deadline, clamp_output_budget=False):
         nullable = {
@@ -527,7 +695,8 @@ class Frontend:
                 400, "stop cannot be combined with tools or structured output"
             )
         rendered = self._render_prompt(prompt, deadline)
-        prompt_tokens, thinking = rendered.tokens, rendered.thinking
+        prompt_tokens, prepared_images = rendered.tokens, rendered.images
+        image_positions, thinking = rendered.image_positions, rendered.thinking
         constraint = None
         remaining_request_time(deadline)
         if self.constraint_factory is not None:
@@ -546,6 +715,11 @@ class Frontend:
                 json.dumps(tools, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()[:8]
             tools_signature = (len(tools), digest)
+        image_spans, image_pixels = (), b""
+        if prepared_images:
+            prompt_tokens, image_spans, image_pixels = self._expand_image_pads(
+                prompt_tokens, prepared_images, image_positions
+            )
         remaining_request_time(deadline)
         if len(prompt_tokens) >= self.max_context:
             raise ContextLengthError(len(prompt_tokens), self.max_context)
@@ -579,6 +753,9 @@ class Frontend:
             or priority_name not in REQUEST_PRIORITIES
         ):
             raise APIError(400, "priority must be foreground, normal, or background")
+        session_id = body.get("session_id")
+        if session_id is not None and (not isinstance(session_id, str) or not session_id):
+            raise APIError(400, "session_id must be a non-empty string")
         request_id = next(self.ids)
         job = Job(
             request_id=request_id,
@@ -598,8 +775,12 @@ class Frontend:
             response_validator=response_validator,
             response_format=body.get("response_format"),
             constraint=constraint,
+            image_spans=image_spans,
+            image_pixels=image_pixels,
+            image_owner=prepared_images if prepared_images else None,
             public_id=secrets.token_hex(16),
             tools_signature=tools_signature,
+            session_id=session_id,
         )
         return job, thinking, bool(tools)
 

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import IntEnum, IntFlag
 from typing import TypeAlias
 
-PROTOCOL_VERSION = 6
+PROTOCOL_VERSION = 5
 FRAME_HEADER_BYTES = 24
 STATUS_SCHEMA_VERSION = 5
 # Largest top-k the native sampler keeps as candidates.
@@ -24,7 +24,8 @@ _MAGIC = b"SPLH"
 _HEADER = struct.Struct("<4sHHHHQI")
 # Replay can update the integer deadlines without decoding sampling floats.
 _REQUEST_HEAD = struct.Struct("<QBBBQQ")
-_REQUEST = struct.Struct(_REQUEST_HEAD.format + "IIffIQB")
+_REQUEST = struct.Struct(_REQUEST_HEAD.format + "IIIffIQB")
+_IMAGE_SPAN = struct.Struct("<IIIIQQ")
 _CANCEL = struct.Struct("<Q")
 _MASK_RESPONSE = struct.Struct("<QQI")
 _STATUS_REQUEST = struct.Struct("<Q")
@@ -40,12 +41,14 @@ _STATUS_JSON = struct.Struct("<QI")
 
 assert array.array("I").itemsize == 4 and sys.byteorder == "little"
 assert _HEADER.size == FRAME_HEADER_BYTES
-assert _REQUEST.size == 56
+assert _REQUEST.size == 60
+assert _IMAGE_SPAN.size == 32
 assert _START.size == 21
 assert _DONE.size == 41
 assert _ERROR.size == 18
 
 REQUEST_FIXED_BYTES = _REQUEST.size
+IMAGE_SPAN_BYTES = _IMAGE_SPAN.size
 
 
 class FrameType(IntEnum):
@@ -141,6 +144,8 @@ class ProtocolLimits:
     max_logical_output_tokens: int = 1 << 20
     max_token_batch: int = 4096
     max_simulation_tokens: int = 32
+    max_image_spans: int = 64
+    max_image_patches: int = 16384
     max_mask_words: int = 1 << 20
 
 
@@ -169,6 +174,25 @@ class SamplingParameters:
 
 
 @dataclass(slots=True, frozen=True)
+class ImageSpan:
+    """One image in the prompt: its placeholder token run, the patch grid of
+    the resized pixels, and a 128-bit digest of that content. Placeholder
+    token ids are identical for every image, so cache identity keys on spans.
+    """
+
+    offset: int
+    tokens: int
+    grid_height: int
+    grid_width: int
+    digest_lo: int
+    digest_hi: int
+
+    @property
+    def pixel_bytes(self) -> int:
+        return self.grid_height * 16 * self.grid_width * 16 * 3
+
+
+@dataclass(slots=True, frozen=True)
 class RequestFrame:
     request_id: int
     priority: RequestPriority
@@ -180,6 +204,10 @@ class RequestFrame:
     seed: int
     cohort: Cohort
     constraint: ConstraintMode
+    # Sorted, non-overlapping image spans and their resized uint8 RGB pixels
+    # concatenated in span order; both empty for text-only requests.
+    image_spans: tuple[ImageSpan, ...] = ()
+    image_pixels: bytes = b""
     return_progress: bool = False
 
 
@@ -413,6 +441,8 @@ def _limits_issue(limits: ProtocolLimits) -> ProtocolIssue | None:
             _u32(limits.max_token_batch, "max token batch"),
             _u32(limits.max_simulation_tokens, "max simulation tokens"),
             _u32(limits.max_mask_words, "max mask words"),
+            _u32(limits.max_image_spans, "max image spans"),
+            _u32(limits.max_image_patches, "max image patches"),
         )
     except (AttributeError, ValueError) as error:
         return _issue(
@@ -424,7 +454,7 @@ def _limits_issue(limits: ProtocolLimits) -> ProtocolIssue | None:
         return _issue(
             FailureClass.PROTOCOL_FATAL,
             IssueCode.LIMIT_EXCEEDED,
-            "maxFramePayloadBytes must be in [56, 256 MiB]",
+            "maxFramePayloadBytes must be in [60, 256 MiB]",
         )
     if max_status > max_frame - _STATUS_JSON.size:
         return _issue(
@@ -455,6 +485,7 @@ def _check_limits(limits: ProtocolLimits) -> None:
 def _payload_bounds(frame_type: FrameType, limits: ProtocolLimits) -> tuple[int, int]:
     match frame_type:
         case FrameType.REQUEST:
+            # Image pixels dominate prompt tokens; the frame limit is the bound.
             bounds = (_REQUEST.size, limits.max_frame_payload_bytes)
         case FrameType.CANCEL:
             bounds = (_CANCEL.size, _CANCEL.size)
@@ -541,6 +572,36 @@ def _unpack_prefix_words(payload: bytes, offset: int, count: int) -> tuple[int, 
     return tuple(words)
 
 
+def _image_spans_check(request: RequestFrame, prompt_tokens: int, limits) -> None:
+    previous_end = 0
+    pixel_bytes = 0
+    for span in request.image_spans:
+        offset = _u32(span.offset, "image span offset")
+        tokens = _u32(span.tokens, "image span tokens")
+        grid_height = _u32(span.grid_height, "image grid height")
+        grid_width = _u32(span.grid_width, "image grid width")
+        _u64(span.digest_lo, "image digest")
+        _u64(span.digest_hi, "image digest")
+        if (
+            grid_height < 2
+            or grid_width < 2
+            or grid_height % 2
+            or grid_width % 2
+            or grid_height * grid_width > limits.max_image_patches
+        ):
+            raise ValueError("image grid must be even-sided and within the patch limit")
+        if tokens != (grid_height // 2) * (grid_width // 2):
+            raise ValueError("image span tokens must equal the merged grid size")
+        if offset < previous_end or offset + tokens > prompt_tokens:
+            raise ValueError(
+                "image spans must be sorted, non-overlapping runs inside the prompt"
+            )
+        previous_end = offset + tokens
+        pixel_bytes += span.pixel_bytes
+    if len(_bytes(request.image_pixels, "image pixels")) != pixel_bytes:
+        raise ValueError("image pixels do not match the image grids")
+
+
 def _request_issue(
     request: RequestFrame, limits: ProtocolLimits
 ) -> ProtocolIssue | None:
@@ -588,10 +649,21 @@ def _request_issue(
             raise ValueError("logical max output token count exceeds its limit")
         if not prompt or len(prompt) > limits.max_prompt_tokens:
             raise ValueError("prompt token count exceeds its limit")
+        if len(request.image_spans) > limits.max_image_spans:
+            raise ValueError("image span count exceeds its limit")
     except ValueError as error:
         return _issue(
             FailureClass.REQUEST_ERROR,
             IssueCode.LIMIT_EXCEEDED,
+            str(error),
+            request_id,
+        )
+    try:
+        _image_spans_check(request, len(prompt), limits)
+    except ValueError as error:
+        return _issue(
+            FailureClass.REQUEST_ERROR,
+            IssueCode.INVALID_COUNT,
             str(error),
             request_id,
         )
@@ -954,21 +1026,37 @@ def _encode_message(
         prompt = _words(message.prompt_tokens, "prompt tokens")
         temperature = _float32(message.sampling.temperature, "temperature")
         top_p = _float32(message.sampling.top_p, "top_p")
-        payload = _REQUEST.pack(
-            message.request_id,
-            int(message.priority),
-            int(message.cohort),
-            int(message.constraint),
-            message.absolute_deadline_unix_micros,
-            message.remaining_deadline_micros,
-            message.logical_max_output_tokens,
-            len(prompt),
-            temperature,
-            top_p,
-            message.sampling.top_k,
-            message.seed,
-            message.return_progress,
-        ) + _pack_words(prompt)
+        payload = (
+            _REQUEST.pack(
+                message.request_id,
+                int(message.priority),
+                int(message.cohort),
+                int(message.constraint),
+                message.absolute_deadline_unix_micros,
+                message.remaining_deadline_micros,
+                message.logical_max_output_tokens,
+                len(prompt),
+                len(message.image_spans),
+                temperature,
+                top_p,
+                message.sampling.top_k,
+                message.seed,
+                message.return_progress,
+            )
+            + _pack_words(prompt)
+            + b"".join(
+                _IMAGE_SPAN.pack(
+                    span.offset,
+                    span.tokens,
+                    span.grid_height,
+                    span.grid_width,
+                    span.digest_lo,
+                    span.digest_hi,
+                )
+                for span in message.image_spans
+            )
+            + bytes(message.image_pixels)
+        )
         frame_type = FrameType.REQUEST
     elif isinstance(message, CancelFrame):
         _raise_issue(_cancel_issue(message))
@@ -1224,6 +1312,7 @@ def _decode_request(payload: bytes, limits: ProtocolLimits) -> RequestFrame:
         remaining_deadline,
         max_output,
         prompt_count,
+        image_span_count,
         temperature,
         top_p,
         top_k,
@@ -1244,10 +1333,23 @@ def _decode_request(payload: bytes, limits: ProtocolLimits) -> RequestFrame:
             "prompt token count exceeds its limit",
             request_id,
         )
+    if image_span_count > limits.max_image_spans:
+        _fail(
+            FailureClass.REQUEST_ERROR,
+            IssueCode.LIMIT_EXCEEDED,
+            "image span count exceeds its limit",
+            request_id,
+        )
     try:
         prompt = _unpack_prefix_words(payload, _REQUEST.size, prompt_count)
-        if len(payload) != _REQUEST.size + 4 * prompt_count:
-            raise ValueError("trailing request bytes")
+        cursor = _REQUEST.size + 4 * prompt_count
+        image_spans = []
+        for _ in range(image_span_count):
+            image_spans.append(ImageSpan(*_IMAGE_SPAN.unpack_from(payload, cursor)))
+            cursor += _IMAGE_SPAN.size
+        image_pixels = payload[cursor:]
+        if len(image_pixels) != sum(span.pixel_bytes for span in image_spans):
+            raise ValueError("image pixels")
     except (ValueError, struct.error):
         _fail(
             FailureClass.REQUEST_ERROR,
@@ -1284,6 +1386,8 @@ def _decode_request(payload: bytes, limits: ProtocolLimits) -> RequestFrame:
             FailureClass.REQUEST_ERROR,
             request_id,
         ),
+        tuple(image_spans),
+        bytes(image_pixels),
         bool(return_progress),
     )
     _raise_issue(_request_issue(request, limits))

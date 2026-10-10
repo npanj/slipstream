@@ -41,6 +41,30 @@ ModelPackage loadPackage(metal::MetalBackend &backend,
 
   std::vector<WeightFileRecord> records(result.targetFiles().begin(),
                                         result.targetFiles().end());
+  const bool isQwen38 =
+      std::holds_alternative<Qwen3_8Weights>(result.target) ||
+      std::holds_alternative<Qwen3_8Q8Weights>(result.target);
+  if (isQwen38 &&
+      std::filesystem::is_directory(root / "draft") &&
+      std::filesystem::is_regular_file(root / "draft/model.bin")) {
+    result.draft = loadDFlashDraftWeights(backend, root / "draft");
+    records.insert(records.end(), result.draft.files.begin(),
+                   result.draft.files.end());
+    // State geometry completes at load: the descriptor built during
+    // inspection knows the target layout only.
+    result.descriptor.stateLayout.draft = result.draft.layout.stateLayout();
+  }
+  if (std::filesystem::is_regular_file(root / "vision/model.bin")) {
+    // The tower is shared; only the language-space projection width varies
+    // with the text model (2560 for Flash-Next, 5120 for the 27B).
+    ops::VisionLayout visionLayout;
+    if (std::holds_alternative<Qwen4ExpWeights>(result.target)) {
+      visionLayout.outputHiddenSize = 2560;
+    }
+    result.vision = loadQwenVisionWeights(backend, root / "vision", visionLayout);
+    records.insert(records.end(), result.vision.files.begin(),
+                   result.vision.files.end());
+  }
   result.manifestFingerprintSha256 = weightManifestFingerprint(records);
   requireCompatibleModelPackage(result);
   return result;

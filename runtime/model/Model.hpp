@@ -2,6 +2,7 @@
 
 #include "metal/MetalBackend.hpp"
 #include "metal/abi/ExecutionGeometry.h"
+#include "ops/Vision.hpp"
 
 #include <array>
 #include <atomic>
@@ -37,12 +38,29 @@ struct SamplingParameters final {
   uint64_t seed = 0;
 };
 
+struct ImageSpan final {
+  uint32_t offset = 0;
+  uint32_t tokens = 0;
+  uint32_t gridHeight = 0;
+  uint32_t gridWidth = 0;
+  uint64_t digestLo = 0;
+  uint64_t digestHi = 0;
+
+  [[nodiscard]] uint32_t end() const noexcept { return offset + tokens; }
+  [[nodiscard]] uint64_t pixelBytes() const noexcept {
+    return ops::imagePixelBytes(gridHeight, gridWidth);
+  }
+  bool operator==(const ImageSpan &) const = default;
+};
+
 // Immutable view of the fields a model needs to activate a sequence.  Engine
 // priority and deadline policy deliberately do not cross this boundary.
 struct ModelRequest final {
   uint64_t id = 0;
   BatchCohort cohort = BatchCohort::Greedy;
   std::span<const uint32_t> prompt;
+  std::span<const struct ImageSpan> images;
+  std::span<const uint8_t> imagePixels;
   uint32_t maxNewTokens = 0;
   SamplingParameters sampling;
   ConstraintMode constraint = ConstraintMode::None;
@@ -99,6 +117,77 @@ struct ModelBatchItem final {
   std::span<const uint32_t> inputTokens{};
 };
 
+enum class DraftBoundaryPurpose : uint8_t { Active, Materialization };
+
+struct DraftCaptureSpan final {
+  uint32_t begin = 0;
+  uint32_t end = 0;
+  bool resetDraftState = false;
+};
+
+struct DraftBoundaryPlan final {
+  uint32_t boundary = 0;
+  DraftBoundaryPurpose purpose = DraftBoundaryPurpose::Active;
+  uint32_t captureBegin = 0;
+};
+
+struct DraftContextPlan final {
+  uint32_t replayBegin = 0;
+  uint32_t replayEnd = 0;
+  std::optional<uint32_t> restoredDraftBoundary;
+  std::vector<DraftCaptureSpan> captureSpans;
+  std::vector<DraftBoundaryPlan> boundaries;
+
+  uint64_t targetPrefillRows = 0;
+  uint64_t draftContextRowsActive = 0;
+  uint64_t draftContextRowsMaterialization = 0;
+  uint64_t draftContextRowsAvoided = 0;
+  uint64_t draftStateRestoreSkipped = 0;
+  uint64_t draftStateResets = 0;
+
+  [[nodiscard]] uint64_t draftContextRows() const noexcept {
+    return draftContextRowsActive + draftContextRowsMaterialization;
+  }
+  [[nodiscard]] std::span<const DraftCaptureSpan> captures() const noexcept {
+    return captureSpans;
+  }
+  [[nodiscard]] std::span<const DraftBoundaryPlan>
+  plannedBoundaries() const noexcept {
+    return boundaries;
+  }
+};
+
+struct DispatchDraftCaptureSpan final {
+  uint32_t absoluteBegin = 0;
+  uint32_t absoluteEnd = 0;
+  uint32_t compactDestinationRow = 0;
+  bool resetDraftState = false;
+  uint32_t activeRows = 0;
+  uint32_t materializationRows = 0;
+};
+
+struct DispatchDraftCapturePlan final {
+  std::array<DispatchDraftCaptureSpan, 2> values{};
+  uint32_t count = 0;
+
+  [[nodiscard]] uint32_t size() const noexcept { return count; }
+  [[nodiscard]] const DispatchDraftCaptureSpan &
+  operator[](uint32_t index) const {
+    return values.at(index);
+  }
+  [[nodiscard]] auto begin() const noexcept { return values.begin(); }
+  [[nodiscard]] auto end() const noexcept { return values.begin() + count; }
+};
+
+[[nodiscard]] DraftContextPlan
+planDraftContext(uint32_t replayBegin, uint32_t replayEnd,
+                 std::optional<uint32_t> restoredDraftBoundary,
+                 std::span<const uint32_t> materializationBoundaries);
+
+[[nodiscard]] DispatchDraftCapturePlan
+draftCaptureSpansForDispatch(const DraftContextPlan &plan,
+                             uint32_t dispatchBegin, uint32_t dispatchEnd);
+
 struct ModelStepResult final {
   uint64_t requestId = 0;
   uint32_t consumedPromptTokens = 0;
@@ -121,6 +210,36 @@ struct ModelMaskRequest final {
   uint64_t requestId = 0;
   std::vector<uint32_t> simulationTokens;
 };
+
+// Draft rows a proposer leaves empty carry this token. It is outside every
+// vocabulary, so it must never index a grammar-mask row.
+inline constexpr uint32_t kEmptyDraftToken = UINT32_MAX;
+
+// Counts the leading draft rows the grammar mask accepts, stopping at the
+// first row the grammar rejects, at a row the proposer left empty, or at a
+// row the mask does not contain. maskWords holds maskWordCount words laid
+// out as consecutive rows of maskWordsPerRow words; row 0 is the anchor and
+// draft k simulates against row 1 + k.
+[[nodiscard]] inline uint32_t
+countValidDrafts(const uint32_t *proposed, uint32_t maxDraftsToCheck,
+                 const uint32_t *maskWords, uint32_t maskWordCount,
+                 uint32_t maskWordsPerRow) noexcept {
+  uint32_t validDrafts = 0;
+  for (uint32_t k = 0; k < maxDraftsToCheck; ++k) {
+    const uint32_t tok = proposed[k];
+    if (tok == kEmptyDraftToken)
+      break;
+    const uint32_t maskRow = 1 + k;
+    if ((maskRow + 1) * maskWordsPerRow > maskWordCount)
+      break;
+    const uint32_t wordIdx = maskRow * maskWordsPerRow + (tok / 32);
+    const uint32_t bitIdx = tok % 32;
+    if ((maskWords[wordIdx] & (1U << bitIdx)) == 0)
+      break;
+    ++validDrafts;
+  }
+  return validDrafts;
+}
 
 class ModelBatchTicket {
 public:
@@ -238,6 +357,8 @@ struct ModelTelemetry final {
   uint64_t draftContextRowsAvoided = 0;
   uint64_t draftStateRestoreSkipped = 0;
   uint64_t draftStateResets = 0;
+  uint64_t imageEncodes = 0;
+  uint64_t imageEmbeddingReuses = 0;
   uint32_t lastDecodeWidth = 0;
   uint64_t lastDecodeFusedOperations = 0;
   uint64_t lastDecodeM16Dispatches = 0;
@@ -308,6 +429,9 @@ public:
   [[nodiscard]] virtual StateAdmission resume(const ModelRequest &request) = 0;
   virtual void restore(uint64_t requestId, uint32_t restoredPrefixLength,
                        std::shared_ptr<const CompositeState> state) = 0;
+  virtual void setDraftContextPlan(uint64_t /*requestId*/,
+                                   DraftContextPlan /*plan*/) {}
+  [[nodiscard]] virtual bool hasDraft() const noexcept { return false; }
   // Optional async wake hook; an immediately ready ticket need not call it.
   [[nodiscard]] virtual std::unique_ptr<ModelBatchTicket>
   submit(const BatchPlan &plan, std::span<const ModelBatchItem> items,

@@ -916,6 +916,16 @@ class ServerTest(unittest.TestCase):
         self.assertEqual((status, json.loads(payload)), (200, {"status": "ok"}))
         status, _, payload = harness.request("GET", "/ready")
         self.assertEqual((status, json.loads(payload)), (200, {"status": "ready"}))
+        status, _, payload = harness.request("GET", "/props")
+        props = json.loads(payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(props["model_alias"], "test-model")
+        self.assertIn("n_ctx", props["default_generation_settings"])
+        status, _, payload = harness.request("GET", "/slots")
+        slots = json.loads(payload)
+        self.assertEqual(status, 200)
+        self.assertIsInstance(slots, list)
+        self.assertEqual(slots[0]["id"], 0)
         status, _, payload = harness.request("GET", "/status")
         snapshot = json.loads(payload)
         self.assertEqual(status, 200)
@@ -1223,7 +1233,7 @@ class ServerTest(unittest.TestCase):
             ),
             (
                 [{"role": "user", "content": [{"type": "image_url", "image_url": 5}]}],
-                text_only,
+                "invalid image content part",
             ),
             (
                 [
@@ -4779,6 +4789,31 @@ class ServerTest(unittest.TestCase):
             len(request.prompt_tokens) + request.logical_max_output_tokens, 10
         )
         self.assertGreaterEqual(request.logical_max_output_tokens, 1)
+
+    def test_chat_completions_session_tracking(self):
+        runtime = FakeRuntime()
+        harness = self.harness(runtime)
+        body = self.body()
+        body["session_id"] = "agent-session-42"
+
+        # First turn: creates session and returns session_id in response
+        status, _, payload = harness.request("POST", "/v1/chat/completions", body)
+        data = json.loads(payload)
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data.get("session_id"), "agent-session-42")
+
+        session = harness.app.backend.get_session("agent-session-42")
+        self.assertIsNotNone(session)
+        self.assertEqual(session.turns_completed, 1)
+        self.assertGreater(len(session.active_tokens), 0)
+
+        # Invalid session_id is rejected with 400
+        bad_body = self.body()
+        bad_body["session_id"] = ""
+        status, _, payload = harness.request("POST", "/v1/chat/completions", bad_body)
+        bad_data = json.loads(payload)
+        self.assertEqual(status, 400)
+        self.assertIn("session_id", bad_data.get("error", {}).get("message", ""))
 
     def test_chat_completions_output_budget_clamped_when_enabled(self):
         runtime = FakeRuntime()

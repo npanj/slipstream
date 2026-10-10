@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Server — Slipstream Component Deep-Dive</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2128;
+    --border: #30363d; --text: #e6edf3; --muted: #8b949e;
+    --server: #58a6ff; --engine: #d2a8ff; --model: #7ee787;
+    --ops: #79c0ff; --metal: #ff7b72; --protocol: #e3b341;
+    --install: #ffa657; --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif;
+    padding: 40px 24px 80px; line-height: 1.6; }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 28px; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 32px; font-size: 15px; }
+  h2 { font-size: 20px; margin: 40px 0 16px; }
+  h2 .tag { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 8px; }
+  h3 { font-size: 16px; margin: 24px 0 10px; }
+  p { margin: 10px 0; font-size: 14.5px; }
+  code { background: var(--panel2); padding: 2px 6px; border-radius: 4px; font-size: 12.5px;
+    font-family: "SF Mono", Menlo, monospace; }
+  .back { display: inline-block; margin-bottom: 24px; color: var(--muted); text-decoration: none; font-size: 14px; }
+  .back:hover { color: var(--text); }
+  .grid { display: grid; gap: 16px; }
+  .grid.c2 { grid-template-columns: 1fr 1fr; }
+  .grid.c3 { grid-template-columns: 1fr 1fr 1fr; }
+  .box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; }
+  .box .name { font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .box .path { font-family: "SF Mono", Menlo, monospace; font-size: 11px; color: var(--muted); }
+  .box .desc { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .box.b-server { border-left: 4px solid var(--server); }
+  .box.b-engine { border-left: 4px solid var(--engine); }
+  .box.b-model { border-left: 4px solid var(--model); }
+  .box.b-protocol { border-left: 4px solid var(--protocol); }
+  .box.b-ops { border-left: 4px solid var(--ops); }
+  .box.b-metal { border-left: 4px solid var(--metal); }
+  .box.b-install { border-left: 4px solid var(--install); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .flow { display: flex; flex-direction: column; gap: 0; margin: 16px 0; }
+  .arrow { text-align: center; color: var(--muted); font-size: 13px; padding: 4px 0; }
+  .arrow .label { font-size: 11px; }
+  .tree { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 20px; font-family: "SF Mono", Menlo, monospace; font-size: 12.5px;
+    line-height: 1.8; overflow-x: auto; }
+  .tree .f { color: var(--server); }
+  .tree .n { color: var(--muted); }
+  .tree .c { color: var(--muted); font-style: italic; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+  .chip { display: inline-block; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 3px 10px; font-size: 11.5px; margin: 3px 4px 3px 0;
+    font-family: "SF Mono", Menlo, monospace; }
+  .note { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 18px; margin: 16px 0; font-size: 13px; color: var(--muted); }
+  .note b { color: var(--text); }
+  .steps { display: flex; flex-direction: column; gap: 0; margin: 16px 0; }
+  .step { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 16px; margin-bottom: 4px; }
+  .step .head { display: flex; justify-content: space-between; align-items: center; }
+  .step .title { font-weight: 700; font-size: 13.5px; }
+  .step .time { font-size: 11px; color: var(--muted); font-family: "SF Mono", Menlo, monospace; }
+  .step .body { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .step .body ul { margin: 6px 0 0 18px; }
+  .step .body li { margin: 3px 0; }
+  .step .body code { font-size: 11.5px; }
+  .phase { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px;
+    font-weight: 600; margin: 2px; }
+  .phase.queued { background: #1c2128; color: #8b949e; }
+  .phase.waiting { background: #2d1b69; color: #d2a8ff; }
+  .phase.prefill { background: #1a3a2a; color: #7ee787; }
+  .phase.decode { background: #1a2a3a; color: #58a6ff; }
+  .phase.mask { background: #3a2a1a; color: #ffa657; }
+  .phase.terminal { background: #2a1a1a; color: #ff7b72; }
+  .svg-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; margin: 16px 0; overflow-x: auto; }
+  .svg-wrap svg { width: 100%; height: auto; }
+  .navbar { display: flex; justify-content: space-between; margin-bottom: 24px; }
+  .navbar a { color: var(--muted); text-decoration: none; font-size: 13px; }
+  .navbar a:hover { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="navbar">
+    <a href="index.html">← Components</a>
+    <a href="engine.html">Next: Engine →</a>
+  </div>
+
+  <h1>The Server <span style="color:var(--server)">Python</span></h1>
+  <p class="subtitle">Component deep-dive · A single-process Python app: speak HTTP, shape the request, talk to the native engine over a pipe.</p>
+
+  <h2>File Map</h2>
+  <div class="tree">server/
+├── <span class="f">server.py</span>              <span class="n">~1794 lines</span>   <span class="c">HTTP handler, SSE streaming, routing, main()</span>
+├── <span class="f">frontend.py</span>            <span class="c">API request → token ids, Responses history, Jinja2 template</span>
+├── <span class="f">backend.py</span>             <span class="c">Job lifecycle, request priorities, deadlines, NativeBackend</span>
+├── <span class="f">runtime.py</span>             <span class="c">Subprocess client, pipe multiplexing, reader thread</span>
+├── <span class="f">protocol.py</span>            <span class="c">Binary frame codec (mirrors C++ Protocol.cpp)</span>
+├── <span class="f">api_shapes.py</span>          <span class="c">OpenAI / Anthropic / Responses shape normalization</span>
+├── <span class="f">constraints.py</span>         <span class="c">ConstraintFactory, tokenizer validation, CFG grammar</span>
+├── <span class="f">diagnostics.py</span>         <span class="c">log_unexpected, print_request, print_status</span>
+├── <span class="f">documents.py</span>           <span class="c">Document ingestion pipeline</span>
+├── <span class="f">document_worker.py</span>     <span class="c">Background document processing thread</span>
+├── <span class="f">images.py</span>              <span class="c">Image resize, patch grid, RGB encoding</span>
+├── <span class="f">metrics.py</span>             <span class="c">Runtime metrics collection & /metrics endpoint</span>
+├── <span class="f">http_security.py</span>       <span class="c">CORS, rate limiting, request size caps</span>
+├── <span class="f">output.py</span>              <span class="c">Token → text decoding, SSE chunk formatting</span>
+├── <span class="f">thinking.py</span>            <span class="c">Thinking level extraction / encoding</span>
+├── <span class="f">tool_schema.py</span>         <span class="c">Tool-call grammar (CFG) construction</span>
+├── <span class="f">schema_validation.py</span>   <span class="c">Request schema validation</span>
+├── <span class="f">errors.py</span>              <span class="c">Error types, HTTP status mapping</span>
+└── <span class="f">crash_trace.py</span>         <span class="c">CrashTraceRing — ring buffer of recent frames</span>
+</div>
+
+  <h2>Process Architecture</h2>
+  <div class="svg-wrap">
+    <svg viewBox="0 0 900 520" xmlns="http://www.w3.org/2000/svg">
+      <!-- Client -->
+      <rect x="30" y="20" width="160" height="60" rx="8" fill="#161b22" stroke="#30363d"/>
+      <text x="110" y="45" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="700">Client</text>
+      <text x="110" y="62" text-anchor="middle" fill="#8b949e" font-size="11">Browser / SDK</text>
+
+      <!-- Arrow to server -->
+      <line x1="110" y1="80" x2="110" y2="120" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow-blue)"/>
+      <text x="120" y="105" fill="#8b949e" font-size="10">HTTP + SSE</text>
+
+      <!-- Server process box -->
+      <rect x="20" y="120" width="500" height="380" rx="12" fill="none" stroke="#58a6ff" stroke-width="2" stroke-dasharray="6,4"/>
+      <text x="40" y="145" fill="#58a6ff" font-size="14" font-weight="700">Python Server Process</text>
+
+      <!-- HTTP Handler -->
+      <rect x="50" y="160" width="200" height="50" rx="8" fill="#161b22" stroke="#58a6ff"/>
+      <text x="150" y="182" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="600">HTTP Handler</text>
+      <text x="150" y="198" text-anchor="middle" fill="#8b949e" font-size="10">server.py · ThreadingHTTPServer</text>
+
+      <!-- Frontend -->
+      <rect x="50" y="230" width="200" height="50" rx="8" fill="#161b22" stroke="#58a6ff"/>
+      <text x="150" y="252" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="600">Frontend</text>
+      <text x="150" y="268" text-anchor="middle" fill="#8b949e" font-size="10">frontend.py · Jinja2 → tokens</text>
+
+      <!-- API Shapes -->
+      <rect x="280" y="160" width="200" height="50" rx="8" fill="#161b22" stroke="#58a6ff"/>
+      <text x="380" y="182" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="600">API Shapes</text>
+      <text x="380" y="198" text-anchor="middle" fill="#8b949e" font-size="10">api_shapes.py · OpenAI/Anthropic</text>
+
+      <!-- Backend -->
+      <rect x="280" y="230" width="200" height="50" rx="8" fill="#161b22" stroke="#58a6ff"/>
+      <text x="380" y="252" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="600">Backend</text>
+      <text x="380" y="268" text-anchor="middle" fill="#8b949e" font-size="10">backend.py · job lifecycle</text>
+
+      <!-- Runtime (subprocess client) -->
+      <rect x="50" y="310" width="200" height="60" rx="8" fill="#161b22" stroke="#e3b341" stroke-width="2"/>
+      <text x="150" y="332" text-anchor="middle" fill="#e3b341" font-size="12" font-weight="700">Runtime Client</text>
+      <text x="150" y="348" text-anchor="middle" fill="#8b949e" font-size="10">runtime.py</text>
+      <text x="150" y="362" text-anchor="middle" fill="#8b949e" font-size="10">subprocess + pipe multiplex</text>
+
+      <!-- Protocol codec -->
+      <rect x="280" y="310" width="200" height="60" rx="8" fill="#161b22" stroke="#e3b341" stroke-width="2"/>
+      <text x="380" y="332" text-anchor="middle" fill="#e3b341" font-size="12" font-weight="700">Protocol Codec</text>
+      <text x="380" y="348" text-anchor="middle" fill="#8b949e" font-size="10">protocol.py</text>
+      <text x="380" y="362" text-anchor="middle" fill="#8b949e" font-size="10">binary frame encode/decode</text>
+
+      <!-- Support modules -->
+      <rect x="50" y="395" width="120" height="40" rx="6" fill="#1c2128" stroke="#30363d"/>
+      <text x="110" y="412" text-anchor="middle" fill="#8b949e" font-size="10">images.py</text>
+      <text x="110" y="426" text-anchor="middle" fill="#8b949e" font-size="9">resize + patches</text>
+
+      <rect x="185" y="395" width="120" height="40" rx="6" fill="#1c2128" stroke="#30363d"/>
+      <text x="245" y="412" text-anchor="middle" fill="#8b949e" font-size="10">metrics.py</text>
+      <text x="245" y="426" text-anchor="middle" fill="#8b949e" font-size="9">/metrics endpoint</text>
+
+      <rect x="320" y="395" width="120" height="40" rx="6" fill="#1c2128" stroke="#30363d"/>
+      <text x="380" y="412" text-anchor="middle" fill="#8b949e" font-size="10">constraints.py</text>
+      <text x="380" y="426" text-anchor="middle" fill="#8b949e" font-size="9">CFG grammar masks</text>
+
+      <rect x="455" y="395" width="120" height="40" rx="6" fill="#1c2128" stroke="#30363d"/>
+      <text x="515" y="412" text-anchor="middle" fill="#8b949e" font-size="10">documents.py</text>
+      <text x="515" y="426" text-anchor="middle" fill="#8b949e" font-size="9">doc ingestion</text>
+
+      <!-- Pipe to native -->
+      <line x1="270" y1="400" x2="560" y2="400" stroke="#e3b341" stroke-width="2" marker-end="url(#arrow-yellow)"/>
+      <text x="415" y="392" text-anchor="middle" fill="#e3b341" font-size="10">stdin/stdout pipe</text>
+
+      <!-- Native process -->
+      <rect x="560" y="120" width="320" height="380" rx="12" fill="none" stroke="#d2a8ff" stroke-width="2" stroke-dasharray="6,4"/>
+      <text x="580" y="145" fill="#d2a8ff" font-size="14" font-weight="700">Native Engine Process</text>
+
+      <rect x="590" y="160" width="260" height="50" rx="8" fill="#161b22" stroke="#d2a8ff"/>
+      <text x="720" y="182" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="600">FdTransport</text>
+      <text x="720" y="198" text-anchor="middle" fill="#8b949e" font-size="10">pipe reader/writer · nonblocking</text>
+
+      <rect x="590" y="230" width="260" height="50" rx="8" fill="#161b22" stroke="#d2a8ff"/>
+      <text x="720" y="252" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="600">NativeRuntime</text>
+      <text x="720" y="268" text-anchor="middle" fill="#8b949e" font-size="10">protocol → Engine boundary</text>
+
+      <rect x="590" y="300" width="260" height="50" rx="8" fill="#161b22" stroke="#d2a8ff"/>
+      <text x="720" y="322" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="600">Engine</text>
+      <text x="720" y="338" text-anchor="middle" fill="#8b949e" font-size="10">scheduler · KV cache · memory</text>
+
+      <rect x="590" y="370" width="260" height="50" rx="8" fill="#161b22" stroke="#7ee787"/>
+      <text x="720" y="392" text-anchor="middle" fill="#7ee787" font-size="12" font-weight="600">Model Runtime</text>
+      <text x="720" y="408" text-anchor="middle" fill="#8b949e" font-size="10">Metal kernels · decode loop</text>
+
+      <!-- Arrows inside server -->
+      <line x1="150" y1="210" x2="150" y2="230" stroke="#58a6ff" stroke-width="1.5"/>
+      <line x1="380" y1="210" x2="380" y2="230" stroke="#58a6ff" stroke-width="1.5"/>
+      <line x1="150" y1="280" x2="150" y2="310" stroke="#58a6ff" stroke-width="1.5"/>
+      <line x1="380" y1="280" x2="380" y2="310" stroke="#58a6ff" stroke-width="1.5"/>
+
+      <!-- Arrows inside native -->
+      <line x1="720" y1="210" x2="720" y2="230" stroke="#d2a8ff" stroke-width="1.5"/>
+      <line x1="720" y1="280" x2="720" y2="300" stroke="#d2a8ff" stroke-width="1.5"/>
+      <line x1="720" y1="350" x2="720" y2="370" stroke="#d2a8ff" stroke-width="1.5"/>
+
+      <!-- Arrow markers -->
+      <defs>
+        <marker id="arrow-blue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <path d="M0,0 L8,3 L0,6" fill="#58a6ff"/>
+        </marker>
+        <marker id="arrow-yellow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <path d="M0,0 L8,3 L0,6" fill="#e3b341"/>
+        </marker>
+      </defs>
+    </svg>
+  </div>
+
+  <h2>Request Lifecycle</h2>
+  <div class="steps">
+    <div class="step">
+      <div class="head"><span class="title">POST /v1/chat/completions</span><span class="time">entry</span></div>
+      <div class="body"><code>FrontendHandler.do_POST()</code> parses the JSON body via <code>ThreadingHTTPServer</code>.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">1 · Normalize shape</span><span class="time">api_shapes.py</span></div>
+      <div class="body">OpenAI, Anthropic, or Responses shape → canonical messages. Handles <code>anthropic_to_chat_body()</code>, <code>anthropic_to_chat_prompt()</code>.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">2 · Prepare for generation</span><span class="time">frontend.py</span></div>
+      <div class="body">
+        <ul>
+          <li>Jinja2 chat template → token ids</li>
+          <li><code>thinking.py</code>: extract / encode thinking level</li>
+          <li><code>tool_schema.py</code>: build tool-call grammar (CFG)</li>
+          <li><code>images.py</code>: resize images, compute patch grids</li>
+          <li><code>constraints.py</code>: validate tokenizer, build constraint factory</li>
+        </ul>
+      </div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">3 · Submit to backend</span><span class="time">backend.py</span></div>
+      <div class="body"><code>NativeBackend.submit()</code> assigns priority, deadline, and writes the request frame to the pipe via <code>runtime.py</code>.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">4 · Stream tokens back</span><span class="time">runtime.py → SSE</span></div>
+      <div class="body">Reader thread receives <code>Tokens</code> frames → <code>output.py</code> decodes → SSE chunks written to the HTTP response. <code>Done</code> frame closes the stream.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">5 · Mask round-trip (tool calls)</span><span class="time">protocol.py</span></div>
+      <div class="body">Engine sends <code>MaskRequest</code> → Python builds CFG token mask → sends <code>MaskResponse</code> → engine resumes decode.</div>
+    </div>
+  </div>
+
+  <h2>Key Design Decisions</h2>
+  <div class="grid c2">
+    <div class="box b-server">
+      <div class="name"><span class="dot" style="background:var(--server)"></span>Subprocess, not thread</div>
+      <div class="desc">The native engine runs as a <b>child process</b> connected via stdin/stdout pipes. A crash in Metal/C++ doesn't take down the Python HTTP server. The reader thread in <code>runtime.py</code> multiplexes frames.</div>
+    </div>
+    <div class="box b-server">
+      <div class="name"><span class="dot" style="background:var(--server)"></span>Binary protocol, not JSON</div>
+      <div class="desc">The pipe uses a <b>24-byte binary frame header</b> (magic <code>SPLH</code>, version 5) with typed payloads. This avoids JSON parse overhead on every token. Python <code>protocol.py</code> and C++ <code>Protocol.cpp</code> are mirror images.</div>
+    </div>
+    <div class="box b-server">
+      <div class="name"><span class="dot" style="background:var(--server)"></span>CPU grammar masks</div>
+      <div class="desc">Constraint masks (tool-call JSON grammar) are computed on the <b>Python CPU</b> via <code>constraints.py</code>. The engine pauses in <code>WaitingMask</code> phase until the mask arrives. This keeps the GPU free for inference.</div>
+    </div>
+    <div class="box b-server">
+      <div class="name"><span class="dot" style="background:var(--server)"></span>Graceful shutdown</div>
+      <div class="desc">SIGTERM → <code>backend.close()</code> → child gets shutdown frame → grace period → SIGKILL. Reader thread joined with 1s timeout. Signal handlers set to <code>SIG_IGN</code> during teardown.</div>
+    </div>
+  </div>
+
+  <h2>Threading Model</h2>
+  <div class="svg-wrap">
+    <svg viewBox="0 0 800 300" xmlns="http://www.w3.org/2000/svg">
+      <!-- Main thread -->
+      <rect x="30" y="30" width="200" height="240" rx="10" fill="#161b22" stroke="#58a6ff"/>
+      <text x="130" y="55" text-anchor="middle" fill="#58a6ff" font-size="13" font-weight="700">Main Thread</text>
+      <text x="130" y="80" text-anchor="middle" fill="#8b949e" font-size="11">HTTP accept loop</text>
+      <text x="130" y="100" text-anchor="middle" fill="#8b949e" font-size="11">ThreadingHTTPServer</text>
+      <text x="130" y="120" text-anchor="middle" fill="#8b949e" font-size="11">signal handling</text>
+
+      <!-- Per-request threads -->
+      <rect x="270" y="30" width="200" height="240" rx="10" fill="#161b22" stroke="#ffa657"/>
+      <text x="370" y="55" text-anchor="middle" fill="#ffa657" font-size="13" font-weight="700">Request Threads</text>
+      <text x="370" y="80" text-anchor="middle" fill="#8b949e" font-size="11">one per HTTP connection</text>
+      <text x="370" y="100" text-anchor="middle" fill="#8b949e" font-size="11">SSE write loop</text>
+      <text x="370" y="120" text-anchor="middle" fill="#8b949e" font-size="11">mask computation</text>
+      <text x="370" y="140" text-anchor="middle" fill="#8b949e" font-size="11">image processing</text>
+
+      <!-- Reader thread -->
+      <rect x="510" y="30" width="200" height="240" rx="10" fill="#161b22" stroke="#e3b341"/>
+      <text x="610" y="55" text-anchor="middle" fill="#e3b341" font-size="13" font-weight="700">Reader Thread</text>
+      <text x="610" y="80" text-anchor="middle" fill="#8b949e" font-size="11">select() on pipe fd</text>
+      <text x="610" y="100" text-anchor="middle" fill="#8b949e" font-size="11">frame decode</text>
+      <text x="610" y="120" text-anchor="middle" fill="#8b949e" font-size="11">callback dispatch</text>
+      <text x="610" y="140" text-anchor="middle" fill="#8b949e" font-size="11">crash trace ring</text>
+
+      <!-- Arrows -->
+      <line x1="230" y1="150" x2="270" y2="150" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow-gray)"/>
+      <text x="250" y="142" text-anchor="middle" fill="#8b949e" font-size="9">submit</text>
+      <line x1="470" y1="150" x2="510" y2="150" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow-gray)"/>
+      <text x="490" y="142" text-anchor="middle" fill="#8b949e" font-size="9">frames</text>
+
+      <defs>
+        <marker id="arrow-gray" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <path d="M0,0 L8,3 L0,6" fill="#8b949e"/>
+        </marker>
+      </defs>
+    </svg>
+  </div>
+
+  <div class="note">
+    <b>Key invariant:</b> Callbacks from the reader thread must return quickly. Blocking callers use <code>RuntimeCall.result</code> on their own thread. The reader thread never blocks on mask computation or image processing — those happen on request threads.
+  </div>
+
+  <a class="back" href="index.html">← All Components</a>
+</div>
+</body>
+</html>

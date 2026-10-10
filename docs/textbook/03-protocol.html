@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03 · The Wire Protocol — Slipstream Textbook</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<div class="wrap">
+  <div class="navbar">
+    <a href="02-server.html">← The Server</a>
+    <a href="04-engine.html">Next: The Engine →</a>
+  </div>
+
+  <h1>The Wire Protocol</h1>
+  <p class="subtitle">Chapter 03 · A binary frame protocol over a pipe. Both sides implement the same codec.</p>
+
+  <p>Python <code>server/protocol.py</code> and C++ <code>runtime/engine/Protocol.cpp</code> are mirror images. Protocol version <b>5</b>, magic <code>b"SPLH"</code>.</p>
+
+  <h2>Frame Header <span class="tag">24 bytes</span></h2>
+  <table>
+    <tr><th>offset</th><th>size</th><th>field</th><th>description</th></tr>
+    <tr><td>0</td><td>4</td><td><code>magic</code></td><td><code>b"SPLH"</code></td></tr>
+    <tr><td>4</td><td>2</td><td><code>version</code></td><td>protocol version (5)</td></tr>
+    <tr><td>6</td><td>2</td><td><code>frame_type</code></td><td>see table below</td></tr>
+    <tr><td>8</td><td>2</td><td><code>flags</code></td><td>reserved (must be 0)</td></tr>
+    <tr><td>10</td><td>2</td><td><code>reserved</code></td><td>must be 0</td></tr>
+    <tr><td>12</td><td>8</td><td><code>payload_length</code></td><td>bytes in payload</td></tr>
+    <tr><td>20</td><td>4</td><td><code>reserved</code></td><td>must be 0</td></tr>
+  </table>
+
+  <h2>Frame Types</h2>
+  <div class="grid c2">
+    <div class="panel accent-server">
+      <b>Client → Engine</b> <span style="color:var(--muted);font-size:12px">0x00xx</span>
+      <table style="margin-top:10px">
+        <tr><td><code>Request</code></td><td>0x0001</td></tr>
+        <tr><td><code>Cancel</code></td><td>0x0002</td></tr>
+        <tr><td><code>MaskResponse</code></td><td>0x0003</td></tr>
+        <tr><td><code>StatusRequest</code></td><td>0x0004</td></tr>
+      </table>
+    </div>
+    <div class="panel accent-engine">
+      <b>Engine → Client</b> <span style="color:var(--muted);font-size:12px">0x01xx</span>
+      <table style="margin-top:10px">
+        <tr><td><code>Ready</code></td><td>0x0100</td></tr>
+        <tr><td><code>Start</code></td><td>0x0101</td></tr>
+        <tr><td><code>Tokens</code></td><td>0x0102</td></tr>
+        <tr><td><code>MaskRequest</code></td><td>0x0103</td></tr>
+        <tr><td><code>Done</code></td><td>0x0104</td></tr>
+        <tr><td><code>Error</code></td><td>0x0105</td></tr>
+        <tr><td><code>CapacityExhausted</code></td><td>0x0106</td></tr>
+        <tr><td><code>StatusJson</code></td><td>0x0107</td></tr>
+        <tr><td><code>PromptProgress</code></td><td>0x0108</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <h2>Key Payloads</h2>
+  <div class="grid c3">
+    <div class="panel">
+      <b>Request</b>
+<pre class="code">struct Request {
+  uint64_t  request_id;
+  uint8_t   priority;      // 0 fg,1 normal,2 bg
+  uint8_t   cohort;
+  uint8_t   constraint_mode;
+  uint8_t   reserved;
+  uint64_t  deadline_ms;   // monotonic
+  uint32_t  prompt_tokens;
+  uint32_t  max_new_tokens;
+  uint32_t  image_spans;
+  float     temperature;
+  float     top_p;
+  uint32_t  top_k;
+  uint64_t  seed;
+  uint8_t   reserved2;
+  // + prompt_tokens × u32
+  // + image_spans × ImageSpan
+};</pre>
+    </div>
+    <div class="panel">
+      <b>Tokens</b>
+<pre class="code">struct Tokens {
+  uint64_t  request_id;
+  uint32_t  token_count;
+  uint32_t  reserved;
+  // + token_count × u32 ids
+};</pre>
+    </div>
+    <div class="panel">
+      <b>Done</b>
+<pre class="code">struct Done {
+  uint64_t  request_id;
+  uint8_t   finish_reason; // stop/len/err
+  uint8_t   reserved;
+  uint32_t  total_tokens;
+  uint32_t  reserved2;
+  uint64_t  gpu_seconds_ns;
+  uint64_t  wall_seconds_ns;
+};</pre>
+    </div>
+  </div>
+
+  <h2>Image Span</h2>
+  <div class="panel">
+<pre class="code">struct ImageSpan {
+  uint32_t  offset;     // token offset in prompt
+  uint32_t  tokens;     // number of image tokens
+  uint32_t  gridHeight;
+  uint32_t  gridWidth;
+  uint64_t  digestLo;   // content digest (cache key)
+  uint64_t  digestHi;
+};</pre>
+  </div>
+
+  <h2>Transport <span class="tag">FdTransport (C++)</span></h2>
+  <div class="panel accent-engine">
+    <ul>
+      <li>Wraps a pair of POSIX fds (pipe)</li>
+      <li>Input fd is non-blocking only while <code>run()</code> is active</li>
+      <li>Each iteration: <b>drain ALL available frames</b>, then advance the backend (scheduler tick)</li>
+      <li>Constraint-mask responses can arrive while the target-forward command is in flight</li>
+      <li>Cancellation is safe because provisional writes commit only after that command drains</li>
+    </ul>
+  </div>
+
+  <div class="note">
+    <b>Why binary, not JSON?</b> Decode emits a frame per token (or per small batch). A binary frame is a fixed 24-byte header plus raw <code>u32</code> ids — no parsing cost on the hot path. JSON would add serialization overhead to every token of every request.
+  </div>
+
+  <div class="footer">Slipstream Visual Textbook · Chapter 03</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shared Ops — Slipstream Component Deep-Dive</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2128;
+    --border: #30363d; --text: #e6edf3; --muted: #8b949e;
+    --server: #58a6ff; --engine: #d2a8ff; --model: #7ee787;
+    --ops: #79c0ff; --metal: #ff7b72; --protocol: #e3b341;
+    --install: #ffa657; --accent: #79c0ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif;
+    padding: 40px 24px 80px; line-height: 1.6; }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 28px; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 32px; font-size: 15px; }
+  h2 { font-size: 20px; margin: 40px 0 16px; }
+  h2 .tag { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 8px; }
+  h3 { font-size: 16px; margin: 24px 0 10px; }
+  p { margin: 10px 0; font-size: 14.5px; }
+  code { background: var(--panel2); padding: 2px 6px; border-radius: 4px; font-size: 12.5px;
+    font-family: "SF Mono", Menlo, monospace; }
+  .back { display: inline-block; margin-bottom: 24px; color: var(--muted); text-decoration: none; font-size: 14px; }
+  .back:hover { color: var(--text); }
+  .grid { display: grid; gap: 16px; }
+  .grid.c2 { grid-template-columns: 1fr 1fr; }
+  .grid.c3 { grid-template-columns: 1fr 1fr 1fr; }
+  .box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; }
+  .box .name { font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .box .path { font-family: "SF Mono", Menlo, monospace; font-size: 11px; color: var(--muted); }
+  .box .desc { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .box.b-ops { border-left: 4px solid var(--ops); }
+  .box.b-metal { border-left: 4px solid var(--metal); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .tree { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 20px; font-family: "SF Mono", Menlo, monospace; font-size: 12.5px;
+    line-height: 1.8; overflow-x: auto; }
+  .tree .f { color: var(--ops); }
+  .tree .c { color: var(--muted); font-style: italic; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+  .chip { display: inline-block; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 3px 10px; font-size: 11.5px; margin: 3px 4px 3px 0;
+    font-family: "SF Mono", Menlo, monospace; }
+  .note { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 18px; margin: 16px 0; font-size: 13px; color: var(--muted); }
+  .note b { color: var(--text); }
+  .svg-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; margin: 16px 0; overflow-x: auto; }
+  .svg-wrap svg { width: 100%; height: auto; }
+  .navbar { display: flex; justify-content: space-between; margin-bottom: 24px; }
+  .navbar a { color: var(--muted); text-decoration: none; font-size: 13px; }
+  .navbar a:hover { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="navbar">
+    <a href="model.html">← Model</a>
+    <a href="metal.html">Next: Metal Backend →</a>
+  </div>
+
+  <h1>Shared Ops <span style="color:var(--ops)">C++</span></h1>
+  <p class="subtitle">Component deep-dive · Model-agnostic GPU operations. Shared ops/metal never depend on a model — they stay shared. Each op is a host-side builder that appends dispatches to a <code>metal::CommandGraph</code>.</p>
+
+  <h2>File Map</h2>
+  <div class="tree">runtime/ops/
+├── <span class="f">GEMM.hpp / .mm</span>            <span class="c">matrix multiply dispatch (linear layers, MoE)</span>
+├── <span class="f">Linear.hpp</span>              <span class="c">linear layer op: weight binding + GEMM + bias</span>
+├── <span class="f">Attention.hpp</span>           <span class="c">full attention op (Q8 paged)</span>
+├── <span class="f">PagedAttention.hpp</span>      <span class="c">Q8 paged attention params: prefill / chunked / verify</span>
+├── <span class="f">PagedKv.hpp</span>             <span class="c">KV page geometry, Q8 layout, Backing interface</span>
+├── <span class="f">Q8PageStorage.hpp / .mm</span> <span class="c">8-bit quantized KV page read/write</span>
+├── <span class="f">RoPE.hpp / .cpp</span>         <span class="c">rotary embeddings: cos/sin table generation</span>
+├── <span class="f">Sampling.hpp / .cpp</span>     <span class="c">target + draft sampling: top-k, top-p, temperature</span>
+├── <span class="f">PromptLookup.hpp / .cpp</span> <span class="c">prompt token → position/offset lookup tables</span>
+├── <span class="f">Vision.hpp / .mm</span>        <span class="c">image patch encoding, grid geometry</span>
+├── <span class="f">Weights.hpp</span>             <span class="c">weight buffer views, quant format descriptors</span>
+├── <span class="f">Rows.hpp / .cpp</span>         <span class="c">row/position arithmetic helpers</span>
+└── <span class="f">ExecutionPlans.hpp</span>      <span class="c">per-shape kernel dispatch plans (planned at startup)</span>
+</div>
+
+  <h2>Op Pattern</h2>
+  <p>Every op follows the same shape: a host-side class that <b>validates parameters</b>, <b>computes dispatch geometry</b> (thread groups × threads), and <b>appends to a <code>CommandGraph</code></b>. No op talks to Metal directly — that's the backend's job. No op knows which model is running.</p>
+  <div class="svg-wrap">
+    <svg viewBox="0 0 880 160" xmlns="http://www.w3.org/2000/svg">
+      <rect x="20" y="40" width="200" height="70" rx="10" fill="#161b22" stroke="#79c0ff" stroke-width="2"/>
+      <text x="120" y="68" text-anchor="middle" fill="#79c0ff" font-size="13" font-weight="700">Op (host C++)</text>
+      <text x="120" y="88" text-anchor="middle" fill="#8b949e" font-size="11">validate params</text>
+      <text x="120" y="102" text-anchor="middle" fill="#8b949e" font-size="11">compute dispatch size</text>
+
+      <line x1="220" y1="75" x2="330" y2="75" stroke="#8b949e" stroke-width="2" marker-end="url(#aop)"/>
+      <text x="275" y="65" text-anchor="middle" fill="#8b949e" font-size="10">add(pipeline, buffers, params, groups)</text>
+
+      <rect x="330" y="40" width="220" height="70" rx="10" fill="#161b22" stroke="#ff7b72" stroke-width="2"/>
+      <text x="440" y="68" text-anchor="middle" fill="#ff7b72" font-size="13" font-weight="700">CommandGraph</text>
+      <text x="440" y="88" text-anchor="middle" fill="#8b949e" font-size="11">ordered dispatch list</text>
+      <text x="440" y="102" text-anchor="middle" fill="#8b949e" font-size="11">buffers + param payloads</text>
+
+      <line x1="550" y1="75" x2="660" y2="75" stroke="#8b949e" stroke-width="2" marker-end="url(#aop)"/>
+      <text x="605" y="65" text-anchor="middle" fill="#8b949e" font-size="10">submit</text>
+
+      <rect x="660" y="40" width="200" height="70" rx="10" fill="#161b22" stroke="#ff7b72" stroke-width="2"/>
+      <text x="760" y="68" text-anchor="middle" fill="#ff7b72" font-size="13" font-weight="700">MetalBackend</text>
+      <text x="760" y="88" text-anchor="middle" fill="#8b949e" font-size="11">command buffer</text>
+      <text x="760" y="102" text-anchor="middle" fill="#8b949e" font-size="11">GPU execution</text>
+
+      <defs>
+        <marker id="aop" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#8b949e"/></marker>
+      </defs>
+    </svg>
+  </div>
+
+  <h2>Key Ops</h2>
+  <div class="grid c2">
+    <div class="box b-ops">
+      <div class="name"><span class="dot" style="background:var(--ops)"></span>PagedAttention</div>
+      <div class="desc">
+        Three Q8 attention variants, each a validated params struct (standard-layout, trivially-copyable — <code>static_assert</code>ed):
+      </div>
+      <table>
+        <tr><th>Variant</th><th>Use</th><th>Key params</th></tr>
+        <tr><td><code>Q8PrefillAttentionParams</code></td><td>full prompt prefill</td><td>rows, page table, physical page count</td></tr>
+        <tr><td><code>Q8ChunkedPrefillParams</code></td><td>chunked prefill (long prompts)</td><td>chunk stride, active rows</td></tr>
+        <tr><td><code>Q8VerifyAttentionParams</code></td><td>draft verification</td><td>active rows ≤ <code>kQ8VerifyMaximumRows</code>, splits ≤ <code>kQ8VerifySplits</code></td></tr>
+      </table>
+      <p style="font-size:12px; margin-top:8px;">Validation is exhaustive: row ranges, stride alignment to <code>kPageTokens</code>, context bounds, page-table length, split counts. A bad param is a host-side error <i>before</i> dispatch, never a GPU fault.</p>
+    </div>
+    <div class="box b-ops">
+      <div class="name"><span class="dot" style="background:var(--ops)"></span>PagedKv</div>
+      <div class="desc">
+        The KV geometry contract shared with the engine's pool:
+      </div>
+      <table>
+        <tr><td><code>Backing</code> interface</td><td>page count, bytes/page, residency, extents, paced release</td></tr>
+        <tr><td><code>Q8Layout</code></td><td>8-bit quantized KV: scales, head geometry, page token count</td></tr>
+        <tr><td><code>kMaximumLogicalTokens</code></td><td>context ceiling = pages × pageTokens</td></tr>
+        <tr><td><code>pagesForAlignedMapping()</code></td><td>sparse-mapping alignment math (gcd/lcm) for Metal buffer sizing</td></tr>
+      </table>
+    </div>
+    <div class="box b-ops">
+      <div class="name"><span class="dot" style="background:var(--ops)"></span>Sampling</div>
+      <div class="desc">
+        Target sampling keeps <code>kTargetSamplingCandidates = 32</code> top candidates per row (the protocol's <code>MAX_TOP_K</code>). Workspace is precomputed:
+      </div>
+      <table>
+        <tr><td><code>SamplingWorkspace</code></td><td>argmax values/indices, partial ids/values, top ids/probabilities</td></tr>
+        <tr><td><code>DraftSelectorWorkspace</code></td><td>draft candidate selection + proposal probabilities</td></tr>
+      </table>
+      <p style="font-size:12px; margin-top:8px;"><code>SamplingPolicy { topK, temperature, topP, constrained }</code> — <code>constrained</code> requests apply the CPU grammar mask before sampling.</p>
+    </div>
+    <div class="box b-ops">
+      <div class="name"><span class="dot" style="background:var(--ops)"></span>RoPE</div>
+      <div class="desc">
+        Generates cos/sine tables on the GPU:
+      </div>
+      <table>
+        <tr><td><code>addTables()</code></td><td>target rows of (t, h, w) positions → cos/sin buffers</td></tr>
+        <tr><td><code>addDraftTables()</code></td><td>draft rows of scalar positions → cos/sin buffers</td></tr>
+      </table>
+      <p style="font-size:12px; margin-top:8px;">Tables are computed per-batch into preallocated buffers, then consumed by the attention/GEMM dispatches in the same command graph.</p>
+    </div>
+  </div>
+
+  <h2>Q8 KV Storage</h2>
+  <div class="box b-ops">
+    <div class="name"><span class="dot" style="background:var(--ops)"></span>Q8PageStorage</div>
+    <div class="desc">
+      8-bit quantized KV pages: each page stores quantized K/V values + per-block scales. This is what makes long context affordable — Q8 KV is ~4× smaller than BF16, so the same physical memory holds 4× the context. The engine's <code>KvPool</code> manages <i>which</i> pages are resident; Q8PageStorage manages <i>how</i> bytes inside a page are laid out and read/written by the attention kernels.
+    </div>
+  </div>
+
+  <h2>Execution Plans</h2>
+  <div class="box b-ops">
+    <div class="name"><span class="dot" style="background:var(--ops)"></span>ops::ExecutionPlans</div>
+    <div class="desc">
+      At startup, the model factory plans kernel dispatches for every shape it will use (max prefill, max decode width, verify rows, draft shapes). <code>plannedRuntimeMemory()</code> sums the scratch these plans need into the <code>ModelMemoryPlan</code>. At runtime, dispatches are <b>replayed from the plan</b> with per-batch parameter updates — no per-token kernel lookup or allocation. This is why warmup at maximum shapes matters: anything not planned is a cold path.
+    </div>
+  </div>
+
+  <div class="note">
+    <b>Dependency rule:</b> ops depend on <code>runtime/metal/</code> (CommandGraph, MetalBuffer, ABI headers) and <code>runtime/model/</code> types (BatchPlan, ImageSpan). They never depend on <code>runtime/engine/</code> or on a concrete model folder. Model-specific kernels (e.g. Qwen4 hyper-connection) live in the model folder, not here.
+  </div>
+
+  <a class="back" href="index.html">← All Components</a>
+</div>
+</body>
+</html>

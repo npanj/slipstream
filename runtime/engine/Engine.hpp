@@ -5,6 +5,7 @@
 #include "engine/Scheduler.hpp"
 #include "engine/Types.hpp"
 #include "ops/PagedKv.hpp"
+#include "ops/Vision.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -21,6 +22,8 @@ struct EngineConfig final {
   // Spacing of prompt checkpoints saved for prefix reuse (whole KV pages).
   // Zero disables progress checkpoints without changing reusable end states.
   uint32_t prefillCheckpointTokens = 4096;
+  // Patches per image the model's vision scratch covers.
+  uint32_t maxImagePatches = ops::kMaximumImagePatches;
   // Rows per prompt command: the package's chunk, at most the built maximum.
   uint32_t prefillChunkTokens = model::ExecutionLimits::defaultPrefillChunkTokens;
   double resourceWaitTimeoutMilliseconds = 30000.0;

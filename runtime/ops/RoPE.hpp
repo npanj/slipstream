@@ -13,6 +13,13 @@ public:
                         metal::MetalBuffer inverseFrequencies,
                         metal::MetalBuffer cosine, metal::MetalBuffer sine,
                         uint32_t rows, uint32_t maximumRows);
+  // Cosine and sine tables for `rows` draft rows of scalar positions.
+  static void addDraftTables(metal::CommandGraph &graph,
+                             metal::MetalBuffer positions,
+                             metal::MetalBuffer inverseFrequencies,
+                             metal::MetalBuffer cosine,
+                             metal::MetalBuffer sine, uint32_t rows,
+                             uint32_t maximumRows);
 };
 
 } // namespace splash::ops

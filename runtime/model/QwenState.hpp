@@ -1,6 +1,7 @@
 #pragma once
 
 #include "metal/MetalBackend.hpp"
+#include "model/DFlashDraft.hpp"
 #include "model/Model.hpp"
 #include "model/StateLayout.hpp"
 #include "ops/PagedKv.hpp"
@@ -50,12 +51,27 @@ private:
 };
 
 struct QwenSlotBuffers final {
-  // Views retain the slot's GDN allocations without copying data.
+  // Views retain the slot's GDN and draft allocations without copying data.
   std::array<GdnParityBuffers, 2> gdn;
+  // Empty unless the layout carries a draft model.
+  std::vector<DFlashDraftRingLayer> draft;
 };
 
 struct QwenLogicalLengths final {
   uint64_t targetTokens = 0;
+  uint64_t draftBase = 0;
+  uint32_t draftLength = 0;
+  uint32_t draftCommitCursor = 0;
+
+  [[nodiscard]] uint64_t draftEnd() const noexcept {
+    return draftBase + draftLength;
+  }
+  [[nodiscard]] bool
+  hasCompleteDraftWindow(uint32_t draftCapacity) const noexcept {
+    return draftCapacity && draftEnd() == targetTokens &&
+           draftLength == std::min<uint64_t>(targetTokens, draftCapacity) &&
+           draftCommitCursor == targetTokens % draftCapacity;
+  }
 
   bool operator==(const QwenLogicalLengths &) const = default;
 };
@@ -69,16 +85,19 @@ struct QwenSlotMetadata final {
 
 class QwenStateStorage;
 
-// One GDN cell: the buffers a cached state occupies.
+// One GDN cell plus one draft ring: the buffers a cached state occupies.
+// The ring is null unless the layout carries a draft model.
 struct QwenCacheSlot final {
   std::shared_ptr<QwenGdnCell> gdn;
+  std::shared_ptr<DFlashDraftRing> draft;
 };
 
-// Free buffers available for reuse: a lane takes two cells, a cached state
-// one. Both return them here; idle buffers are released only by explicit
-// reclaim.
+// Free buffers available for reuse: a lane takes two cells and a ring, a
+// cached state one of each. Both return them here; idle buffers are released
+// only by explicit reclaim.
 struct QwenBufferPool final {
   std::vector<std::shared_ptr<QwenGdnCell>> cells;
+  std::vector<std::shared_ptr<DFlashDraftRing>> rings;
   // Cleared when the storage goes away; late returns then just free.
   bool open = true;
 };
@@ -130,9 +149,11 @@ public:
   void releaseSlot(uint32_t slot, uint64_t requestId);
 
   // Returns pooled buffers beyond the kept counts to macOS. Active lanes and
-  // cached states are never moved or reclaimed.
+  // cached states are never moved or reclaimed. Rings track the cell count:
+  // each active lane and cached state owns at most one ring.
   [[nodiscard]] uint64_t releaseIdle(uint32_t keepCells) noexcept override;
   [[nodiscard]] uint32_t idleCells() const noexcept;
+  [[nodiscard]] uint32_t idleRings() const noexcept;
 
   // Hot-path metadata operations; neither performs a buffer copy.
   void updateLengths(uint32_t slot, QwenLogicalLengths lengths);
@@ -156,6 +177,8 @@ private:
     QwenSlotBuffers buffers;
     QwenSlotMetadata metadata;
     std::array<std::shared_ptr<QwenGdnCell>, 2> gdn;
+    // Null unless the layout carries a draft model.
+    std::shared_ptr<DFlashDraftRing> draft;
   };
 
   [[nodiscard]] Slot &slot(uint32_t index);
@@ -165,8 +188,13 @@ private:
   static void requireAssigned(const Slot &slot);
   [[nodiscard]] metal::AllocationResult allocateSlot(uint32_t index);
   [[nodiscard]] std::shared_ptr<QwenGdnCell> acquireCell(std::string_view label);
+  [[nodiscard]] std::shared_ptr<DFlashDraftRing>
+  acquireRing(std::string_view label);
   [[nodiscard]] std::shared_ptr<QwenGdnCell>
   allocateGdnCell(std::string_view label,
+                    metal::AllocationFailure *failure = nullptr);
+  [[nodiscard]] std::shared_ptr<DFlashDraftRing>
+  allocateDraftRing(std::string_view label,
                     metal::AllocationFailure *failure = nullptr);
   static void refreshViews(Slot &slot);
 

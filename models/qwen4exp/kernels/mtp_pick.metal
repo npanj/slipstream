@@ -80,3 +80,81 @@ kernel void mtp_pick_slices(device const bfloat *logits [[buffer(0)]],
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
 }
+
+// Second half: fuse the 64 slices into 16 overall best candidates directly on the GPU.
+// Bypasses the 1024-candidate host insertion sort loop.
+kernel void mtp_reduce_top16(device const uint *slice_ids [[buffer(0)]],
+                            device const float *slice_values [[buffer(1)]],
+                            device uint *out_ids [[buffer(2)]],
+                            device float *out_values [[buffer(3)]],
+                            uint thread_index [[thread_index_in_threadgroup]],
+                            uint simd_lane [[thread_index_in_simdgroup]],
+                            uint simd_group [[simdgroup_index_in_threadgroup]]) {
+  constexpr uint total = kPickSlices * kPickCandidates; // 1024
+  threadgroup float staged_values[total];
+  threadgroup uint staged_ids[total];
+  threadgroup float best_val[kPickThreads / 32];
+  threadgroup uint best_idx[kPickThreads / 32];
+
+  for (uint i = thread_index; i < total; i += kPickThreads) {
+    staged_values[i] = slice_values[i];
+    staged_ids[i] = slice_ids[i];
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  for (uint round = 0; round < 16; ++round) {
+    float v = -INFINITY;
+    uint idx = 0xFFFFFFFFu;
+    for (uint i = thread_index; i < total; i += kPickThreads) {
+      const float cand_v = staged_values[i];
+      const uint cand_id = staged_ids[i];
+      if (cand_id != 0xFFFFFFFFu && (cand_v > v || (cand_v == v && cand_id < staged_ids[idx]))) {
+        v = cand_v;
+        idx = i;
+      }
+    }
+
+    for (uint offset = 16; offset > 0; offset /= 2) {
+      const float other_v = simd_shuffle_down(v, offset);
+      const uint other_idx = simd_shuffle_down(idx, offset);
+      if (other_idx != 0xFFFFFFFFu) {
+        if (other_v > v || (other_v == v && staged_ids[other_idx] < staged_ids[idx])) {
+          v = other_v;
+          idx = other_idx;
+        }
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd_lane == 0) {
+      best_val[simd_group] = v;
+      best_idx[simd_group] = idx;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (thread_index == 0) {
+      float bv = -INFINITY;
+      uint bi = 0xFFFFFFFFu;
+      for (uint s = 0; s < kPickThreads / 32; ++s) {
+        const uint s_idx = best_idx[s];
+        if (s_idx != 0xFFFFFFFFu) {
+          const float s_val = best_val[s];
+          if (s_val > bv || (s_val == bv && staged_ids[s_idx] < staged_ids[bi])) {
+            bv = s_val;
+            bi = s_idx;
+          }
+        }
+      }
+
+      if (bi != 0xFFFFFFFFu) {
+        out_ids[round] = staged_ids[bi];
+        out_values[round] = bv;
+        staged_values[bi] = -INFINITY;
+        staged_ids[bi] = 0xFFFFFFFFu;
+      } else {
+        out_ids[round] = 0xFFFFFFFFu;
+        out_values[round] = -INFINITY;
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+}

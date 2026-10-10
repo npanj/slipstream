@@ -34,7 +34,8 @@ void Cache::endRequest(uint64_t requestId) {
   requests_.erase(found);
 }
 
-CacheLookup Cache::lookup(std::span<const uint32_t> prompt) {
+CacheLookup Cache::lookup(std::span<const uint32_t> prompt,
+                          std::span<const ImageSpan> images) {
   CacheLookup result;
   if (prompt.empty())
     return result;
@@ -46,7 +47,9 @@ CacheLookup Cache::lookup(std::span<const uint32_t> prompt) {
   uint64_t parent = 0;
   for (size_t index = 0; index < maximumBlocks; ++index) {
     const size_t begin = index * KvCache::pageTokens;
-    auto match = kv_.find(parent, prompt.subspan(begin, KvCache::pageTokens));
+    auto match =
+        kv_.find(parent, prompt.subspan(begin, KvCache::pageTokens),
+                 blockImageIdentity(begin, KvCache::pageTokens, images));
     if (!match)
       break;
     parent = match->id;
@@ -138,7 +141,8 @@ PageTableView Cache::pageTable(uint64_t requestId) const {
 
 uint64_t Cache::publishCommittedBlocks(uint64_t requestId,
                                        std::span<const uint32_t> exactTokens,
-                                       uint32_t committedTokens) {
+                                       uint32_t committedTokens,
+                                       std::span<const ImageSpan> images) {
   Request &active = request(requestId);
   if (committedTokens > exactTokens.size()) {
     throw std::invalid_argument("committed KV exceeds exact token history");
@@ -157,7 +161,8 @@ uint64_t Cache::publishCommittedBlocks(uint64_t requestId,
     const uint32_t begin = logical * KvCache::pageTokens;
     auto inserted =
         kv_.insert(parent, exactTokens.subspan(begin, KvCache::pageTokens),
-                   active.pages[logical]);
+                   active.pages[logical],
+                   blockImageIdentity(begin, KvCache::pageTokens, images));
     const uint32_t writerPage = active.pages[logical];
     const bool replacePage = inserted.physicalPage != writerPage;
     if (replacePage)

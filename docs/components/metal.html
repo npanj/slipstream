@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Metal Backend — Slipstream Component Deep-Dive</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2128;
+    --border: #30363d; --text: #e6edf3; --muted: #8b949e;
+    --server: #58a6ff; --engine: #d2a8ff; --model: #7ee787;
+    --ops: #79c0ff; --metal: #ff7b72; --protocol: #e3b341;
+    --install: #ffa657; --accent: #ff7b72;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif;
+    padding: 40px 24px 80px; line-height: 1.6; }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 28px; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 32px; font-size: 15px; }
+  h2 { font-size: 20px; margin: 40px 0 16px; }
+  h2 .tag { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 8px; }
+  h3 { font-size: 16px; margin: 24px 0 10px; }
+  p { margin: 10px 0; font-size: 14.5px; }
+  code { background: var(--panel2); padding: 2px 6px; border-radius: 4px; font-size: 12.5px;
+    font-family: "SF Mono", Menlo, monospace; }
+  .back { display: inline-block; margin-bottom: 24px; color: var(--muted); text-decoration: none; font-size: 14px; }
+  .back:hover { color: var(--text); }
+  .grid { display: grid; gap: 16px; }
+  .grid.c2 { grid-template-columns: 1fr 1fr; }
+  .grid.c3 { grid-template-columns: 1fr 1fr 1fr; }
+  .box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; }
+  .box .name { font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .box .path { font-family: "SF Mono", Menlo, monospace; font-size: 11px; color: var(--muted); }
+  .box .desc { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .box.b-metal { border-left: 4px solid var(--metal); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .tree { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 20px; font-family: "SF Mono", Menlo, monospace; font-size: 12.5px;
+    line-height: 1.8; overflow-x: auto; }
+  .tree .f { color: var(--metal); }
+  .tree .c { color: var(--muted); font-style: italic; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+  .chip { display: inline-block; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 3px 10px; font-size: 11.5px; margin: 3px 4px 3px 0;
+    font-family: "SF Mono", Menlo, monospace; }
+  .note { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 18px; margin: 16px 0; font-size: 13px; color: var(--muted); }
+  .note b { color: var(--text); }
+  .steps { display: flex; flex-direction: column; gap: 0; margin: 16px 0; }
+  .step { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 16px; margin-bottom: 4px; }
+  .step .head { display: flex; justify-content: space-between; align-items: center; }
+  .step .title { font-weight: 700; font-size: 13.5px; }
+  .step .fn { font-size: 11px; color: var(--metal); font-family: "SF Mono", Menlo, monospace; }
+  .step .body { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .step .body ul { margin: 6px 0 0 18px; }
+  .step .body li { margin: 3px 0; }
+  .step .body code { font-size: 11.5px; }
+  .svg-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; margin: 16px 0; overflow-x: auto; }
+  .svg-wrap svg { width: 100%; height: auto; }
+  .navbar { display: flex; justify-content: space-between; margin-bottom: 24px; }
+  .navbar a { color: var(--muted); text-decoration: none; font-size: 13px; }
+  .navbar a:hover { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="navbar">
+    <a href="ops.html">← Shared Ops</a>
+    <a href="install.html">Next: Install →</a>
+  </div>
+
+  <h1>Metal Backend <span style="color:var(--metal)">C++ / Objective-C++</span></h1>
+  <p class="subtitle">Component deep-dive · The Apple Metal GPU layer. Owns the device, buffers, command buffers, and the C++ ↔ .metal ABI boundary. Knows nothing about models, scheduling, or memory policy.</p>
+
+  <h2>File Map</h2>
+  <div class="tree">runtime/metal/
+├── <span class="f">MetalBackend.hpp / .mm</span>    <span class="c">device, command queue, buffer alloc, pipeline cache</span>
+├── <span class="f">CommandGraph.hpp</span>          <span class="c">ordered dispatch list → one command buffer</span>
+├── <span class="f">CommandWatchdog.hpp</span>       <span class="c">GPU hang detection (command timeout)</span>
+├── <span class="f">DeviceCapabilities.hpp / .cpp</span> <span class="c">GPU feature queries (max buffers, threadgroups, memory)</span>
+├── <span class="f">DeviceQueries.hpp</span>         <span class="c">raw MTLDevice queries</span>
+├── <span class="f">MetalEvent.hpp</span>            <span class="c">completion signaling (host-visible GPU events)</span>
+├── <span class="f">Residency.hpp</span>             <span class="c">buffer residency tracking</span>
+├── <span class="f">kernels/</span>
+│   ├── <span class="f">common/</span>               <span class="c">shared .metal: quant dequant, reductions, copies</span>
+│   ├── <span class="f">decode/</span>               <span class="c">decode-path kernels</span>
+│   ├── <span class="f">prefill/</span>              <span class="c">prefill-path kernels</span>
+│   └── <span class="f">shared/</span>               <span class="c">path-agnostic kernels</span>
+└── <span class="f">abi/</span>
+    ├── <span class="f">KernelABI.h</span>             <span class="c">base kernel parameter structs</span>
+    ├── <span class="f">ExecutionGeometry.h</span>     <span class="c">batch/row/width geometry constants</span>
+    ├── <span class="f">Linear.h</span> / <span class="f">MoE.h</span>       <span class="c">GEMM + mixture-of-experts params</span>
+    ├── <span class="f">PagedAttention.h</span>      <span class="c">Q8 attention params (prefill/chunked/verify)</span>
+    ├── <span class="f">GDN.h</span>                 <span class="c">gated-delta-network (linear attention) params</span>
+    ├── <span class="f">Sampling.h</span>            <span class="c">sampling kernel params</span>
+    ├── <span class="f">RoPE.h</span>                <span class="c">rotary embedding params</span>
+    ├── <span class="f">Embedding.h</span>           <span class="c">embedding lookup params</span>
+    ├── <span class="f">Vision.h</span>              <span class="c">vision encoder params</span>
+    ├── <span class="f">Rows.h</span>                <span class="c">row/position params</span>
+    ├── <span class="f">QuantFormat.h</span> / <span class="f">QuantTables.h</span> <span class="c">quantization format + scale tables</span>
+    ├── <span class="f">Gguf.h</span> / <span class="f">GgufRepack.h</span> <span class="c">GGUF weight loading + repack kernels</span>
+    └── <span class="f">DraftAttention.h</span>      <span class="c">draft attention params</span>
+</div>
+
+  <h2>Layered Structure</h2>
+  <div class="svg-wrap">
+    <svg viewBox="0 0 900 440" xmlns="http://www.w3.org/2000/svg">
+      <!-- Ops -->
+      <rect x="40" y="20" width="820" height="60" rx="10" fill="#161b22" stroke="#79c0ff" stroke-width="2"/>
+      <text x="60" y="45" fill="#79c0ff" font-size="14" font-weight="700">ops:: (host builders)</text>
+      <text x="60" y="65" fill="#8b949e" font-size="12">validate params → compute dispatch geometry → append to CommandGraph</text>
+
+      <line x1="450" y1="80" x2="450" y2="105" stroke="#8b949e" stroke-width="2" marker-end="url(#am)"/>
+
+      <!-- CommandGraph -->
+      <rect x="40" y="105" width="820" height="70" rx="10" fill="#161b22" stroke="#ff7b72" stroke-width="2"/>
+      <text x="60" y="130" fill="#ff7b72" font-size="14" font-weight="700">CommandGraph</text>
+      <text x="60" y="150" fill="#8b949e" font-size="12">ordered dispatch list for one command buffer · buffers bind at indices 0..n-1 · optional param struct binds at index n (copied into graph-owned storage until submission)</text>
+      <text x="60" y="166" fill="#8b949e" font-size="12">non-copyable (dispatches point into payloads_) · movable · kDefaultThreads = 256</text>
+
+      <line x1="450" y1="175" x2="450" y2="200" stroke="#8b949e" stroke-width="2" marker-end="url(#am)"/>
+
+      <!-- MetalBackend -->
+      <rect x="40" y="200" width="820" height="80" rx="10" fill="#161b22" stroke="#ff7b72" stroke-width="2"/>
+      <text x="60" y="225" fill="#ff7b72" font-size="14" font-weight="700">MetalBackend</text>
+      <text x="60" y="245" fill="#8b949e" font-size="12">MTLDevice + MTLCommandQueue · pipeline library cache (name → MTLComputePipelineState) · MetalBuffer allocations · MetalEvent completion</text>
+      <text x="60" y="262" fill="#8b949e" font-size="12">AllocationResult { Capacity | EngineBudget | HostPressure | DriverRejected } — classified failures, not booleans</text>
+
+      <line x1="450" y1="280" x2="450" y2="305" stroke="#8b949e" stroke-width="2" marker-end="url(#am)"/>
+
+      <!-- ABI + kernels -->
+      <rect x="40" y="305" width="390" height="110" rx="10" fill="#161b22" stroke="#ff7b72"/>
+      <text x="60" y="330" fill="#ff7b72" font-size="13" font-weight="700">abi/ (C headers)</text>
+      <text x="60" y="350" fill="#8b949e" font-size="11">plain-data param structs, shared by C++ host</text>
+      <text x="60" y="366" fill="#8b949e" font-size="11">and .metal kernels (standard-layout, trivially-copyable)</text>
+      <text x="60" y="382" fill="#8b949e" font-size="11">ExecutionGeometry.h — batch/row/width constants</text>
+      <text x="60" y="398" fill="#8b949e" font-size="11">QuantFormat.h / QuantTables.h — Q4/Q8 layouts</text>
+
+      <rect x="470" y="305" width="390" height="110" rx="10" fill="#161b22" stroke="#ff7b72"/>
+      <text x="490" y="330" fill="#ff7b72" font-size="13" font-weight="700">kernels/ (.metal)</text>
+      <text x="490" y="350" fill="#8b949e" font-size="11">common/ — quant dequant, reductions, copies</text>
+      <text x="490" y="366" fill="#8b949e" font-size="11">decode/ — decode-path kernels</text>
+      <text x="490" y="382" fill="#8b949e" font-size="11">prefill/ — prefill-path kernels</text>
+      <text x="490" y="398" fill="#8b949e" font-size="11">shared/ — path-agnostic kernels</text>
+
+      <defs>
+        <marker id="am" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#8b949e"/></marker>
+      </defs>
+    </svg>
+  </div>
+
+  <h2>MetalBuffer — Cheap Copyable References</h2>
+  <div class="box b-metal">
+    <div class="name"><span class="dot" style="background:var(--metal)"></span>MetalBuffer</div>
+    <div class="desc">
+      A cheap, copyable <b>reference</b> to a backend-owned Metal allocation. Views keep the base allocation alive but do <b>not</b> increase the tracked allocation count — so a <code>CommandGraph</code> can hold many buffer views of one big allocation without confusing the memory ledger. Copy/assign are reference-counted; move is noexcept.
+    </div>
+  </div>
+
+  <h2>Allocation Failure Classification</h2>
+  <p>Allocations return a classified <code>AllocationResult</code>, not a boolean. The engine's memory policy uses the class to decide between "wait for pressure to clear" and "this is a hard capacity wall":</p>
+  <table>
+    <tr><th>Failure</th><th>Meaning</th><th>Engine response</th></tr>
+    <tr><td><code>None</code></td><td>granted</td><td>proceed</td></tr>
+    <tr><td><code>Capacity</code></td><td>unclassified capacity refusal from an alternate backing</td><td>retry with backoff</td></tr>
+    <tr><td><code>EngineBudget</code></td><td>exceeds the engine's own byte budget (governor reservation denied)</td><td>reclaim within budget, retry</td></tr>
+    <tr><td><code>HostPressure</code></td><td>host memory pressure — the OS won't give us more</td><td>suspend work, reclaim, wait for pressure to clear</td></tr>
+    <tr><td><code>DriverRejected</code></td><td>the driver/Metal refused the allocation</td><td>fail the request (not retryable)</td></tr>
+  </table>
+
+  <h2>Command Submission</h2>
+  <div class="steps">
+    <div class="step">
+      <div class="head"><span class="title">Build graph</span><span class="fn">ops → CommandGraph</span></div>
+      <div class="body">The model's forward pass appends every dispatch (GEMM, attention, RoPE, sampling) to one <code>CommandGraph</code>. Param structs are <code>memcpy</code>'d into graph-owned storage at <code>add()</code> time — the graph is self-contained after building.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">Submit</span><span class="fn">MetalBackend::submit(graph, completion)</span></div>
+      <div class="body">Translates the dispatch list into a Metal command buffer: encodes each compute pass, binds buffers at their indices, binds the param struct as the final buffer. The completion callback fires on a GPU event when the buffer drains.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">Completion</span><span class="fn">MetalEvent</span></div>
+      <div class="body">The engine's <code>pending_</code> ticket holds the completion. When it fires, <code>FdTransport</code>'s control-wake wakes the loop, which calls <code>Engine::tick()</code> → <code>apply()</code>. Provisional writes (KV pages, state) become visible only after the command drains — this is what makes cancel/suspend safe mid-flight.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">Watchdog</span><span class="fn">CommandWatchdog</span></div>
+      <div class="body">A command that doesn't complete within its timeout is a GPU hang. The watchdog surfaces it as a health failure → <code>model_.checkHealth()</code> fails all in-flight requests rather than letting the process wedge.</div>
+    </div>
+  </div>
+
+  <h2>Device Capabilities</h2>
+  <div class="grid c2">
+    <div class="box b-metal">
+      <div class="name"><span class="dot" style="background:var(--metal)"></span>Capability queries</div>
+      <div class="desc">At startup, <code>DeviceCapabilities</code> queries the MTLDevice: max buffer count per dispatch, max threadgroups per grid, max threads per threadgroup, recommended max working set size, and unified-memory characteristics. These numbers drive the <code>MemoryPlan</code> (how big the KV pool can be) and validate that the planned dispatch geometries fit the hardware.</div>
+    </div>
+    <div class="box b-metal">
+      <div class="name"><span class="dot" style="background:var(--metal)"></span>Pipeline cache</div>
+      <div class="desc">Pipeline states are compiled once (at warmup) and cached by kernel name. <code>CommandGraph::add(pipeline, ...)</code> takes a <b>string name</b>, not a pipeline object — the backend resolves name → <code>MTLComputePipelineState</code> at submit time. This keeps graphs serializable and cheap to copy around.</div>
+    </div>
+  </div>
+
+  <h2>The ABI Boundary</h2>
+  <div class="box b-metal">
+    <div class="name"><span class="dot" style="background:var(--metal)"></span>abi/ — the C++ ↔ .metal contract</div>
+    <div class="desc">
+      Every kernel's parameter struct is a <b>plain C header</b> (<code>KernelABI.h</code> family) included by both the C++ host and the .metal source. Requirements, enforced by <code>static_assert</code> on the C++ side:
+    </div>
+    <ul style="margin:8px 0 8px 20px; font-size:13px; color:var(--muted);">
+      <li><code>std::is_standard_layout_v</code> — C-compatible layout</li>
+      <li><code>std::is_trivially_copyable_v</code> — <code>memcpy</code>'able into the param buffer</li>
+      <li>Fixed-size, no pointers into host memory (buffers are bound separately)</li>
+    </ul>
+    <p style="font-size:13px; color:var(--muted);">This is why a new kernel = one .h (ABI) + one .metal (implementation) + one ops builder (host). The model folder adds its own ABI headers for model-specific kernels (e.g. <code>HyperConnection.h</code>, <code>DraftAttention.h</code>).</p>
+  </div>
+
+  <div class="note">
+    <b>Dependency rule:</b> <code>runtime/metal/</code> depends on nothing above it — no engine, no model, no ops. It is the foundation layer. The <code>Backing</code> interface in <code>ops/PagedKv.hpp</code> is the seam: the engine's <code>KvPool</code> implements it with Metal storage; tests implement it with deterministic host storage.
+  </div>
+
+  <a class="back" href="index.html">← All Components</a>
+</div>
+</body>
+</html>

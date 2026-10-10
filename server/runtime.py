@@ -164,6 +164,12 @@ class GenerationRequest:
     cohort: wire.Cohort = wire.Cohort.GREEDY
     constraint: wire.ConstraintMode = wire.ConstraintMode.NONE
     mask_provider: MaskProvider | None = None
+    # Image spans in prompt order with their concatenated resized pixels.
+    image_spans: tuple[wire.ImageSpan, ...] = ()
+    image_pixels: bytes = b""
+    # Keeps the frontend's byte reservation alive across cancellation and CPU
+    # mask work. It is ownership only and is never serialized to the engine.
+    image_owner: object | None = None
     return_progress: bool = False
 
 
@@ -584,6 +590,8 @@ class MultiplexedRuntime:
                 seed=request.seed,
                 cohort=request.cohort,
                 constraint=request.constraint,
+                image_spans=request.image_spans,
+                image_pixels=request.image_pixels,
                 return_progress=request.return_progress,
             )
             try:

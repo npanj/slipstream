@@ -30,6 +30,8 @@ struct EngineRequest final {
   RequestPriority priority = RequestPriority::Normal;
   BatchCohort cohort = BatchCohort::Greedy;
   std::vector<uint32_t> prompt;
+  std::vector<ImageSpan> images;
+  std::vector<uint8_t> imagePixels;
   uint32_t maxNewTokens = 0;
   SamplingParameters sampling;
   ConstraintMode constraint = ConstraintMode::None;
@@ -37,7 +39,7 @@ struct EngineRequest final {
   bool returnProgress = false;
 
   [[nodiscard]] ModelRequest modelView() const noexcept {
-    return {id, cohort, prompt, maxNewTokens, sampling, constraint};
+    return {id, cohort, prompt, images, imagePixels, maxNewTokens, sampling, constraint};
   }
 };
 

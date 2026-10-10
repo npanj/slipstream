@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>02 · The Server — Slipstream Textbook</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<div class="wrap">
+  <div class="navbar">
+    <a href="01-big-picture.html">← Big Picture</a>
+    <a href="03-protocol.html">Next: Wire Protocol →</a>
+  </div>
+
+  <h1>The Server (Python)</h1>
+  <p class="subtitle">Chapter 02 · A single-process Python app: speak HTTP, shape the request, talk to the native engine over a pipe.</p>
+
+  <h2>File Map</h2>
+  <div class="tree">server/
+├── <span class="f">server.py</span>          <span class="n">1794 lines</span>   HTTP handler, SSE streaming, routing
+├── <span class="f">frontend.py</span>                 API request → token ids, Responses history
+├── <span class="f">backend.py</span>                  Job lifecycle, request priorities, deadlines
+├── <span class="f">runtime.py</span>                  Subprocess client, pipe multiplexing
+├── <span class="f">protocol.py</span>                 Binary frame codec (mirrors C++ Protocol.cpp)
+├── <span class="f">api_shapes.py</span>               OpenAI / Anthropic / Responses shape normalizers
+├── <span class="f">tool_schema.py</span>              Tool-call grammar, JSON grammar, thinking codec
+├── <span class="f">thinking.py</span>                 Thinking-level encode/decode
+├── <span class="f">documents.py</span>                PDF text extraction
+├── <span class="f">images.py</span>                   Image → patch grid, digest
+├── <span class="f">constraints.py</span>              Constraint-mode helpers
+├── <span class="f">output.py</span>                   Token → text projection
+├── <span class="f">errors.py</span>                   APIError, ContextLengthError
+├── <span class="f">metrics.py</span>                  Numeric validation
+├── <span class="f">diagnostics.py</span>              Status printing
+├── <span class="f">http_security.py</span>            CORS, rate-limit headers
+├── <span class="f">crash_trace.py</span>              CrashTraceRing (native crash → Python)
+├── <span class="f">chat.html</span>                   Minimal web UI
+└── <span class="f">agent/</span>
+    ├── <span class="f">agent.py</span>                Main agent loop (system prompt, tool dispatch)
+    ├── <span class="f">pty_shell.py</span>            WarmPtyShell (persistent zsh PTY)
+    └── <span class="f">tools.py</span>                FileEditor, RipgrepSearcher, WebResearcher, RepoMapper</div>
+
+  <h2>Request Lifecycle</h2>
+  <div class="timeline">
+    <div class="step">
+      <div class="head"><span class="title">POST /v1/chat/completions</span><span class="time">entry</span></div>
+      <div class="body"><code>FrontendHandler.do_POST()</code> parses the JSON body.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">1 · Normalize shape</span><span class="time">api_shapes.py</span></div>
+      <div class="body">OpenAI, Anthropic, or Responses shape → canonical messages.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">2 · Prepare for generation</span><span class="time">frontend.py</span></div>
+      <div class="body">
+        <ul>
+          <li>Jinja2 chat template → token ids</li>
+          <li><code>thinking.py</code>: extract / encode thinking level</li>
+          <li><code>tool_schema.py</code>: build tool-call grammar (CFG)</li>
+          <li><code>images.py</code>: image → patch grid + digest</li>
+          <li><code>documents.py</code>: PDF → text tokens</li>
+        </ul>
+      </div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">3 · Create Job</span><span class="time">backend.py</span></div>
+      <div class="body">Assign priority + deadline. Priorities: <code>foreground(0)</code> / <code>normal(1)</code> / <code>background(2)</code>.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">4 · Write Request frame to pipe</span><span class="time">runtime.py</span></div>
+      <div class="body">If <code>pending &lt; pending_limit</code>, write directly; else queue for the reader thread.</div>
+    </div>
+    <div class="step">
+      <div class="head"><span class="title">5 · Stream</span><span class="time">runtime.py → client</span></div>
+      <div class="body">Read <code>Tokens</code> / <code>MaskRequest</code> / <code>Done</code> / <code>Error</code> frames from the pipe, project to SSE events, write to client.</div>
+    </div>
+  </div>
+
+  <h2>The Subprocess Client <span class="tag">runtime.py</span></h2>
+  <div class="panel accent-server">
+    <ul>
+      <li>Spawns the native binary (<code>splash</code> / <code>slipstream</code>)</li>
+      <li>Creates a pipe (<code>os.pipe</code>) → two fds</li>
+      <li><b>Reader thread:</b> <code>select()</code> on the read fd, decode frames</li>
+      <li><b>Writer:</b> non-blocking write of request frames</li>
+      <li><b>pending_limit:</b> back-pressure; excess requests queue</li>
+      <li><b>CrashTraceRing:</b> captures native crash backtrace</li>
+      <li>Callbacks run on the reader thread; blocking callers use <code>RuntimeCall.result()</code> on their own thread</li>
+    </ul>
+  </div>
+
+  <div class="note">
+    <b>Why a separate process?</b> The native engine owns the GPU and the decode loop. Keeping it in its own process means a native crash is contained (captured by <code>crash_trace.py</code>) and the Python side can restart it, while the HTTP server and its in-process agent keep running.
+  </div>
+
+  <div class="footer">Slipstream Visual Textbook · Chapter 02</div>
+</div>
+</body>
+</html>

@@ -1,5 +1,6 @@
 #include "models/qwen38/Qwen3_8Target.hpp"
 
+#include "ops/DraftAttention.hpp"
 #include "ops/Embedding.hpp"
 #include "ops/Normalization.hpp"
 
@@ -262,6 +263,24 @@ void Qwen3_8Target::addPrefillImpl(
     operators_.linear().addPrefillResidual(
         graph, buffers.denseIntermediate, layer.downProjection, residual,
         output, buffers.downProjectionSums, down, rows);
+    if (buffers.captured) {
+      const auto captureLayers = geometry_.captureLayers;
+      const auto captured =
+          std::find(captureLayers.begin(), captureLayers.end(), layerIndex);
+      if (captured != captureLayers.end()) {
+        const uint32_t slot =
+            static_cast<uint32_t>(captured - captureLayers.begin());
+        for (const QwenTargetPrefillSequence &sequence : sequences) {
+          for (uint32_t index = 0; index < sequence.captureCount; ++index) {
+            const QwenTargetPrefillCapture &capture = sequence.captures[index];
+            ops::DraftAttention::captureTargetHidden(
+                graph, output, buffers.captured, capture.rows, slot,
+                capture.sourceStart, capture.destinationStart,
+                geometry_.hiddenSize, geometry_.capturedHiddenSize);
+          }
+        }
+      }
+    }
   }
   if (gdnIndex != geometry_.stateLayout.layers ||
       attentionIndex != kvLayers.size()) {
@@ -422,6 +441,18 @@ void Qwen3_8Target::addVerifyImpl(
     operators_.linear().addResidualBatch(
         graph, buffers.denseIntermediate,
         layer.downProjection, residual, output, down, lanes, stats);
+    if (buffers.capturedTargetHidden) {
+      const auto captureLayers = geometry_.captureLayers;
+      const auto captured =
+          std::find(captureLayers.begin(), captureLayers.end(), layerIndex);
+      if (captured != captureLayers.end()) {
+        ops::DraftAttention::captureTargetHidden(
+            graph, output, buffers.capturedTargetHidden,
+            lanes * ExecutionLimits::targetVerifyRows,
+            static_cast<uint32_t>(captured - captureLayers.begin()), 0, 0,
+            geometry_.hiddenSize, geometry_.capturedHiddenSize);
+      }
+    }
   }
   if (gdnIndex != geometry_.stateLayout.layers ||
       attentionIndex != kvLayers.size()) {

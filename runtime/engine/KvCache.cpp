@@ -15,10 +15,34 @@ uint64_t mix(uint64_t hash, uint64_t value) noexcept {
 
 } // namespace
 
+ImageIdentity blockImageIdentity(uint64_t blockBegin, uint32_t blockTokens,
+                                 std::span<const ImageSpan> spans) noexcept {
+  ImageIdentity identity;
+  const uint64_t blockEnd = blockBegin + blockTokens;
+  for (const ImageSpan &span : spans) {
+    if (span.end() <= blockBegin || span.offset >= blockEnd)
+      continue;
+    // Two independently seeded chains fold the content digest, the grid, and
+    // the block's alignment inside the span into 128 bits.
+    uint64_t lo = identity.lo ? identity.lo : 0x243f6a8885a308d3ULL;
+    uint64_t hi = identity.hi ? identity.hi : 0x13198a2e03707344ULL;
+    for (uint64_t value :
+         {span.digestLo, span.digestHi,
+          (uint64_t{span.gridHeight} << 32) | span.gridWidth,
+          (uint64_t{span.offset} << 32) | span.tokens, blockBegin}) {
+      lo = mix(lo, value);
+      hi = mix(hi, ~value);
+    }
+    identity = {lo, hi};
+  }
+  return identity;
+}
+
 bool exactKvBlockKeyMatch(const KvBlockKeyView &stored,
                           const KvBlockKeyView &query) noexcept {
   return stored.indexHash == query.indexHash &&
          stored.parentBlock == query.parentBlock &&
+         stored.images == query.images &&
          stored.tokens.size() == query.tokens.size() &&
          std::equal(stored.tokens.begin(), stored.tokens.end(),
                     query.tokens.begin());
@@ -35,28 +59,33 @@ KvCache::~KvCache() noexcept {
 }
 
 uint64_t KvCache::indexHash(uint64_t parentBlock,
-                            std::span<const uint32_t> tokens) const noexcept {
+                            std::span<const uint32_t> tokens,
+                            ImageIdentity images) const noexcept {
   uint64_t hash = mix(0x6a09e667f3bcc909ULL, parentBlock);
   for (uint8_t byte : cacheNamespace_.digest)
     hash = mix(hash, byte);
   for (uint32_t token : tokens)
     hash = mix(hash, token);
+  hash = mix(hash, images.lo);
+  hash = mix(hash, images.hi);
   return hash;
 }
 
 std::optional<KvCache::BlockMatch>
-KvCache::find(uint64_t parentBlock, std::span<const uint32_t> tokens) const {
+KvCache::find(uint64_t parentBlock, std::span<const uint32_t> tokens,
+              ImageIdentity images) const {
   if (tokens.size() != pageTokens) {
     return std::nullopt;
   }
   if (parentBlock && !blocks_.contains(parentBlock))
     return std::nullopt;
-  const uint64_t hash = indexHash(parentBlock, tokens);
-  const KvBlockKeyView query{parentBlock, hash, tokens};
+  const uint64_t hash = indexHash(parentBlock, tokens, images);
+  const KvBlockKeyView query{parentBlock, hash, tokens, images};
   const auto [first, last] = index_.equal_range(hash);
   for (auto candidate = first; candidate != last; ++candidate) {
     const Block &entry = block(candidate->second);
-    const KvBlockKeyView stored{entry.parent, entry.indexHash, entry.tokens};
+    const KvBlockKeyView stored{entry.parent, entry.indexHash, entry.tokens,
+                                entry.images};
     if (exactKvBlockKeyMatch(stored, query)) {
       return BlockMatch{entry.id, entry.physicalPage};
     }
@@ -66,14 +95,15 @@ KvCache::find(uint64_t parentBlock, std::span<const uint32_t> tokens) const {
 
 KvCache::InsertResult KvCache::insert(uint64_t parentBlock,
                                       std::span<const uint32_t> tokens,
-                                      uint32_t physicalPage) {
+                                      uint32_t physicalPage,
+                                      ImageIdentity images) {
   if (tokens.size() != pageTokens) {
     throw std::invalid_argument("KV cache block must contain one full page");
   }
   if (physicalPage >= pool_.pageCount()) {
     throw std::out_of_range("KV cache physical page is out of range");
   }
-  if (auto existing = find(parentBlock, tokens)) {
+  if (auto existing = find(parentBlock, tokens, images)) {
     InsertResult result;
     result.id = existing->id;
     result.physicalPage = existing->physicalPage;
@@ -93,8 +123,9 @@ KvCache::InsertResult KvCache::insert(uint64_t parentBlock,
   Block entry;
   entry.id = nextBlockId_;
   entry.parent = parentBlock;
-  entry.indexHash = indexHash(parentBlock, tokens);
+  entry.indexHash = indexHash(parentBlock, tokens, images);
   std::copy(tokens.begin(), tokens.end(), entry.tokens.begin());
+  entry.images = images;
   entry.physicalPage = physicalPage;
   entry.depth = parentBlock ? block(parentBlock).depth + 1 : 1;
   entry.evictionNode = evictionOrder_.extract(
@@ -149,6 +180,101 @@ void KvCache::releaseActive(uint64_t blockId) noexcept {
     insertEvictable(blockId, recency_.next());
 }
 
+void KvCache::retainChain(uint64_t blockId) {
+  uint64_t current = blockId;
+  while (current != 0) {
+    retainActive(current);
+    current = block(current).parent;
+  }
+}
+
+void KvCache::releaseChain(uint64_t blockId) noexcept {
+  uint64_t current = blockId;
+  while (current != 0) {
+    auto found = blocks_.find(current);
+    if (found == blocks_.end()) {
+      break;
+    }
+    uint64_t parent = found->second.parent;
+    releaseActive(current);
+    current = parent;
+  }
+}
+
+uint64_t KvCache::forkBranch(uint64_t blockId) {
+  if (blockId == 0 || !blocks_.contains(blockId)) {
+    return 0;
+  }
+  retainChain(blockId);
+  return blockId;
+}
+
+void KvCache::recordSaliency(uint64_t blockId, float weight) {
+  auto found = blocks_.find(blockId);
+  if (found != blocks_.end()) {
+    found->second.saliency = 0.8f * found->second.saliency + 0.2f * weight;
+  }
+}
+
+float KvCache::blockSaliency(uint64_t blockId) const noexcept {
+  auto found = blocks_.find(blockId);
+  return (found != blocks_.end()) ? found->second.saliency : 0.0f;
+}
+
+std::vector<uint64_t> KvCache::lowSaliencyBlocks(uint64_t chainBlockId,
+                                                float threshold) const {
+  std::vector<uint64_t> low;
+  uint64_t current = chainBlockId;
+  while (current != 0) {
+    auto found = blocks_.find(current);
+    if (found == blocks_.end()) {
+      break;
+    }
+    if (found->second.parent != 0 && found->second.saliency < threshold) {
+      low.push_back(current);
+    }
+    current = found->second.parent;
+  }
+  return low;
+}
+
+void KvCache::pinRootChain(uint64_t blockId) {
+  uint64_t current = blockId;
+  while (current != 0) {
+    auto found = blocks_.find(current);
+    if (found == blocks_.end()) break;
+    Block &b = found->second;
+    if (!b.pinned) {
+      b.pinned = true;
+      if (b.evictable) {
+        removeEvictable(current);
+      }
+    }
+    current = b.parent;
+  }
+}
+
+void KvCache::unpinRootChain(uint64_t blockId) noexcept {
+  uint64_t current = blockId;
+  while (current != 0) {
+    auto found = blocks_.find(current);
+    if (found == blocks_.end()) break;
+    Block &b = found->second;
+    if (b.pinned) {
+      b.pinned = false;
+      if (!b.children && !b.activeUsers && !b.evictable) {
+        insertEvictable(current, recency_.next());
+      }
+    }
+    current = b.parent;
+  }
+}
+
+bool KvCache::isRootPinned(uint64_t blockId) const noexcept {
+  auto found = blocks_.find(blockId);
+  return (found != blocks_.end()) ? found->second.pinned : false;
+}
+
 void KvCache::touch(uint64_t blockId) noexcept {
   auto found = blocks_.find(blockId);
   if (found == blocks_.end())
@@ -184,6 +310,50 @@ uint32_t KvCache::chainLength(uint64_t blockId) const {
   return block(blockId).depth;
 }
 
+KvCache::Chain KvCache::spliceChain(uint64_t ancestorBlockId,
+                                    uint64_t descendantBlockId) const {
+  Chain ancestor = ancestorBlockId ? chain(ancestorBlockId) : Chain{};
+  if (!descendantBlockId) {
+    return ancestor;
+  }
+  Chain descendant = chain(descendantBlockId);
+  Chain result;
+  result.blocks.reserve(ancestor.blocks.size() + descendant.blocks.size());
+  result.pages.reserve(ancestor.pages.size() + descendant.pages.size());
+
+  result.blocks.insert(result.blocks.end(), ancestor.blocks.begin(), ancestor.blocks.end());
+  result.pages.insert(result.pages.end(), ancestor.pages.begin(), ancestor.pages.end());
+
+  result.blocks.insert(result.blocks.end(), descendant.blocks.begin(), descendant.blocks.end());
+  result.pages.insert(result.pages.end(), descendant.pages.begin(), descendant.pages.end());
+
+  return result;
+}
+
+std::optional<KvCache::BlockExport> KvCache::exportBlock(uint64_t blockId) const {
+  auto found = blocks_.find(blockId);
+  if (found == blocks_.end()) {
+    return std::nullopt;
+  }
+  const Block &b = found->second;
+  return BlockExport{b.id, b.parent, b.tokens, b.physicalPage, b.depth};
+}
+
+std::vector<KvCache::BlockExport> KvCache::vaultChain(uint64_t blockId) const {
+  std::vector<BlockExport> result;
+  while (blockId) {
+    auto found = blocks_.find(blockId);
+    if (found == blocks_.end()) break;
+    const Block &b = found->second;
+    result.push_back(BlockExport{b.id, b.parent, b.tokens, b.physicalPage, b.depth});
+    blockId = b.parent;
+  }
+  std::reverse(result.begin(), result.end());
+  return result;
+}
+
+
+
 std::optional<CacheEvictionCandidate>
 KvCache::evictionCandidate(uint64_t after) const {
   auto candidate = after
@@ -196,6 +366,9 @@ KvCache::evictionCandidate(uint64_t after) const {
 
 void KvCache::erase(uint64_t blockId) {
   const Block &candidate = block(blockId);
+  if (candidate.pinned) {
+    throw std::logic_error("cannot evict a pinned KV cache root block");
+  }
   if (candidate.children || candidate.activeUsers) {
     throw std::logic_error("cannot evict a referenced KV cache block");
   }
@@ -258,6 +431,8 @@ void KvCache::touchEvictable(uint64_t blockId) noexcept {
 // than the child and must not jump ahead of colder chains.
 void KvCache::insertEvictable(uint64_t blockId, uint64_t lastUsed) noexcept {
   Block &entry = blocks_.at(blockId);
+  if (entry.pinned)
+    return;
   if (entry.evictable || entry.children || entry.activeUsers ||
       entry.evictionNode.empty())
     std::terminate();

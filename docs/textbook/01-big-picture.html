@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>01 · The Big Picture — Slipstream Textbook</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<div class="wrap">
+  <div class="navbar">
+    <a href="index.html">← Index</a>
+    <a href="02-server.html">Next: The Server →</a>
+  </div>
+
+  <h1>The Big Picture</h1>
+  <p class="subtitle">Chapter 01 · The six layers, the pipe boundary, and the dependency rules.</p>
+
+  <p>Slipstream is a <b>two-process</b> system. A Python server speaks HTTP and shapes requests; a native C++/Metal engine does the actual inference. They talk over a <b>binary pipe</b>. Everything model-specific lives in its own folder. The diagram below is the whole system.</p>
+
+  <div class="flow">
+    <div class="box b-server">
+      <div class="name"><span class="dot" style="background:var(--server)"></span>Client</div>
+      <div class="desc">Browser / SDK · HTTP + SSE · OpenAI / Anthropic / Responses shapes</div>
+    </div>
+    <div class="arrow">↓ <span class="label">JSON over HTTP</span></div>
+
+    <div class="box b-server">
+      <div class="name"><span class="dot" style="background:var(--server)"></span>Server <span class="path">server/ · Python</span></div>
+      <div class="desc">HTTP handler · chat template (Jinja2) · tool/grammar (CFG) · thinking · PDF/image preprocessing · subprocess pipe client · agent harness</div>
+      <div class="chips">
+        <span class="chip">server.py</span><span class="chip">frontend.py</span><span class="chip">backend.py</span>
+        <span class="chip">runtime.py</span><span class="chip">protocol.py</span><span class="chip">tool_schema.py</span>
+        <span class="chip">agent/</span>
+      </div>
+    </div>
+    <div class="arrow">↓ <span class="label">binary frames over a pipe (fd pair)</span></div>
+
+    <div class="box b-engine">
+      <div class="name"><span class="dot" style="background:var(--engine)"></span>Engine <span class="path">runtime/engine/ · C++</span></div>
+      <div class="desc">Request admission · scheduler (phase FSM) · batching · KV prefix cache · memory plan &amp; governor · status</div>
+      <div class="chips">
+        <span class="chip">Engine.cpp</span><span class="chip">Scheduler.cpp</span><span class="chip">Cache.cpp</span>
+        <span class="chip">KvPool.cpp</span><span class="chip">MemoryPlan.cpp</span><span class="chip">MemoryGovernor.cpp</span>
+      </div>
+    </div>
+    <div class="arrow">↓ <span class="label">C++ function calls (same process)</span></div>
+
+    <div class="box b-model">
+      <div class="name"><span class="dot" style="background:var(--model)"></span>Shared Model Runtime <span class="path">runtime/model/ · C++</span></div>
+      <div class="desc">The decode loop (draft → verify → accept → commit) · per-request recurrent state · batch lanes · drafting</div>
+      <div class="chips">
+        <span class="chip">Runtime.mm (3220 ln)</span><span class="chip">QwenState</span><span class="chip">QwenTarget</span>
+        <span class="chip">ModelDescriptor</span><span class="chip">ModelFactory</span><span class="chip">DFlashDraft</span>
+      </div>
+    </div>
+    <div class="arrow">↓ <span class="label">reaches a concrete model only through 4 plug-in files</span></div>
+
+    <div class="grid c2">
+      <div class="box b-plugin">
+        <div class="name"><span class="dot" style="background:var(--plugin)"></span>models/qwen4exp/</div>
+        <div class="desc">Flash-Next 125.7B MoE · 512 experts · MTP draft · expert streaming · hyper-connections · own kernels</div>
+      </div>
+      <div class="box b-plugin">
+        <div class="name"><span class="dot" style="background:var(--plugin)"></span>models/qwen38/</div>
+        <div class="desc">Qwen3.8-27B Dense · 64 hybrid layers · DFlash draft · GDN + full attn · own kernels</div>
+      </div>
+    </div>
+    <div class="arrow">↓ <span class="label">calls into shared ops + model-specific code</span></div>
+
+    <div class="box b-ops">
+      <div class="name"><span class="dot" style="background:var(--ops)"></span>Shared Ops <span class="path">runtime/ops/ · C++</span></div>
+      <div class="desc">One C++ entry point per shared kernel family</div>
+      <div class="chips">
+        <span class="chip">Linear</span><span class="chip">MoE</span><span class="chip">PagedAttention</span>
+        <span class="chip">GDN</span><span class="chip">Sampling</span><span class="chip">RoPE</span>
+        <span class="chip">Embedding</span><span class="chip">Vision</span><span class="chip">PromptLookup</span>
+      </div>
+    </div>
+    <div class="arrow">↓ <span class="label">builds CommandGraph, submits to Metal</span></div>
+
+    <div class="box b-metal">
+      <div class="name"><span class="dot" style="background:var(--metal)"></span>Metal Backend <span class="path">runtime/metal/ · C++/ObjC</span></div>
+      <div class="desc">GPU buffers · pre-compiled pipelines · command graphs · residency · watchdog · kernels/ · abi/</div>
+      <div class="chips">
+        <span class="chip">MetalBackend.mm</span><span class="chip">CommandGraph</span><span class="chip">Residency</span>
+        <span class="chip">kernels/</span><span class="chip">abi/</span>
+      </div>
+    </div>
+    <div class="arrow">↓</div>
+
+    <div class="box b-ssd">
+      <div class="name"><span class="dot" style="background:var(--ssd)"></span>Apple GPU + Unified Memory + SSD</div>
+      <div class="desc">Metal compute · unified memory (RAM) · SSD (streamed MoE experts, "waves")</div>
+    </div>
+  </div>
+
+  <h2>Dependency Rules <span class="tag">enforced by dev/tools/check_architecture.py</span></h2>
+  <div class="grid c2">
+    <div class="panel"><b>Model folders launch their own kernels</b><br><span style="color:var(--muted);font-size:13px">Shared model code may not — model-specific GPU work stays in one place.</span></div>
+    <div class="panel"><b>Models never depend on the engine</b><br><span style="color:var(--muted);font-size:13px">…or on another model. Models stay swappable.</span></div>
+    <div class="panel"><b>Shared ops/metal never depend on a model</b><br><span style="color:var(--muted);font-size:13px">Shared code stays shared.</span></div>
+    <div class="panel"><b>Engine never names a concrete model</b><br><span style="color:var(--muted);font-size:13px">Except its startup files. Scheduling &amp; memory policy work for any model.</span></div>
+  </div>
+
+  <div class="note warn">
+    <b>Honest limit:</b> the shared runtime (<code>Runtime.mm</code>, state, arenas) assumes the Qwen hybrid family — linear-attention and full-attention layers, an 8-bit paged KV cache, and a recurrent state per request. A model from this family plugs in as described. A model outside it (e.g. pure attention with a different cache) also needs the runtime's buffers and state generalized. That work is not done.
+  </div>
+
+  <div class="footer">Slipstream Visual Textbook · Chapter 01</div>
+</div>
+</body>
+</html>

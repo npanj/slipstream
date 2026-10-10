@@ -524,6 +524,102 @@ class LauncherTests(unittest.TestCase):
                 shard.unlink()
             self.assertIsNone(self.serve_gguf(folder, model=str(folder)))
 
+    def test_code_command_parses_arguments_and_dispatches(self):
+        args = launcher.parse_args(["code", "--port", "8095", "--model", "custom-model"])
+        self.assertEqual(args.command, "code")
+        self.assertEqual(args.port, 8095)
+        self.assertEqual(args.model, "custom-model")
+        self.assertEqual(args.stream, "hybrid")
+
+        with mock.patch("server.agent.agent.run_agent_cli", return_value=0) as run_cli:
+            exit_code = launcher.main(["code", "--port", "8095", "--model", "custom-model"])
+            self.assertEqual(exit_code, 0)
+            run_cli.assert_called_once_with(
+                base_url="http://127.0.0.1:8095/v1",
+                model="custom-model",
+                reasoning_effort="medium",
+                stream_mode="hybrid",
+                resume_session=None,
+            )
+
+    def test_code_command_with_resume_flag(self):
+        args = launcher.parse_args(["code", "--resume", "sess-vault-abc"])
+        self.assertEqual(args.resume, "sess-vault-abc")
+        self.assertEqual(args.stream, "hybrid")
+
+        with mock.patch("server.agent.agent.run_agent_cli", return_value=0) as run_cli:
+            exit_code = launcher.main(["code", "--resume", "sess-vault-abc"])
+            self.assertEqual(exit_code, 0)
+            run_cli.assert_called_once_with(
+                base_url=f"http://127.0.0.1:{launcher.PORT}/v1",
+                model=None,
+                reasoning_effort="medium",
+                stream_mode="hybrid",
+                resume_session="sess-vault-abc",
+            )
+
+    def test_code_command_with_stream_flag(self):
+        args = launcher.parse_args(["code", "--stream", "never"])
+        self.assertEqual(args.stream, "never")
+
+        with mock.patch("server.agent.agent.run_agent_cli", return_value=0) as run_cli:
+            exit_code = launcher.main(["code", "--stream", "never"])
+            self.assertEqual(exit_code, 0)
+            run_cli.assert_called_once_with(
+                base_url=f"http://127.0.0.1:{launcher.PORT}/v1",
+                model=None,
+                reasoning_effort="medium",
+                stream_mode="never",
+                resume_session=None,
+            )
+
+    def test_code_command_with_no_stream_flag(self):
+        args = launcher.parse_args(["code", "--no-stream"])
+        self.assertTrue(args.no_stream)
+
+        with mock.patch("server.agent.agent.run_agent_cli", return_value=0) as run_cli:
+            exit_code = launcher.main(["code", "--no-stream"])
+            self.assertEqual(exit_code, 0)
+            run_cli.assert_called_once_with(
+                base_url=f"http://127.0.0.1:{launcher.PORT}/v1",
+                model=None,
+                reasoning_effort="medium",
+                stream_mode="never",
+                resume_session=None,
+            )
+
+    def test_code_command_with_no_timeout_flag(self):
+        args = launcher.parse_args(["code", "--no-timeout"])
+        self.assertTrue(args.no_timeout)
+
+        with mock.patch("server.agent.agent.run_agent_cli", return_value=0) as run_cli:
+            exit_code = launcher.main(["code", "--no-timeout"])
+            self.assertEqual(exit_code, 0)
+            run_cli.assert_called_once_with(
+                base_url=f"http://127.0.0.1:{launcher.PORT}/v1",
+                model=None,
+                reasoning_effort="medium",
+                stream_mode="hybrid",
+                resume_session=None,
+                timeout=0.0,
+            )
+
+    def test_code_command_with_timeout_flag(self):
+        args = launcher.parse_args(["code", "--timeout", "300.0"])
+        self.assertEqual(args.timeout, 300.0)
+
+        with mock.patch("server.agent.agent.run_agent_cli", return_value=0) as run_cli:
+            exit_code = launcher.main(["code", "--timeout", "300.0"])
+            self.assertEqual(exit_code, 0)
+            run_cli.assert_called_once_with(
+                base_url=f"http://127.0.0.1:{launcher.PORT}/v1",
+                model=None,
+                reasoning_effort="medium",
+                stream_mode="hybrid",
+                resume_session=None,
+                timeout=300.0,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

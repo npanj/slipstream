@@ -92,6 +92,7 @@ public:
       throw std::runtime_error("missing composite state");
     restored_ += length;
   }
+  void setDraftContextPlan(uint64_t, DraftContextPlan) override {}
   std::vector<ModelStepResult>
   prefill(const BatchPlan &, std::span<const ModelBatchItem> items) {
     std::vector<ModelStepResult> results;

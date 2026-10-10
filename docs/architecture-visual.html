@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Slipstream — Architecture</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --server: #58a6ff;
+    --engine: #d2a8ff;
+    --model: #7ee787;
+    --plugin: #ffa657;
+    --ops: #79c0ff;
+    --metal: #ff7b72;
+    --ssd: #e3b341;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif;
+    padding: 40px 24px 80px;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 28px; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 32px; font-size: 15px; }
+  h2 { font-size: 18px; margin: 40px 0 16px; color: var(--text); }
+  h2 .tag { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 8px; }
+
+  /* ---- layer stack ---- */
+  .stack { display: flex; flex-direction: column; gap: 0; }
+  .layer {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    position: relative;
+  }
+  .layer + .arrow { display: flex; justify-content: center; padding: 2px 0; }
+  .layer .name { font-weight: 700; font-size: 15px; display: flex; align-items: center; gap: 10px; }
+  .layer .path { font-family: "SF Mono", Menlo, monospace; font-size: 12px; color: var(--muted); font-weight: 400; }
+  .layer .desc { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .chip {
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px 9px;
+    color: var(--text);
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+
+  .l-server { border-left: 4px solid var(--server); }
+  .l-engine { border-left: 4px solid var(--engine); }
+  .l-model  { border-left: 4px solid var(--model); }
+  .l-plugin { border-left: 4px solid var(--plugin); }
+  .l-ops    { border-left: 4px solid var(--ops); }
+  .l-metal  { border-left: 4px solid var(--metal); }
+
+  .arrow { color: var(--muted); font-size: 18px; }
+  .arrow .label {
+    font-size: 11px; font-family: "SF Mono", Menlo, monospace;
+    background: var(--bg); border: 1px dashed var(--border);
+    border-radius: 6px; padding: 2px 10px; margin: 0 10px;
+  }
+
+  /* ---- two process split ---- */
+  .processes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 8px; }
+  .process {
+    border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+    background: var(--panel);
+  }
+  .process h3 { font-size: 14px; margin-bottom: 4px; }
+  .process .lang { font-size: 11px; color: var(--muted); font-family: "SF Mono", Menlo, monospace; }
+  .pipe {
+    text-align: center; font-family: "SF Mono", Menlo, monospace; font-size: 12px;
+    color: var(--muted); padding: 10px 0;
+  }
+  .pipe b { color: var(--text); }
+
+  /* ---- plugin grid ---- */
+  .plugins { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+  .plugin {
+    border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px;
+    background: rgba(255,166,87,0.06);
+  }
+  .plugin h4 { font-size: 13px; color: var(--plugin); margin-bottom: 4px; }
+  .plugin p { font-size: 12px; color: var(--muted); }
+
+  /* ---- decode step timeline ---- */
+  .timeline { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+  .step {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; position: relative;
+  }
+  .step .num {
+    position: absolute; top: -12px; left: 14px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 20px; padding: 1px 12px; font-size: 12px; font-weight: 700;
+  }
+  .step h4 { font-size: 14px; margin: 6px 0 6px; }
+  .step .ms { font-family: "SF Mono", Menlo, monospace; font-size: 12px; color: var(--ssd); }
+  .step p { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+  .result {
+    margin-top: 14px; text-align: center; font-size: 14px;
+    background: rgba(126,231,135,0.08); border: 1px solid rgba(126,231,135,0.3);
+    border-radius: 8px; padding: 10px;
+  }
+  .result b { color: var(--model); }
+
+  /* ---- rules ---- */
+  .rules { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .rule {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; font-size: 13px;
+  }
+  .rule b { color: var(--engine); }
+  .rule span { color: var(--muted); display: block; font-size: 12px; margin-top: 2px; }
+
+  .note {
+    margin-top: 24px; font-size: 12.5px; color: var(--muted);
+    border-left: 3px solid var(--ssd); padding: 8px 14px;
+    background: rgba(227,179,65,0.05); border-radius: 0 8px 8px 0;
+  }
+  @media (max-width: 720px) {
+    .processes, .plugins, .timeline, .rules { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Slipstream Architecture</h1>
+  <p class="subtitle">High-performance Apple Silicon inference — C++/Metal engine + Python server, SSD expert streaming + speculative decoding</p>
+
+  <h2>Two processes, one pipe</h2>
+  <div class="processes">
+    <div class="process">
+      <h3>Python Server</h3>
+      <div class="lang">server/ — Python 3</div>
+      <p style="font-size:12.5px;color:var(--muted);margin-top:6px;">OpenAI &amp; Anthropic request shapes, chat template, thinking levels, tool-call grammar, streaming, PDF text extraction.</p>
+    </div>
+    <div class="process">
+      <h3>Native Engine</h3>
+      <div class="lang">runtime/ — C++ / Objective-C++ / Metal</div>
+      <p style="font-size:12.5px;color:var(--muted);margin-top:6px;">Scheduling, KV cache, memory governance, decode loop, GPU kernels. Single process, all inference.</p>
+    </div>
+  </div>
+  <div class="pipe">▼ &nbsp; <b>binary protocol over a pipe</b> &nbsp; ▼<br>
+  <span style="font-size:11px;">server/protocol.py &nbsp;↔&nbsp; runtime/engine/Protocol.cpp</span></div>
+
+  <h2>Native engine layers <span class="tag">top → bottom, strict dependency direction</span></h2>
+  <div class="stack">
+    <div class="layer l-engine">
+      <div class="name"><span class="dot" style="background:var(--engine)"></span>Engine <span class="path">runtime/engine/</span></div>
+      <div class="desc">Admits requests within memory, batches, chunks prompts, reuses cached prompt prefixes.</div>
+      <div class="chips">
+        <span class="chip">Engine.cpp</span><span class="chip">Scheduler.cpp</span><span class="chip">Cache.cpp</span>
+        <span class="chip">KvCache.cpp</span><span class="chip">MemoryPlan.cpp</span><span class="chip">MemoryGovernor.cpp</span>
+      </div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="layer l-model">
+      <div class="name"><span class="dot" style="background:var(--model)"></span>Shared Model Runtime <span class="path">runtime/model/</span></div>
+      <div class="desc">The decode loop, speculative guess checking, per-request recurrent state, buffers. Reaches a concrete model only through 4 plug-in files.</div>
+      <div class="chips">
+        <span class="chip">Runtime.mm</span><span class="chip">QwenState.*</span><span class="chip">QwenTarget.*</span>
+        <span class="chip">ModelDescriptor.*</span><span class="chip">DFlashDraft.*</span><span class="chip">WeightStore.*</span>
+      </div>
+    </div>
+    <div class="arrow">▼ <span class="label">4 plug-in files per model</span> ▼</div>
+    <div class="layer l-plugin">
+      <div class="name"><span class="dot" style="background:var(--plugin)"></span>Model Folders <span class="path">models/&lt;name&gt;/</span></div>
+      <div class="desc">Everything only this model has: layout, GGUF loader, forward pass, own kernels, converters.</div>
+      <div class="plugins">
+        <div class="plugin">
+          <h4>models/qwen4exp/ — Flash-Next 125.7B MoE</h4>
+          <p>512 routed experts, 7.3B active/token, 48 layers. Kernels: hyper-connection mixing, n-gram embedding, sparse attention picker, MTP draft head.</p>
+        </div>
+        <div class="plugin">
+          <h4>models/qwen38/ — Qwen3.8-27B Dense</h4>
+          <p>64 dense hybrid layers, 5,120 hidden. Dense attention + GDN verification. Kernels: capture, draft, draft_context.</p>
+        </div>
+      </div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="layer l-ops">
+      <div class="name"><span class="dot" style="background:var(--ops)"></span>Ops <span class="path">runtime/ops/</span></div>
+      <div class="desc">One C++ entry point per shared kernel family — launches kernels with the right sizes and variant.</div>
+      <div class="chips">
+        <span class="chip">Linear</span><span class="chip">MoE</span><span class="chip">PagedAttention</span>
+        <span class="chip">GDN</span><span class="chip">RoPE</span><span class="chip">Sampling</span><span class="chip">PromptLookup</span><span class="chip">Embedding</span>
+      </div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="layer l-metal">
+      <div class="name"><span class="dot" style="background:var(--metal)"></span>Metal Backend <span class="path">runtime/metal/</span></div>
+      <div class="desc">Talks to the GPU: allocations, pipelines, events, pipelined command-graph submission.</div>
+      <div class="chips">
+        <span class="chip">MetalBackend.mm</span><span class="chip">CommandGraph.hpp</span>
+        <span class="chip">kernels/prefill/</span><span class="chip">kernels/decode/</span><span class="chip">kernels/shared/</span><span class="chip">abi/</span>
+      </div>
+    </div>
+  </div>
+
+  <h2>One decode step, end to end</h2>
+  <div class="timeline">
+    <div class="step">
+      <span class="num">1</span>
+      <h4>Draft</h4>
+      <div class="ms">~7 ms</div>
+      <p>Draft head guesses up to 5 tokens (stops early when unsure). Each guess: its own attention layer + experts + 64K-token output layer.</p>
+    </div>
+    <div class="step">
+      <span class="num">2</span>
+      <h4>Verify</h4>
+      <div class="ms">~65 ms</div>
+      <p>Full model checks anchor + guesses in one pass. Per layer: router → pick experts → cached ones run on GPU while missing ones stream from SSD in "waves".</p>
+    </div>
+    <div class="step">
+      <span class="num">3</span>
+      <h4>Accept</h4>
+      <div class="ms">+1 token</div>
+      <p>Keep the guesses the model agrees with, plus one token of its own. Repeat.</p>
+    </div>
+  </div>
+  <div class="result">≈ <b>2.8–3.1 tokens/step</b> → <b>~38–40 tok/s</b> on a 64 GB Mac</div>
+
+  <h2>Dependency rules <span class="tag">enforced by dev/tools/check_architecture.py</span></h2>
+  <div class="rules">
+    <div class="rule"><b>Model folders launch their own kernels</b><span>Shared model code may not — model-specific GPU work stays in one place.</span></div>
+    <div class="rule"><b>Models never depend on the engine</b><span>…or on another model. Models stay swappable.</span></div>
+    <div class="rule"><b>Shared ops/metal never depend on a model</b><span>Shared code stays shared.</span></div>
+    <div class="rule"><b>Engine never names a concrete model</b><span>Except its startup files. Scheduling &amp; memory policy work for any model.</span></div>
+  </div>
+
+  <div class="note">
+    <b>Honest limit:</b> the shared runtime assumes the Qwen hybrid family — linear + full attention layers,
+    8-bit paged KV cache, recurrent state per request. A model outside that family would need the runtime's
+    buffers and state generalized. That work is not done yet.
+  </div>
+</div>
+</body>
+</html>

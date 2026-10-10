@@ -1,6 +1,8 @@
 #pragma once
 
 #include "ModelDescriptor.hpp"
+#include "model/DFlashDraft.hpp"
+#include "model/QwenVision.hpp"
 #include "models/qwen4exp/Qwen4Exp.hpp"
 #include "models/qwen38/Qwen3_8.hpp"
 #include "ops/Q8PageStorage.hpp"
@@ -19,6 +21,8 @@ using TargetWeights =
 struct ModelPackage final {
   ModelDescriptor descriptor;
   TargetWeights target;
+  QwenVisionWeights vision;
+  DFlashDraftWeights draft;
   std::string manifestFingerprintSha256;
 
   [[nodiscard]] const std::string &name() const noexcept {
@@ -69,6 +73,13 @@ struct ModelPackage final {
       return weights.files;
     }, target);
   }
+  [[nodiscard]] bool hasVision() const noexcept {
+    return vision.actualAllocatedBytes > 0;
+  }
+  // Phase 1 loads the draft weights; the draft forward arrives in phase 2.
+  [[nodiscard]] bool hasDraft() const noexcept {
+    return draft.actualAllocatedBytes > 0;
+  }
 };
 
 // Model execution resources; physical memory admission remains governed by
@@ -80,6 +91,7 @@ struct RuntimeContext final {
   kv::Q8PageStorage &kvPages;
   StateStorage &stateStorage;
   const ops::ExecutionPlans &operators;
+  uint32_t maximumImagePatches = ops::kMaximumImagePatches;
   uint64_t pipelineReserveBytes = 0;
   uint64_t runtimeOverheadReserveBytes = 0;
 };

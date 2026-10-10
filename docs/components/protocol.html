@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Protocol — Slipstream Component Deep-Dive</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2128;
+    --border: #30363d; --text: #e6edf3; --muted: #8b949e;
+    --server: #58a6ff; --engine: #d2a8ff; --model: #7ee787;
+    --ops: #79c0ff; --metal: #ff7b72; --protocol: #e3b341;
+    --install: #ffa657; --accent: #e3b341;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif;
+    padding: 40px 24px 80px; line-height: 1.6; }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 28px; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 32px; font-size: 15px; }
+  h2 { font-size: 20px; margin: 40px 0 16px; }
+  h2 .tag { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 8px; }
+  h3 { font-size: 16px; margin: 24px 0 10px; }
+  p { margin: 10px 0; font-size: 14.5px; }
+  code { background: var(--panel2); padding: 2px 6px; border-radius: 4px; font-size: 12.5px;
+    font-family: "SF Mono", Menlo, monospace; }
+  .back { display: inline-block; margin-bottom: 24px; color: var(--muted); text-decoration: none; font-size: 14px; }
+  .back:hover { color: var(--text); }
+  .grid { display: grid; gap: 16px; }
+  .grid.c2 { grid-template-columns: 1fr 1fr; }
+  .box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; }
+  .box .name { font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .box .desc { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .box.b-protocol { border-left: 4px solid var(--protocol); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+  .note { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 18px; margin: 16px 0; font-size: 13px; color: var(--muted); }
+  .note b { color: var(--text); }
+  .steps { display: flex; flex-direction: column; gap: 0; margin: 16px 0; }
+  .step { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 16px; margin-bottom: 4px; }
+  .step .head { display: flex; justify-content: space-between; align-items: center; }
+  .step .title { font-weight: 700; font-size: 13.5px; }
+  .step .fn { font-size: 11px; color: var(--protocol); font-family: "SF Mono", Menlo, monospace; }
+  .step .body { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .step .body ul { margin: 6px 0 0 18px; }
+  .step .body li { margin: 3px 0; }
+  .step .body code { font-size: 11.5px; }
+  .svg-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; margin: 16px 0; overflow-x: auto; }
+  .svg-wrap svg { width: 100%; height: auto; }
+  .navbar { display: flex; justify-content: space-between; margin-bottom: 24px; }
+  .navbar a { color: var(--muted); text-decoration: none; font-size: 13px; }
+  .navbar a:hover { color: var(--text); }
+  .dir-in { color: #58a6ff; }
+  .dir-out { color: #7ee787; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="navbar">
+    <a href="index.html">← Components</a>
+    <a href="ops.html">Next: Shared Ops →</a>
+  </div>
+
+  <h1>The Wire Protocol <span style="color:var(--protocol)">v5</span></h1>
+  <p class="subtitle">Component deep-dive · A binary frame protocol over a pipe. Python <code>server/protocol.py</code> and C++ <code>runtime/engine/Protocol.cpp</code> are mirror images of the same codec.</p>
+
+  <h2>Frame Anatomy <span class="tag">24-byte header + payload</span></h2>
+  <div class="svg-wrap">
+    <svg viewBox="0 0 880 180" xmlns="http://www.w3.org/2000/svg">
+      <!-- Header fields -->
+      <rect x="20" y="30" width="120" height="60" rx="6" fill="#161b22" stroke="#e3b341" stroke-width="2"/>
+      <text x="80" y="52" text-anchor="middle" fill="#e3b341" font-size="11" font-weight="700">magic</text>
+      <text x="80" y="70" text-anchor="middle" fill="#8b949e" font-size="10">4 bytes</text>
+      <text x="80" y="84" text-anchor="middle" fill="#8b949e" font-size="10">"SPLH"</text>
+
+      <rect x="150" y="30" width="100" height="60" rx="6" fill="#161b22" stroke="#e3b341"/>
+      <text x="200" y="52" text-anchor="middle" fill="#e3b341" font-size="11" font-weight="700">version</text>
+      <text x="200" y="70" text-anchor="middle" fill="#8b949e" font-size="10">2 bytes</text>
+      <text x="200" y="84" text-anchor="middle" fill="#8b949e" font-size="10">= 5</text>
+
+      <rect x="260" y="30" width="120" height="60" rx="6" fill="#161b22" stroke="#e3b341"/>
+      <text x="320" y="52" text-anchor="middle" fill="#e3b341" font-size="11" font-weight="700">frame_type</text>
+      <text x="320" y="70" text-anchor="middle" fill="#8b949e" font-size="10">2 bytes</text>
+      <text x="320" y="84" text-anchor="middle" fill="#8b949e" font-size="10">0x0001…</text>
+
+      <rect x="390" y="30" width="100" height="60" rx="6" fill="#161b22" stroke="#e3b341"/>
+      <text x="440" y="52" text-anchor="middle" fill="#e3b341" font-size="11" font-weight="700">flags</text>
+      <text x="440" y="70" text-anchor="middle" fill="#8b949e" font-size="10">2 bytes</text>
+      <text x="440" y="84" text-anchor="middle" fill="#8b949e" font-size="10">must be 0</text>
+
+      <rect x="500" y="30" width="100" height="60" rx="6" fill="#161b22" stroke="#e3b341"/>
+      <text x="550" y="52" text-anchor="middle" fill="#e3b341" font-size="11" font-weight="700">reserved</text>
+      <text x="550" y="70" text-anchor="middle" fill="#8b949e" font-size="10">2 bytes</text>
+      <text x="550" y="84" text-anchor="middle" fill="#8b949e" font-size="10">must be 0</text>
+
+      <rect x="610" y="30" width="120" height="60" rx="6" fill="#161b22" stroke="#e3b341"/>
+      <text x="670" y="52" text-anchor="middle" fill="#e3b341" font-size="11" font-weight="700">payload_len</text>
+      <text x="670" y="70" text-anchor="middle" fill="#8b949e" font-size="10">8 bytes</text>
+      <text x="670" y="84" text-anchor="middle" fill="#8b949e" font-size="10">≤ 256 MiB</text>
+
+      <rect x="740" y="30" width="120" height="60" rx="6" fill="#161b22" stroke="#e3b341"/>
+      <text x="800" y="52" text-anchor="middle" fill="#e3b341" font-size="11" font-weight="700">request_id</text>
+      <text x="800" y="70" text-anchor="middle" fill="#8b949e" font-size="10">8 bytes</text>
+      <text x="800" y="84" text-anchor="middle" fill="#8b949e" font-size="10">correlation</text>
+
+      <text x="20" y="125" fill="#8b949e" font-size="12">struct <tspan fill="#e3b341">_HEADER</tspan> = &lt;4s H H H H Q I&gt;  —  all little-endian, 24 bytes total</text>
+      <text x="20" y="150" fill="#8b949e" font-size="12">Payload follows the header; its layout is fixed per frame_type (see tables below).</text>
+    </svg>
+  </div>
+
+  <h2>Frame Types</h2>
+  <div class="grid c2">
+    <div class="box b-protocol">
+      <div class="name"><span class="dot" style="background:var(--server)"></span>Client → Engine <span style="color:var(--muted);font-size:11px">(0x00xx)</span></div>
+      <table>
+        <tr><th>Frame</th><th>Type</th><th>Payload</th></tr>
+        <tr><td><code>Request</code></td><td>0x0001</td><td>prompt tokens, sampling params, image spans, deadlines, priority, mask words</td></tr>
+        <tr><td><code>Cancel</code></td><td>0x0002</td><td>request id only</td></tr>
+        <tr><td><code>MaskResponse</code></td><td>0x0003</td><td>mask request id + token mask words (CPU grammar)</td></tr>
+        <tr><td><code>StatusRequest</code></td><td>0x0004</td><td>request id only</td></tr>
+      </table>
+    </div>
+    <div class="box b-protocol">
+      <div class="name"><span class="dot" style="background:var(--model)"></span>Engine → Client <span style="color:var(--muted);font-size:11px">(0x01xx)</span></div>
+      <table>
+        <tr><th>Frame</th><th>Type</th><th>Payload</th></tr>
+        <tr><td><code>Ready</code></td><td>0x0100</td><td>engine instance id, protocol version, status schema</td></tr>
+        <tr><td><code>Start</code></td><td>0x0101</td><td>request accepted, prompt token count</td></tr>
+        <tr><td><code>Tokens</code></td><td>0x0102</td><td>token ids (accepted output)</td></tr>
+        <tr><td><code>MaskRequest</code></td><td>0x0103</td><td>mask request id, expected word count</td></tr>
+        <tr><td><code>Done</code></td><td>0x0104</td><td>finish reason, token counts, usage</td></tr>
+        <tr><td><code>Error</code></td><td>0x0105</td><td>failure class, issue code, message</td></tr>
+        <tr><td><code>CapacityExhausted</code></td><td>0x0106</td><td>capacity detail</td></tr>
+        <tr><td><code>StatusJson</code></td><td>0x0107</td><td>full status snapshot (schema v5)</td></tr>
+        <tr><td><code>PromptProgress</code></td><td>0x0108</td><td>prefill checkpoint progress</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <h2>Key Payload Structures</h2>
+  <div class="grid c2">
+    <div class="box b-protocol">
+      <div class="name"><span class="dot" style="background:var(--protocol)"></span>Request</div>
+      <div class="desc">
+        <code>&lt;Q B B B Q Q&gt;</code> head + <code>&lt;I I I f f I Q B&gt;</code> tail:
+      </div>
+      <table>
+        <tr><td>request id, priority, cohort, flags</td></tr>
+        <tr><td>prompt token count, deadline ms</td></tr>
+        <tr><td>max new tokens, temperature, topP, topK, seed</td></tr>
+        <tr><td>image span count, mask word count</td></tr>
+        <tr><td>followed by: token words, image spans, mask words</td></tr>
+      </table>
+    </div>
+    <div class="box b-protocol">
+      <div class="name"><span class="dot" style="background:var(--protocol)"></span>ImageSpan</div>
+      <div class="desc">
+        <code>&lt;I I I I Q Q&gt;</code>:
+      </div>
+      <table>
+        <tr><td>offset, tokens, grid height, grid width</td></tr>
+        <tr><td>digest lo, digest hi (content identity)</td></tr>
+      </table>
+      <p style="font-size:12px; margin-top:8px;">Image pixels travel <b>inside the request frame</b> — a multi-image agent turn can carry well over 64 MiB of resized RGB bytes, hence the 256 MiB max payload.</p>
+    </div>
+  </div>
+
+  <h2>Wire Limits <span class="tag">protocol::Limits</span></h2>
+  <table>
+    <tr><th>Limit</th><th>Value</th><th>Meaning</th></tr>
+    <tr><td><code>maxPromptTokens</code></td><td>1 Mi tokens</td><td>Largest prompt in one request</td></tr>
+    <tr><td><code>maxLogicalOutputTokens</code></td><td>1 Mi tokens</td><td>Largest output</td></tr>
+    <tr><td><code>maxTokenBatch</code></td><td>4096</td><td>Max tokens per Tokens frame</td></tr>
+    <tr><td><code>maxSimulationTokens</code></td><td>32</td><td>Max draft candidates</td></tr>
+    <tr><td><code>maxMaskWords</code></td><td>1 Mi words</td><td>Largest grammar mask</td></tr>
+    <tr><td><code>maxImageSpans</code></td><td>64</td><td>Images per request</td></tr>
+    <tr><td><code>maxImagePatches</code></td><td>ops limit</td><td>Patches per image — engine sizes vision scratch from the same value, so a frame limit violation is never a late allocation failure</td></tr>
+    <tr><td><code>MAX_TOP_K</code></td><td>32</td><td>Largest top-k the native sampler keeps</td></tr>
+  </table>
+
+  <h2>Request/Response Flow</h2>
+  <div class="svg-wrap">
+    <svg viewBox="0 0 880 340" xmlns="http://www.w3.org/2000/svg">
+      <!-- Python side -->
+      <rect x="30" y="20" width="180" height="300" rx="10" fill="none" stroke="#58a6ff" stroke-width="2" stroke-dasharray="6,4"/>
+      <text x="120" y="45" text-anchor="middle" fill="#58a6ff" font-size="13" font-weight="700">Python</text>
+
+      <!-- Native side -->
+      <rect x="670" y="20" width="180" height="300" rx="10" fill="none" stroke="#d2a8ff" stroke-width="2" stroke-dasharray="6,4"/>
+      <text x="760" y="45" text-anchor="middle" fill="#d2a8ff" font-size="13" font-weight="700">Native</text>
+
+      <!-- Ready -->
+      <line x1="670" y1="70" x2="210" y2="70" stroke="#7ee787" stroke-width="2" marker-end="url(#ao)"/>
+      <text x="440" y="62" text-anchor="middle" fill="#7ee787" font-size="11">Ready (0x0100)</text>
+
+      <!-- Request -->
+      <line x1="210" y1="100" x2="670" y2="100" stroke="#58a6ff" stroke-width="2" marker-end="url(#ai)"/>
+      <text x="440" y="92" text-anchor="middle" fill="#58a6ff" font-size="11">Request (0x0001)</text>
+
+      <!-- Start -->
+      <line x1="670" y1="130" x2="210" y2="130" stroke="#7ee787" stroke-width="2" marker-end="url(#ao)"/>
+      <text x="440" y="122" text-anchor="middle" fill="#7ee787" font-size="11">Start (0x0101)</text>
+
+      <!-- PromptProgress -->
+      <line x1="670" y1="160" x2="210" y2="160" stroke="#7ee787" stroke-width="1.5" marker-end="url(#ao)"/>
+      <text x="440" y="152" text-anchor="middle" fill="#8b949e" font-size="11">PromptProgress (0x0108)</text>
+
+      <!-- Tokens -->
+      <line x1="670" y1="190" x2="210" y2="190" stroke="#7ee787" stroke-width="2" marker-end="url(#ao)"/>
+      <text x="440" y="182" text-anchor="middle" fill="#7ee787" font-size="11">Tokens (0x0102) ×N</text>
+
+      <!-- MaskRequest -->
+      <line x1="670" y1="220" x2="210" y2="220" stroke="#ffa657" stroke-width="2" marker-end="url(#ao)"/>
+      <text x="440" y="212" text-anchor="middle" fill="#ffa657" font-size="11">MaskRequest (0x0103)</text>
+
+      <!-- MaskResponse -->
+      <line x1="210" y1="250" x2="670" y2="250" stroke="#58a6ff" stroke-width="2" marker-end="url(#ai)"/>
+      <text x="440" y="242" text-anchor="middle" fill="#58a6ff" font-size="11">MaskResponse (0x0003)</text>
+
+      <!-- Done -->
+      <line x1="670" y1="290" x2="210" y2="290" stroke="#7ee787" stroke-width="2" marker-end="url(#ao)"/>
+      <text x="440" y="282" text-anchor="middle" fill="#7ee787" font-size="11">Done (0x0104)</text>
+
+      <defs>
+        <marker id="ai" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#58a6ff"/></marker>
+        <marker id="ao" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#7ee787"/></marker>
+      </defs>
+    </svg>
+  </div>
+
+  <h2>Failure Model</h2>
+  <div class="grid c2">
+    <div class="box b-protocol">
+      <div class="name"><span class="dot" style="background:var(--protocol)"></span>FailureClass</div>
+      <div class="desc">
+        <code>PROTOCOL_FATAL</code> — a framing/codec error; the stream is unrecoverable, the connection tears down.<br>
+        <code>REQUEST</code> — one request rejected (bad params, over limit); other requests continue.<br>
+        <code>ENGINE</code> — engine-internal failure surfaced to the request.
+      </div>
+    </div>
+    <div class="box b-protocol">
+      <div class="name"><span class="dot" style="background:var(--protocol)"></span>Truncation detection</div>
+      <div class="desc">The reader tracks how many header/payload bytes it has consumed. A stream that ends mid-frame reports exactly <i>how many</i> bytes of which frame type were read before EOF — e.g. "stream ended after 12 of 24 frame-header bytes" or "after 4096 of 8192 Tokens payload bytes". This is a terminal <code>TRUNCATED_FRAME</code> issue.</div>
+    </div>
+  </div>
+
+  <div class="note">
+    <b>Why binary, not JSON:</b> every token is a frame. JSON parsing on the hot path (per token, per request, at high concurrency) adds measurable latency and GC pressure. The 24-byte fixed header + typed payloads let both sides <code>struct.unpack</code> / <code>memcpy</code> with zero allocation for the common case. JSON is used only for the infrequent <code>StatusJson</code> snapshot.
+  </div>
+
+  <a class="back" href="index.html">← All Components</a>
+</div>
+</body>
+</html>

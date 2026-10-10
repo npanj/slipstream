@@ -46,6 +46,23 @@ void Engine::submit(EngineRequest value) {
       })) {
     throw std::invalid_argument("prompt token is out of vocabulary");
   }
+  uint64_t previousImageEnd = 0;
+  uint64_t pixelBytes = 0;
+  for (const ImageSpan &image : value.images) {
+    const uint64_t patches = uint64_t{image.gridHeight} * image.gridWidth;
+    if (image.gridHeight < 2 || image.gridWidth < 2 || image.gridHeight % 2 ||
+        image.gridWidth % 2 || patches > config_.maxImagePatches ||
+        image.tokens != (image.gridHeight / 2) * (image.gridWidth / 2) ||
+        image.offset < previousImageEnd ||
+        uint64_t{image.offset} + image.tokens > value.prompt.size()) {
+      throw std::invalid_argument("invalid backend request image span");
+    }
+    previousImageEnd = image.end();
+    pixelBytes += image.pixelBytes();
+  }
+  if (value.imagePixels.size() != pixelBytes) {
+    throw std::invalid_argument("invalid backend request image pixels");
+  }
   const uint64_t id = value.id;
   Request requestState;
   requestState.promptTokens = static_cast<uint32_t>(value.prompt.size());
@@ -284,7 +301,8 @@ bool Engine::admit(Request &active, double now) {
   ModelRequest modelRequest = active.request.modelView();
   if (resuming)
     modelRequest.prompt = active.exactTokens;
-  CacheLookup lookup = cache_.lookup(modelRequest.prompt);
+  CacheLookup lookup =
+      cache_.lookup(modelRequest.prompt, active.request.images);
   bool executorStarted = false;
   bool resourcesStarted = false;
   try {
@@ -370,6 +388,26 @@ bool Engine::admit(Request &active, double now) {
       scheduler_.resumeFromResources(active.request.id, resumeBoundary,
                                      active.replayTokens);
     configureStateBoundaries(active, resumeBoundary, lookup.junctionBoundary());
+    // The draft window replays from the same boundaries the state cache
+    // snapshots; planning it here keeps target and draft replays aligned.
+    DraftContextPlan draftPlan{};
+    const bool planDraft = model_.hasDraft();
+    if (planDraft) {
+      try {
+        std::vector<uint32_t> materialization;
+        materialization.reserve(active.stateBoundaries.size());
+        for (const auto &boundary : active.stateBoundaries)
+          materialization.push_back(boundary.tokens);
+        draftPlan = planDraftContext(
+            resumeBoundary, active.replayTokens,
+            resumeBoundary ? std::optional<uint32_t>(resumeBoundary)
+                           : std::nullopt,
+            materialization);
+      } catch (...) {
+        discardPendingStateBoundaries(active);
+        throw;
+      }
+    }
     active.latestCheckpoint = {};
     if (lookup.state) {
       model_.restore(active.request.id, resumeBoundary, lookup.state->state());
@@ -384,6 +422,10 @@ bool Engine::admit(Request &active, double now) {
         active.latestCheckpoint = {};
       }
     }
+    // Cold and resumed requests share this: beginAt/resume only install a
+    // boundary-free fallback, so the materialization-aware plan always wins.
+    if (planDraft)
+      model_.setDraftContextPlan(active.request.id, std::move(draftPlan));
     if (resuming) {
       active.suspended = false;
       active.replaying = true;
@@ -850,7 +892,8 @@ void Engine::apply(const BatchPlan &plan,
       if (promptProcessed == active.replayTokens)
         active.replaying = false;
       static_cast<void>(cache_.publishCommittedBlocks(
-          active.request.id, active.exactTokens, promptProcessed));
+          active.request.id, active.exactTokens, promptProcessed,
+          active.request.images));
       publishReachedStateBoundaries(active, promptProcessed);
       // Recovery may replay an already reported prefix, including generated
       // history.
@@ -877,7 +920,8 @@ void Engine::apply(const BatchPlan &plan,
           static_cast<uint32_t>(active.exactTokens.size()) -
           result.outputTokensWithoutKv;
       static_cast<void>(cache_.publishCommittedBlocks(
-          active.request.id, active.exactTokens, storedTokens));
+          active.request.id, active.exactTokens, storedTokens,
+          active.request.images));
     }
     const uint64_t completionTokens =
         active.exactTokens.size() - active.promptTokens;

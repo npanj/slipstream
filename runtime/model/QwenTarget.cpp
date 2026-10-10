@@ -64,6 +64,8 @@ QwenTargetGeometry geometryFor(const Qwen3_8Layout &layout) {
   QwenTargetGeometry result = commonGeometry(layout);
   result.denseIntermediateSize = layout.intermediateSize;
   result.ffnKind = QwenFfnKind::Dense;
+  result.capturedHiddenSize = layout.capturedHiddenSize();
+  result.captureLayers = layout.hiddenCaptureLayers;
   return result;
 }
 
@@ -71,6 +73,8 @@ QwenTargetGeometry geometryFor(const Qwen3_8Q8Layout &layout) {
   QwenTargetGeometry result = commonGeometry(layout);
   result.denseIntermediateSize = layout.intermediateSize;
   result.ffnKind = QwenFfnKind::Dense;
+  result.capturedHiddenSize = layout.capturedHiddenSize();
+  result.captureLayers = layout.hiddenCaptureLayers;
   return result;
 }
 
@@ -253,6 +257,14 @@ void QwenTarget::addHead(metal::CommandGraph &graph,
 
 CapturedPrefillLayers QwenTarget::capturedPrefillLayers() const {
   return Qwen4ExpTarget::capturedPrefillLayers(geometry_);
+}
+
+ops::VocabularyProjection QwenTarget::vocabularyProjection() const {
+  return std::visit(
+      [](const auto *weights) -> ops::VocabularyProjection {
+        return weights->logitsProjection;
+      },
+      weights_);
 }
 
 void QwenTarget::addEmbedding(metal::CommandGraph &graph,

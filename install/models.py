@@ -55,10 +55,19 @@ PACKAGE_FORMATS = {
         "MDFN0031",
         {"target": "qwen4exp", "draft": "DFlash2DraftModel"},
     ),
+    "splash-packed-q8": (
+        5,
+        "MDFL0008",
+        {},
+    ),
+    "splash-packed-q4": (
+        3,
+        "MDFL0006",
+        {},
+    ),
 }
 # Splash 1.0 package formats.
 RETIRED_FORMATS = {
-    "splash-packed-q4": "incoai/Qwen3.8-27B-Splash",
     "splash-packed-q4-moe": "incoai/Qwen3.6-35B-A3B-Splash",
 }
 

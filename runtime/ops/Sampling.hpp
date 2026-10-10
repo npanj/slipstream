@@ -52,6 +52,20 @@ struct SamplingBuffers final {
   metal::MetalBuffer argmaxIndices;
 };
 
+struct DraftSelectorBuffers final {
+  metal::MetalBuffer logits;
+  metal::MetalBuffer partialIds;
+  metal::MetalBuffer partialValues;
+  metal::MetalBuffer candidates;
+  metal::MetalBuffer unary;
+  metal::MetalBuffer selectorHidden;
+  metal::MetalBuffer predecessorCodebook;
+  metal::MetalBuffer successorCodebook;
+  metal::MetalBuffer uniforms;
+  metal::MetalBuffer proposedTokens;
+  metal::MetalBuffer proposalProbabilities;
+};
+
 struct AcceptanceBuffers final {
   metal::MetalBuffer proposedTokens;
   metal::MetalBuffer candidates;
@@ -82,6 +96,10 @@ public:
   void addVerify(metal::CommandGraph &graph,
                  std::span<const SamplingPolicy> policies,
                  SamplingBuffers buffers) const;
+  void addDraftSelector(
+      metal::CommandGraph &graph, DraftSelectorBuffers buffers,
+      std::span<const uint32_t> anchors,
+      std::span<const SamplingPolicy> policies, uint32_t proposalTokens) const;
   void addAcceptance(
       metal::CommandGraph &graph, AcceptanceBuffers buffers,
       std::span<const uint32_t> maximumRetained,

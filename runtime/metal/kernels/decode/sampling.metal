@@ -263,6 +263,13 @@ kernel void decode_sample_top32_probs_batch(
                   params.top_p[batch]);
 }
 
+// One shard of one proposal row. Threads stream their share of the shard in
+// 16-byte vectors, keep the chunk in registers, and first find the 16th
+// largest of the per-thread maxima: at least sixteen tokens are that large,
+// so nothing below it can be in the row's top-16 and the exact sorted insert
+// only runs for the few survivors. The group then pops its best sixteen in
+// rank order. The (value desc, id asc) order is total, so the partial is the
+// same set in the same order whatever the thread partition.
 inline bool top_beats(float value, uint token, float other, uint other_token) {
   return value > other || (value == other && token < other_token);
 }
@@ -310,6 +317,337 @@ inline void simd_best_head(float value, uint token, thread float &best,
 // only runs for the few survivors. The group then pops its best sixteen in
 // rank order. The (value desc, id asc) order is total, so the partial is the
 // same set in the same order whatever the thread partition.
+kernel void draft_select_top16_sharded(
+    device const bfloat *logits [[buffer(0)]],
+    device uint *partial_ids [[buffer(1)]],
+    device float *partial_values [[buffer(2)]],
+    constant uint &vocabulary [[buffer(3)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint thread_index [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]) {
+  constexpr uint Rows = SPLASH_DRAFT_QUERY_ROWS;
+  constexpr uint Positions = SPLASH_DRAFT_PROPOSAL_TOKENS;
+  constexpr uint Shards = SPLASH_DRAFT_SAMPLING_SHARDS;
+  constexpr uint K = 16, VectorTokens = 8, ChunkVectors = 16;
+  uint batch = group / (Positions * Shards);
+  uint local = group % (Positions * Shards);
+  uint position = local / Shards;
+  uint shard = local % Shards;
+  ulong row_start = (ulong(batch) * Rows + position + 1) * vocabulary;
+  uint shard_tokens = (vocabulary + Shards - 1) / Shards;
+  uint begin = min(shard * shard_tokens, vocabulary);
+  uint end = min(begin + shard_tokens, vocabulary);
+  // Vector loads require 16-byte alignment. Handle the shard's unaligned head
+  // and tail with scalar inserts; the logits binding must also be aligned.
+  uint head = uint((VectorTokens - (row_start + begin) % VectorTokens) %
+                   VectorTokens);
+  head = min(head, end - begin);
+  uint vectors = (end - begin - head) / VectorTokens;
+  uint vector_begin = begin + head;
+  uint tail_begin = vector_begin + vectors * VectorTokens;
+  device const bfloat *row = logits + row_start;
+  device const uint4 *vector_row =
+      reinterpret_cast<device const uint4 *>(row + vector_begin);
+
+  float values[K];
+  uint ids[K];
+  for (uint i = 0; i < K; ++i) {
+    values[i] = -INFINITY;
+    ids[i] = 0xffffffffu;
+  }
+  if (thread_index < head) {
+    uint token = begin + thread_index;
+    float value = float(row[token]);
+    if (top_beats(value, token, values[K - 1], ids[K - 1]))
+      top16_insert(values, ids, value, token);
+  }
+  if (thread_index < end - tail_begin) {
+    uint token = tail_begin + thread_index;
+    float value = float(row[token]);
+    if (top_beats(value, token, values[K - 1], ids[K - 1]))
+      top16_insert(values, ids, value, token);
+  }
+
+  threadgroup float maxima[256];
+  threadgroup float thresholds[8];
+  for (uint chunk = 0; chunk < vectors; chunk += 256 * ChunkVectors) {
+    uint4 loaded[ChunkVectors];
+    float best = -INFINITY;
+    for (uint i = 0; i < ChunkVectors; ++i) {
+      uint index = chunk + thread_index + i * 256;
+      loaded[i] = index < vectors ? vector_row[index] : uint4(0u);
+      if (index < vectors) {
+        for (uint word = 0; word < 4; ++word) {
+          float low = as_type<float>(loaded[i][word] << 16);
+          float high = as_type<float>(loaded[i][word] & 0xffff0000u);
+          if (low > best)
+            best = low;
+          if (high > best)
+            best = high;
+        }
+      }
+    }
+    // The 16th largest thread maximum: the minimum over the maxima that
+    // fewer than sixteen others exceed.
+    maxima[thread_index] = best;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint above = 0;
+    for (uint other = 0; other < 256; ++other)
+      above += maxima[other] > best ? 1u : 0u;
+    float candidate = simd_min(above < K ? best : INFINITY);
+    if (lane == 0)
+      thresholds[simd_group] = candidate;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float threshold = thresholds[0];
+    for (uint other = 1; other < 8; ++other)
+      threshold = min(threshold, thresholds[other]);
+
+    for (uint i = 0; i < ChunkVectors; ++i) {
+      uint index = chunk + thread_index + i * 256;
+      if (index >= vectors)
+        continue;
+      uint token = vector_begin + index * VectorTokens;
+      for (uint word = 0; word < 4; ++word) {
+        float low = as_type<float>(loaded[i][word] << 16);
+        float high = as_type<float>(loaded[i][word] & 0xffff0000u);
+        if (low >= threshold &&
+            top_beats(low, token + 2 * word, values[K - 1], ids[K - 1]))
+          top16_insert(values, ids, low, token + 2 * word);
+        if (high >= threshold &&
+            top_beats(high, token + 2 * word + 1, values[K - 1], ids[K - 1]))
+          top16_insert(values, ids, high, token + 2 * word + 1);
+      }
+    }
+  }
+
+  // Sixteen rounds pop the group-wide best head; the simdgroup bests
+  // alternate between two slots so one barrier per round suffices.
+  threadgroup float round_values[2][8];
+  threadgroup uint round_ids[2][8];
+  for (uint rank = 0; rank < K; ++rank) {
+    float head_value = values[0];
+    uint head_id = ids[0];
+    float simd_value;
+    uint simd_id;
+    simd_best_head(head_value, head_id, simd_value, simd_id);
+    uint slot = rank & 1;
+    if (lane == 0) {
+      round_values[slot][simd_group] = simd_value;
+      round_ids[slot][simd_group] = simd_id;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float best = round_values[slot][0];
+    uint best_id = round_ids[slot][0];
+    for (uint other = 1; other < 8; ++other) {
+      float value = round_values[slot][other];
+      uint token = round_ids[slot][other];
+      if (top_beats(value, token, best, best_id)) {
+        best = value;
+        best_id = token;
+      }
+    }
+    if (thread_index == rank) {
+      partial_ids[group * K + rank] = best_id;
+      partial_values[group * K + rank] = best;
+    }
+    if (head_value == best && head_id == best_id)
+      top_pop<K>(values, ids);
+  }
+}
+
+// Merges the eight shard partials of one row into the simdgroup's lanes: each
+// lane holds four consecutive entries of one shard's sorted list and sixteen
+// rounds pop the simdgroup-wide best into rank order, lane `rank` keeping it.
+inline void top16_merge_shards(device const uint *partial_ids,
+                               device const float *partial_values,
+                               uint row, uint lane, thread float &value,
+                               thread uint &token) {
+  constexpr uint K = 16, Shards = SPLASH_DRAFT_SAMPLING_SHARDS;
+  constexpr uint Entries = Shards * K / 32;
+  uint origin = row * Shards * K + lane * Entries;
+  float values[Entries];
+  uint ids[Entries];
+  for (uint i = 0; i < Entries; ++i) {
+    values[i] = partial_values[origin + i];
+    ids[i] = partial_ids[origin + i];
+  }
+  value = -INFINITY;
+  token = 0xffffffffu;
+  for (uint rank = 0; rank < K; ++rank) {
+    float best;
+    uint best_id;
+    simd_best_head(values[0], ids[0], best, best_id);
+    if (lane == rank) {
+      value = best;
+      token = best_id;
+    }
+    if (values[0] == best && ids[0] == best_id)
+      top_pop<Entries>(values, ids);
+  }
+}
+
+// One group per proposal row. Simdgroup 0 merges its candidates and unary
+// scores; simdgroup 1 merges the preceding row (the anchor for row 0). The
+// remaining simdgroups score the 16 x 16 predecessor/candidate edge table in
+// fixed per-lane reduction order. The table follows the shard partials in
+// partial-values scratch.
+kernel void draft_select_edges(
+    device const uint *partial_ids [[buffer(0)]],
+    device float *partial_values [[buffer(1)]],
+    device uint *candidates [[buffer(2)]],
+    device bfloat *unary [[buffer(3)]],
+    device const bfloat *hidden [[buffer(4)]],
+    device const bfloat *predecessor_codebook [[buffer(5)]],
+    device const bfloat *successor_codebook [[buffer(6)]],
+    constant SelectorBatchParams &params [[buffer(7)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint threads [[threads_per_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]) {
+  constexpr uint Rows = SPLASH_DRAFT_QUERY_ROWS;
+  constexpr uint Positions = SPLASH_DRAFT_PROPOSAL_TOKENS;
+  constexpr uint Shards = SPLASH_DRAFT_SAMPLING_SHARDS;
+  constexpr uint Candidates = 16;
+  constexpr uint Rank = 256;
+  uint batch = row / Positions;
+  uint position = row % Positions;
+  if (batch >= params.lanes)
+    return;
+  threadgroup uint successors[Candidates];
+  threadgroup uint predecessors[Candidates];
+  if (simd_group == 0) {
+    float value;
+    uint token;
+    top16_merge_shards(partial_ids, partial_values, row, lane, value, token);
+    if (lane < Candidates) {
+      candidates[row * Candidates + lane] = token;
+      unary[row * Candidates + lane] = bfloat(value);
+      successors[lane] = token;
+    }
+  } else if (simd_group == 1) {
+    uint token = params.anchor[batch];
+    if (position > 0) {
+      float value;
+      top16_merge_shards(partial_ids, partial_values, row - 1, lane, value,
+                         token);
+    }
+    if (lane < Candidates)
+      predecessors[lane] = token;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  // One task is one predecessor and eight of the sixteen candidates, so a
+  // simdgroup issues all its codebook loads at once instead of one cold row
+  // per edge.
+  constexpr uint TaskCandidates = 8, Dims = Rank / 32;
+  uint tasks = (position > 0 ? Candidates : 1) * (Candidates / TaskCandidates);
+  device float *table = partial_values +
+                        ulong(params.lanes) * Positions * Shards * Candidates +
+                        ulong(row) * Candidates * Candidates;
+  device const bfloat *row_hidden =
+      hidden + (ulong(batch) * Rows + position + 1) * Rank;
+  for (uint task = simd_group; task < tasks; task += threads / 32) {
+    uint predecessor_index = task / (Candidates / TaskCandidates);
+    uint first_candidate =
+        task % (Candidates / TaskCandidates) * TaskCandidates;
+    // Ids are produced by the top-k selection and are always in range; the
+    // clamp only keeps a corrupted id inside the codebooks.
+    uint safe_predecessor =
+        min(predecessors[predecessor_index], params.vocabulary - 1u);
+    float context[Dims];
+    float successor[TaskCandidates][Dims];
+    for (uint i = 0; i < Dims; ++i) {
+      uint dim = lane + i * 32;
+      context[i] = float(predecessor_codebook[safe_predecessor * Rank + dim]) *
+                   float(row_hidden[dim]);
+    }
+    for (uint j = 0; j < TaskCandidates; ++j) {
+      uint safe_candidate =
+          min(successors[first_candidate + j], params.vocabulary - 1u);
+      for (uint i = 0; i < Dims; ++i)
+        successor[j][i] =
+            float(successor_codebook[safe_candidate * Rank + lane + i * 32]);
+    }
+    for (uint j = 0; j < TaskCandidates; ++j) {
+      float score = 0.0f;
+      for (uint i = 0; i < Dims; ++i)
+        score += context[i] * successor[j][i];
+      score = simd_sum(score);
+      if (lane == 0)
+        table[predecessor_index * Candidates + first_candidate + j] = score;
+    }
+  }
+}
+
+// One thread per lane walks the seven positions: the score of a candidate is
+// its unary score plus the edge from the previously chosen candidate, read
+// from the table draft_select_edges left in the partial-values scratch.
+kernel void draft_select_dflash(
+    device const uint *candidates [[buffer(0)]],
+    device const bfloat *unary [[buffer(1)]],
+    device const float *partial_values [[buffer(2)]],
+    device const float *uniforms [[buffer(3)]],
+    device uint *tokens [[buffer(4)]], device float *q_probs [[buffer(5)]],
+    constant SelectorBatchParams &params [[buffer(6)]],
+    uint batch [[thread_position_in_grid]]) {
+  if (batch >= params.lanes)
+    return;
+  constexpr ulong Rows = SPLASH_DRAFT_QUERY_ROWS;
+  constexpr ulong Positions = SPLASH_DRAFT_PROPOSAL_TOKENS;
+  constexpr ulong Shards = SPLASH_DRAFT_SAMPLING_SHARDS;
+  constexpr ulong Candidates = 16;
+  candidates += batch * Positions * Candidates;
+  unary += batch * Positions * Candidates;
+  device const float *tables = partial_values +
+                               params.lanes * Positions * Shards * Candidates +
+                               batch * Positions * Candidates * Candidates;
+  uniforms += batch * 2 * Rows;
+  tokens += batch * Positions;
+  q_probs += batch * Positions * Candidates;
+
+  const bool sampling = (params.sampling_mask & (1u << batch)) != 0;
+  uint predecessor_index = 0;
+  for (uint position = 0; position < Positions; ++position) {
+    device const float *edges =
+        tables + (position * Candidates + predecessor_index) * Candidates;
+    float scores[Candidates];
+    for (uint i = 0; i < Candidates; ++i)
+      scores[i] = float(unary[position * Candidates + i]) + edges[i];
+    uint selected = 0;
+    if (sampling) {
+      float maximum = scores[0];
+      for (uint i = 1; i < Candidates; ++i)
+        maximum = max(maximum, scores[i]);
+      float sum = 0.0f;
+      for (uint i = 0; i < Candidates; ++i) {
+        float probability =
+            exp((scores[i] - maximum) / params.temperature[batch]);
+        q_probs[position * Candidates + i] = probability;
+        sum += probability;
+      }
+      float cumulative = 0.0f;
+      selected = Candidates - 1;
+      for (uint i = 0; i < Candidates; ++i) {
+        float probability = q_probs[position * Candidates + i] / sum;
+        q_probs[position * Candidates + i] = probability;
+        cumulative += probability;
+        if (selected == Candidates - 1 &&
+            cumulative > uniforms[position + 1]) {
+          selected = i;
+        }
+      }
+    } else {
+      for (uint i = 1; i < Candidates; ++i) {
+        if (scores[i] > scores[selected])
+          selected = i;
+      }
+    }
+    predecessor_index = selected;
+    tokens[position] = candidates[position * Candidates + selected];
+  }
+}
+
 inline float sparse_lookup(device const uint *ids,
                            device const float *probabilities, uint count,
                            uint token) {

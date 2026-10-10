@@ -110,7 +110,10 @@ struct FdTransport::CompletionWake {
   }
 
   void notifyControl() noexcept {
-    controlPending.store(true, std::memory_order_release);
+    // If control work is already flagged as pending, skip the pipe write syscall
+    if (controlPending.exchange(true, std::memory_order_acq_rel)) {
+      return;
+    }
     notify();
   }
 
@@ -119,7 +122,7 @@ struct FdTransport::CompletionWake {
   }
 
   void drain() const noexcept {
-    std::array<uint8_t, 64> bytes{};
+    std::array<uint8_t, 256> bytes{};
     while (readFd >= 0) {
       ssize_t count = read(readFd, bytes.data(), bytes.size());
       if (count > 0)
@@ -201,6 +204,8 @@ NativeProcessExit FdTransport::run(NativeRuntime &loop) {
     std::array<pollfd, 2> descriptors{
         pollfd{inputFd_, short(POLLIN | POLLHUP), 0},
         pollfd{completionWake->readFd, POLLIN, 0}};
+
+
     int result;
     do {
       result = poll(descriptors.data(), descriptors.size(),
