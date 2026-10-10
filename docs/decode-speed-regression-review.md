@@ -15,18 +15,17 @@ workload artifact. See *Published vs measured* below.
 
 On Flash-Next the loss splits across two axes, and they do not live in the same
 place. Decode rate is `1000 × tokens-per-step ÷ ms-per-step`, so the same-suite
-record (51.9 tok/s at 4.38 tok/step, 84.4 ms/step) against today's build (32.7 at
-3.06, 93.4) decomposes as ×0.699 from tokens per step against ×0.904 from
-per-step latency: **about 30 points of the 37% loss are the draft yield.** The
-per-step part is smaller, and it is one call — switching the horizon advisory off
-reaches 40.0 tok/s at 76.5 ms/step, *faster per step than the record*. Once it is
-off, the remaining −23% is entirely yield.
+record (51.9 tok/s at 4.38 tok/step, 84.4 ms/step) against today's build at the
+default cache (35.2 at 3.06, 87.0) decomposes as ×0.699 from tokens per step
+against ×0.970 from per-step latency: **the draft yield is 30 of the 32 points
+lost, and per-step latency is within 3% of the record.**
 
-The per-step part is one call in `models/qwen4exp/Qwen4ExpTarget.cpp`:
-`adviseHorizonPredicted(layer + 2)`, added 2026-10-09 12:54, which runs once per
-pipelined stage. Three-way isolation puts it at 16.9 ms/step of the 93.4, with
-nothing measurable from `prefetchPredicted`, the call it shares a condition with
-(*Confirmed by three-way isolation* below).
+There is one identified per-step cost, `adviseHorizonPredicted(layer + 2)` in
+`models/qwen4exp/Qwen4ExpTarget.cpp`, added 2026-10-09 12:54 — but it is worth
+16.9 ms/step **only when the expert cache is pinned to 34 GiB**, which is what
+the published 6-task harness does. At the default dynamic cache size the same
+call costs nothing measurable. Either way it does not close the gap: the yield
+axis does. (*Confirmed by three-way isolation* below.)
 
 The larger axis is **not** in that file. Reverting it restores per-step latency to
 better than the recorded level (75.2 against 84.4 ms/step) while tokens per step
@@ -124,13 +123,15 @@ without, so the direction and rough size hold up. Tokens per step is exactly
 3.06 in every one of these runs — greedy drafting is deterministic, so only the
 timing varies between them.
 
-### Confirmed by three-way isolation, one session (2026-10-09)
+### Confirmed by three-way isolation — conditional on the expert cache (2026-10-09)
 
 The comparisons above cannot say *which* call in the lookahead block costs the
 time, because `prefetchPredicted(layer + 1)` and `adviseHorizonPredicted(layer + 2)`
 share a single condition. Giving the horizon advisory its own switch and running
 all three arms interleaved — three reps each, alternating order, one session, one
-environment — removes that ambiguity and the session drift with it:
+environment — removes that ambiguity and the session drift with it. At
+`SPLASH_EXPERT_CACHE_GIB=34`, which is what the published 6-task harness sets
+(`dev/tools/compare_slipstream_vs_llamacpp.py:337`):
 
 | arm | tok/s (3 runs) | ms/step (3 runs) | tok/step |
 |---|---|---|---|
@@ -141,8 +142,32 @@ environment — removes that ambiguity and the session drift with it:
 The horizon advisory is worth **16.9 ms/step, +22% tok/s**. Keeping the prefetch
 while dropping it costs nothing — 76.5 against 76.4 ms/step — so
 `prefetchPredicted` is free and should stay. No as-is run is as fast as any run
-of either other arm, and tokens per step is 3.06 throughout, so this is entirely
-the latency axis and the fix is confirmed rather than inferred.
+of either other arm, and tokens per step is 3.06 throughout.
+
+**The same three arms at the default dynamic expert cache show no effect at all**
+(2 reps each, same session and harness, variable unset):
+
+| arm | tok/s (2 runs) | ms/step (2 runs) | tok/step |
+|---|---|---|---|
+| as-is | 35.2 (34.8–35.5) | 87.0 (86.2–87.8) | 3.06 |
+| `SPLASH_NO_HORIZON_ADVISORY=1` | 34.5 (33.6–35.4) | 88.7 (86.3–91.0) | 3.06 |
+| `SPLASH_NO_LOOKAHEAD=1` | 36.1 (35.4–36.8) | 84.7 (83.1–86.3) | 3.06 |
+
+Every arm sits within ±4% of the others and the ordering reverses between reps.
+So the advisory is not free-standingly expensive: **its cost is a function of how
+tight the expert cache is.** At 34 GiB the run is already miss-bound and its
+speculative reads contend with the misses that matter; sized dynamically at 36 GiB
+here, there is headroom and it costs nothing measurable. That is consistent with
+the bandwidth-contention story above, but it is inference — this establishes the
+conditional, not the mechanism.
+
+The cache budget also matters on its own account, with no advisory switch
+involved: the same as-is build decodes at 32.7 tok/s at 34 GiB against 35.2 at the
+default size, 8.6 ms/step of pure cache budget. The earlier rows in the table
+above match the 34 GiB arm here (32.6 against 32.7 tok/s, 93.9 against 93.4
+ms/step), so those were taken with the variable pinned too. The server script uses
+32 GiB (`~/models/bin/splash-flashnext-server.sh`, retuned down from 34), tighter
+than either case measured here.
 
 Sampled decode, temperature 0.7 (2,430 tokens):
 
@@ -161,11 +186,13 @@ eight with frequency ≥ 4 that are not resident, and issues three
 `fcntl(F_RDADVISE)` calls each. That is on the order of a thousand syscalls per
 token, on the host thread that must stage experts between GPU pipeline stages.
 
-Measured cost, three-way isolated: **16.9 ms/step (+22% tok/s) for the horizon
-advisory and 0.1 ms/step for `prefetchPredicted`.** Only the horizon call is
-worth acting on. The synchronous miss-path `adviseMissedExperts` is not
-separately measurable — leaving it enabled and switching off only the horizon
-call reaches the same 40.0 tok/s as switching the whole block off.
+Measured cost, three-way isolated at `SPLASH_EXPERT_CACHE_GIB=34`: **16.9
+ms/step (+22% tok/s) for the horizon advisory and 0.1 ms/step for
+`prefetchPredicted`.** Only the horizon call is worth acting on, and only at that
+cache budget — the same isolation with the variable unset shows no effect, so read
+the numbers below before acting. The synchronous miss-path `adviseMissedExperts`
+is not separately measurable — leaving it enabled and switching off only the
+horizon call reaches the same 40.0 tok/s as switching the whole block off.
 
 The advice is also speculative readahead for *guessed* experts, so it competes
 for SSD bandwidth with the real misses it is meant to hide.
@@ -240,14 +267,16 @@ not loaded, and decode collapses to ~11 tok/s with no error message.
 
 ## Recommended changes, in order
 
-1. **Implemented as a switch; the default is the open decision.** The horizon
-   advisory now has its own condition, `SPLASH_NO_HORIZON_ADVISORY`
+1. **Implemented as a switch; whether it pays depends on the cache budget.**
+   The horizon advisory now has its own condition, `SPLASH_NO_HORIZON_ADVISORY`
    (`Qwen4ExpTarget.cpp:3549-3558`), which leaves `prefetchPredicted(layer + 1)`
-   and the prefill advisories the README credits with a 28% win untouched. The
-   default is unchanged, so today this is instrumentation rather than a fix: set
-   the variable to recover the measured 16.9 ms/step (+22% tok/s, 32.7 → 40.0 on
-   the 10-prompt suite). Whether it ships off is a product call, since the README
-   advertises the read-ahead family.
+   and the prefill advisories the README credits with a 28% win untouched, and
+   preserves today's default. Turning it off recovers the measured 16.9 ms/step
+   (+22% tok/s, 32.7 → 40.0) when the expert cache is pinned to 34 GiB — the
+   setting the published harness uses, so it is relevant to that comparison — and
+   nothing measurable at the default size. Settle the cache budget first: at the
+   default the same build is 8.6 ms/step faster than at 34 GiB with no code
+   change at all.
 2. Default `SPLASH_EAGLE2_DRAFT=0` until it is measured as a win on this
    MoE-plus-SSD-streaming path; it costs 7% sampled today and was landed without
    a decode measurement.
@@ -273,16 +302,18 @@ not loaded, and decode collapses to ~11 tok/s with no error message.
   should be read with that band in mind. The expert-frequency result (102.4
   ms/step) and the file revert (75.2) sit outside it; the threshold result does
   not.
-- The advisory's size is not stable across sessions: one earlier single pair put
-  it at 5.8 ms/step and the paired repeats at 6.6–8.8, against 16.9 in the
-  three-rep interleaved run. The interleaved run is the stronger measurement —
-  tightest spread, all three arms in one session, one environment — but the
-  absolute cost clearly moves with machine state, so read 17 ms/step as this
-  session's figure rather than a constant. `SPLASH_EXPERT_CACHE_GIB=34` was set
-  for all three arms of the interleaved run; the earlier table rows may not have
-  been taken with that variable set, and a smaller expert cache means more real
-  misses for the advisory to contend with, which could account for part of the
-  difference. That check has not been run.
+- The advisory's cost is conditional on the expert cache, and every measurement
+  of it above (5.8 ms/step for one pair, 6.6–8.8 across paired repeats, 16.9 in
+  the interleaved run) was taken with `SPLASH_EXPERT_CACHE_GIB` pinned. Run
+  without the variable — the shipped default — the effect disappears. So neither
+  "16.9 ms/step" nor "~7 ms/step" is a property of the build; both are
+  properties of the build under a cache budget. The cache setting behind the
+  recorded 51.9 tok/s run is not documented, which is the one thing that keeps
+  the decomposition above from being assignable to a single budget with certainty.
+- Sample counts are small: three reps for the pinned-cache arms, two for the
+  default-cache arms. Within that, the pinned difference (16.9 ms/step) is far
+  outside the spread while the default-cache differences are inside it, and the
+  arm ordering reverses between reps when there is no real effect.
 - The "few days back" reference points (43 tok/s / 3.19 tok/step from 10-08, and
   51.9 / 4.38 earlier in the same suite) come from the project journal, not from a
   pristine checkout re-measured here. The within-run comparisons above — 34.6 vs
