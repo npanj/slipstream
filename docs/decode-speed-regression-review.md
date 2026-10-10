@@ -168,13 +168,24 @@ smaller +6 ms on pure GPU compute. It also explains the cache sensitivity noted
 above — a build missing 128 experts a step is far more exposed to how many slots
 the budget buys than one missing 73.
 
-This points at expert cache policy rather than at the advisory, and one change
-fits the mechanism exactly: the victim-eviction safeguard added in
-`Qwen4ExpTarget.cpp`, which refuses to admit a new expert when the incumbent's
-frequency is higher and the candidate has fewer than two votes. Refusing
-admissions is precisely how misses rise. It has not been tested. The predictor-v2
-`std::sort` is the other in-file candidate, but that is a compute change and
-compute is the smaller side of this delta.
+This pointed at expert cache policy, and the victim-eviction safeguard added in
+`Qwen4ExpTarget.cpp` — which refuses to admit a new expert when the incumbent's
+frequency is higher and the candidate has fewer than two votes — was the prime
+suspect. It is only a small part of it. Giving it its own switch
+(`SPLASH_NO_EVICTION_GUARD`, default unchanged) and re-running the same prompt:
+
+| build | misses/step | staging | miss reads | pure GPU | GPU wall |
+|---|---|---|---|---|---|
+| current, guard on | 128.1 | 41.2 ms | 34.0 ms | 50.8 ms | 82.0 ms |
+| current, `SPLASH_NO_EVICTION_GUARD=1` | 113.1 | 39.2 ms | 31.0 ms | 50.8 ms | 79.8 ms |
+| published 10-04 | 73.2 | 21.2 ms | 21.9 ms | 44.5 ms | 64.7 ms |
+
+The guard costs ~15 misses/step and ~2 ms/step — real, but about a quarter of the
+55-miss gap. The code bounds the rest: this guard appears exactly once here and
+**zero times in the 10-04 baseline**, so the other ~40 extra missing experts per
+step come from somewhere else in the residency path. The admission order is the
+obvious next place to look, since the predictor-v2 change touches how candidates
+are ordered before they are offered to the cache.
 
 Single prompt, 18–21 decoded steps per build: directional, not yet a constant.
 
@@ -282,22 +293,22 @@ more experts per step (128.1 against 73.2), which is the +16.4 ms/step.** No
 switch measured here touches it — the horizon advisory, the only identified
 per-step cost, is worth nothing at the default cache. At 34 GiB it explains 16.9
 of the 22.6 ms/step, leaving ~6 that behaves as if it were cache-independent, so
-the default-cache figure is not advisory plus a constant. The prime suspect is the
-victim-eviction safeguard in `Qwen4ExpTarget.cpp`, since refusing admissions
-produces exactly this signature; it is untested. The predictor-v2 `std::sort` is
-the remaining in-file candidate, though it is a compute change.
+the default-cache figure is not advisory plus a constant. The victim-eviction guard was tested and is only ~15 of the 55 extra misses per
+step (~2 ms/step of 16.4); it is real but not the cause. The prime suspect for
+the remaining ~40 misses is the admission order — how candidates are ranked before
+being offered to the cache — since the predictor-v2 change touches exactly that,
+and the predictor-v2 `std::sort` is the only other in-file candidate.
 
 Draft yield is **not** the open axis this review once said it was. Against the
 rebuilt published build it went up, 2.87 → 3.06 tok/step. The journal's 51.9 tok/s
 / 4.38 tok/step figure still cannot be attributed to any revision, and until it
 can, decompositions that lean on it should be discarded.
 
-Inside `Qwen4ExpTarget.cpp` the untested suspects for the residual remain the
-predictor-v2 `std::sort` that runs per layer, and the victim-eviction safeguard
-that refuses to admit a new expert when the incumbent's frequency is higher and
-the candidate has fewer than two votes. Reverting that file to its 10-04 state
-reaches 75.2 ms/step against the baseline build's 70.8, so about 4.4 ms/step of the
-file's delta is still unexplained — a small slice of the whole.
+Inside `Qwen4ExpTarget.cpp` the predictor-v2 `std::sort` that runs per layer is the
+only untested in-file suspect left; the victim-eviction guard is measured and
+accounts for ~2 of the 4.4 ms/step. Reverting the file to its 10-04 state reaches
+75.2 ms/step against the baseline build's 70.8, so about 4.4 ms/step of the file's
+delta is still unexplained — a small slice of the whole.
 
 The strongest lead, and the one that has not been pursued: **the published build
 is insensitive to the expert cache budget (70.7 against 70.8 ms/step) and the

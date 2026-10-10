@@ -2459,7 +2459,13 @@ void Qwen4ExpTarget::addVerify(
         if (vicExp >= 0 && !cache.frequency.empty()) {
           const uint64_t vicFreq = (vicExp < static_cast<int16_t>(cache.frequency.size())) ? cache.frequency[vicExp] : 0;
           const uint64_t candFreq = (expert < cache.frequency.size()) ? cache.frequency[expert] : 0;
-          if (vicFreq > candFreq + 4 && votes[expert] < 2) {
+          // The guard is switchable so its cost in extra expert misses can be
+          // measured against the build that predates it (10-04 has no such
+          // guard and misses 73 experts a step where this build misses 128).
+          static const bool guardVictim = [] {
+            return std::getenv("SPLASH_NO_EVICTION_GUARD") == nullptr;
+          }();
+          if (guardVictim && vicFreq > candFreq + 4 && votes[expert] < 2) {
             continue; // retain the established victim expert
           }
         }
