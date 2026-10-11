@@ -1322,3 +1322,32 @@ Root-caused the GGUF-prepared 27B loop: split GGUFs group the 48 GDN value heads
 
 ## 2026-10-11 01:15 PDT — muse-code
 Finished UD-Q4 support: added Q3_K, IQ4_NL, IQ3_S, IQ4_XS kernels (ported from the llama-qwen4exp source tree on this machine, all bit-exact vs libggml-base on full tensors). UD converts fully: 72/91 vs HQ, clean text, ~39 tok/s with shared draft. Deleted the documented-unusable 31 GB UD-Q8_K_XL.gguf to free disk (was 100% full). Committed 2d3888b. UD speed gap vs Q8_0-derived (22 vs 50 draftless) traced to the shared draft, not the quants.
+
+## 2026-10-11 00:10 PDT — muse-code
+Ran a 3-lane parallel review of the FlashNext decode path (recent-change audit, hot-path profile, measurement review) plus skeptic and synthesis. Yes, a recent change hurt: the L+2 horizon advisory added +17–24 ms per step, now defaulted off in 318eac8 with parity restored (41.7 tok/s at 34 GiB). No lasting speedup because most other changes were prefill-only, already-won, gated off, or inside noise. Corroborated switch defaults, ungated countExpertUse, and the published-baseline file by hand. Next best bets: gate countExpertUse, reuse per-step scratch buffers, tighten verify rows.
+
+## 2026-10-11 00:35 PDT — muse-code
+Host-overhead trims in Qwen4ExpTarget.cpp: moved traceFile/collectTiming statics to function top, gated predictionCounts/predictIssued/hostParts + 4 clock reads on collectTiming, order.reserve(64), misses.reserve, pendingMisses move. Deliberately did NOT gate countExpertUse (frequency feeds default eviction + prefetch sort; load-bearing). A/B (2 base + 2 patched runs, same-day, default cache): 36.95 vs 36.85 tok/s (-0.3%, in noise), greedy tokens bit-identical all 4 runs. No regression, no measurable gain at suite level — the real levers (misses, verify rows) need riskier A/Bs.
+
+## 2026-10-11 02:10 PDT — muse-code
+Phase 1 done: screened 14 env arms on Flash-Next (lookahead 4/8, guard off, LRU, drafts 3/4/6/7, p-min 0.10/0.25, chain 0.25/0.35, no-MTP, depth 3/7, no-adapt). Only winner: 7 drafts (yield 3.21 x4 runs vs 3.06, ~+1% tok/s, identical outputs) — coded as default, verified (38.3), committed. No-MTP ablation: 19.3 tok/s proves MTP ~2x. DFlash stacking impossible (draft/manifest placeholder:true). 34GiB arm guard-killed twice on today's box; deferred. Commits: host trims, 7-draft default.
+Phase 2 done: fixed cross-turn breaker leak (reset per step), todo line shows resolved step, line-buffered streaming, fixed-width footer. 3 new/reworked tests; suites green (test_server 173 OK). Committed.
+Phase 3 done: 27B control 36.2 x2 (4.10 tok/step); no-PLD 36.6 (neutral, keep default); TREE_DRAFT=1 drops to 29.9 (-17%, identical outputs) — recorded in code comment, committed. No code change warranted otherwise. Swap steady ~310MB all day; no engine running now.
+
+## 2026-10-11 02:40 PDT — muse-code
+Work Hub docs: added Direct commands block to INDEX.html sec-servers (serve Flash-Next :8090, serve 27B :8000, pull --check, code --thinking/-c/--sessions), added missing -C/--dir row and xhigh in /thinking row to agent tables. Verified every flag against live --help output; hub-sync.sh exit 0. No benchmark claims touched.
+
+## 2026-10-11 ~10:00 PDT — muse-code
+Option 2 (PLD for Flash-Next) root-caused, NOT shipped: PromptLookup's backward-extension loop aligns occurrence end with HISTORY end, but a 1-token pending anchor sits 1 past history end — every extension step misaligned, minMatch>=4 unreachable (telemetry: 0/154 hits on 81-token verbatim echo). Fixed with endShift alignment in propose()+proposeBranches(); added SPLASH_PLD_SCAN_DEPTH knob (default 32) + collectTiming-gated pld telemetry. But fixed PLD verifies WORSE than MTP (yield 3.0-3.2 vs 3.32, incl. minMatch 8/12, depth 256): matches fire, continuations wrong, preemption shrinks verify window. Default stays OFF (opt-in). Same bug likely made 27B PLD dead too — 27B A/B REQUIRED before commit (fix makes 27B PLD fire). Paused: box busy (Chrome + user active), 2 guard kills; will resume when calm. Worktree uncommitted: PromptLookup.{hpp,cpp}, Qwen4ExpTarget.cpp (telemetry+comment), repo_token_index_test.cpp (3 new tests green).
+
+## 2026-10-11 ~11:30 PDT — muse-code
+Option 2 closed: PLD matcher fix committed (e724eab) with 3 unit tests, telemetry, scan-depth knob, opt-in verdict comment. 27B post-fix suite bit-identical to pre-fix (512 tokens), 35.8 vs 36.2 tok/s noise, same yield — no regression. Flash-Next default path provably untouched (all additions gated). 5 separate commits total today, no pushes. Machine went busy mid-morning (Chrome); benchmarking paused accordingly, swap never exceeded ~330MB.
+
+## 2026-10-11 ~12:00 PDT — muse-code
+Closed two roadmap lines without new runs: (1) ngram.bin (30 GB) is the PLE weight table, fully wired + CPU-gathered by design — not a guess source; my earlier pitch was wrong, corrected to Nitin. (2) Attention-vs-length from existing per-prompt data: flat to 8K (~85 vs ~80 ms/step); cost tracks verify rows, not context. Remaining: 34 GiB re-run (calm machine) + guesser-training decision (needs Nitin: data + GPUs).
+
+## 2026-10-11 ~13:00 PDT — muse-code
+27B accept-rate deep dive done: wired step_accepted[] through generate-sample (committed 9063f73). Histograms: code-echo 5.40/step (12/20 perfect-7), math 3.41, prose 1.89. Zero-accept steps cluster at novel prose turns, arithmetic results, and </think>/markdown transitions — the drafter predicts fluent continuation, not decisions. No runtime lever (dense verify cost fixed; skipping loses yield); fix space is training-scale. Closed as diagnosed.
+
+## 2026-10-11 ~14:30 PDT — muse-code
+Shared-prompt guesser comparison DONE (was queued): same 3 texts, per-model tokenization, calm machine (48 GiB, Chrome closed), single runs. Flash: echo 2.05/36.9, math 3.51/37.8, prose 2.20/40.0. 27B: echo 2.49/30.4, math 3.97/43.4, prose 1.74/24.0 (accept/step, tok/s). Neither guesser dominates; 27B wins math, loses prose. First run_shared attempt failed on wrong model path (models/qwen4exp has no tokenizer/; weights live in $HOME/models) — fixed, both arms exit 0. Research record in docs/decode-ab-campaign-2026-10.md; 4 A/B runners preserved in dev/benchmarks/decode_ab/ (+README, +preflight guard on pld copy); tasks.md roadmap updated. Next: test gate reruns, then commit + push (authorized).

@@ -537,10 +537,19 @@ research and sequencing are in `docs/websearch-retrieval-sources.md` (R1–R6).
 - [x] Q5_K (type 13) decode in `dev/tools/fast_dequant.c` + reader dispatch (bit-exact vs libggml-base) — unblocks Q4_K_M files; Swift Q4_K_M reconverted + probed clean
 - [x] Regression tests: `dev/tests/test_qwen38_gdn_order.py`, `dev/tests/test_sharded_gguf_reader.py` (both fail pre-fix, pass post-fix)
 - [ ] IQ4_XS/IQ4_NL/IQ3_S/Q3_K kernels still missing — UD-Q4_K_M (131 Q5_K + 117 IQ4_XS + others) not yet convertible
-- [ ] `test_server.py` full + `test_agent.py` unsandboxed reruns before push
+- [x] `test_server.py` full + `test_agent.py` reruns (2026-10-11): server 173/173 OK; agent 34/36, only the 2 pre-existing tty failures (termios, no-tty runner — identical on base)
 
 ## UD-Q4 support (2026-10-11, commit 2d3888b)
 - [x] Q3_K / IQ4_NL / IQ3_S / IQ4_XS kernels + reader dispatch (bit-exact vs libggml-base; 8 hand-built-block tests)
 - [x] UD-Q4_K_M reconverted + probed (72/91 vs HQ) + served clean (~39 tok/s w/ draft)
 - [x] Freed 31 GB (deleted documented-unusable UD-Q8_K_XL.gguf; disk was 100%)
-- [ ] `test_server.py` full + `test_agent.py` unsandboxed reruns before push (still pending)
+- [x] `test_server.py` full + `test_agent.py` reruns (2026-10-11): server 173/173 OK; agent 34/36, only the 2 pre-existing tty failures (see above)
+
+## Roadmap to 55 tok/s average, Flash-Next decode (2026-10-11; target set by Nitin: 55 average, peaks higher)
+Current: ~38 default cache, ~42 at 34 GiB. All 14 env knobs screened; only 7 drafts won (+1%, committed).
+- [x] **Investigate the 51 GB n-gram table** — CLOSED 2026-10-11: it is the PLE weight table (30 GB), fully wired, CPU-gathered by design. Not a guess source; my autocomplete-dictionary pitch was wrong. No action.
+- [ ] **34 GiB cache on a calm machine** — SUSPENDED until Nitin asks explicitly. Do not run.
+- [ ] **Prompt-lookup drafting for qwen4exp (Option 2)** — merge PLD guesses with MTP guesses in the 8-row verify budget (days; helps code tasks most). Caveat 2026-10-11: fixed PLD alone verifies worse than MTP (3.0–3.2 vs 3.32 tok/step), so the merge must prefer MTP on short matches — that rule is the remaining work. Gated experimental; operator can switch off.
+- [x] **Attention-vs-length profile** — CLOSED 2026-10-11 on existing per-prompt data: 8K context costs ~85 ms/step vs ~80 short; ms/step tracks verify rows (yield), not length. Paged attention is fine at daily lengths. Untested past 8K.
+- [x] **Shared-prompt guesser comparison (DONE 2026-10-11)** — same 3 texts, per-model tokenization, calm machine, single runs: code echo Flash 2.05 / 27B 2.49, math Flash 3.51 / 27B 3.97 (27B 43.4 tok/s), prose Flash 2.20 / 27B 1.74 accept-per-step. Neither guesser dominates; per-genre policy is open work (needs repeats). Runner: `dev/benchmarks/decode_ab/run_shared.sh`.
+- [ ] **Train the 5-layer DFlash guesser (Option 1)** — needs training data (prompts + target states + next tokens), cloud GPUs, weeks; only option plausibly reaching 55 average
