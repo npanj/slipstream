@@ -146,6 +146,46 @@ void dequant_q5_0(const uint8_t *src, float *dst, int64_t n_elements) {
     }
 }
 
+// Q5_K: 256 elements per 176 bytes
+void dequant_q5_k(const uint8_t *src, float *dst, int64_t n_elements) {
+    int64_t nb = n_elements / 256;
+    for (int64_t i = 0; i < nb; ++i) {
+        ggml_fp16_t d_raw, min_raw;
+        memcpy(&d_raw, src, 2);
+        memcpy(&min_raw, src + 2, 2);
+        float d = fp16_to_fp32(d_raw);
+        float min = fp16_to_fp32(min_raw);
+        const uint8_t *scales = src + 4;
+        const uint8_t *qh = src + 16;
+        const uint8_t *q = src + 48;
+
+        int is = 0;
+        uint8_t sc, m;
+        for (int k = 0; k < 4; ++k) {
+            get_scale_min_k4(is + 0, scales, &sc, &m);
+            const float d1 = d * sc; const float m1 = min * m;
+            get_scale_min_k4(is + 1, scales, &sc, &m);
+            const float d2 = d * sc; const float m2 = min * m;
+            // qh byte l packs the high bits of qs byte l across the four
+            // 64-weight blocks, LSB first: bit 2k feeds the low nibble,
+            // bit 2k+1 feeds the high nibble.
+            const unsigned sh1 = 2 * k, sh2 = 2 * k + 1;
+            for (int l = 0; l < 32; ++l) {
+                const uint32_t x1 =
+                    (q[l] & 0xF) | (((qh[l] >> sh1) & 1u) << 4);
+                *dst++ = d1 * x1 - m1;
+            }
+            for (int l = 0; l < 32; ++l) {
+                const uint32_t x2 =
+                    (q[l] >> 4) | (((qh[l] >> sh2) & 1u) << 4);
+                *dst++ = d2 * x2 - m2;
+            }
+            q += 32; is += 2;
+        }
+        src += 176;
+    }
+}
+
 // Q6_K: 256 elements per 210 bytes
 void dequant_q6_k(const uint8_t *src, float *dst, int64_t n_elements) {
     int64_t nb = n_elements / 256;

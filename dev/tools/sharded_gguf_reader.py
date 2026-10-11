@@ -10,7 +10,7 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEQUANT_SOURCE = Path(__file__).with_name("fast_dequant.c")
 DEQUANT_LIB = REPO_ROOT / "build/libslipstream-dequant.dylib"
-DEQUANT_TYPES = ("q4_0", "q4_1", "q5_0", "q8_0", "q4_K", "q6_K")
+DEQUANT_TYPES = ("q4_0", "q4_1", "q5_0", "q8_0", "q4_K", "q5_K", "q6_K")
 # ggml type id -> (elements per block, bytes per block)
 GGML_BLOCKS = {
     0: (1, 4),  # F32
@@ -20,6 +20,7 @@ GGML_BLOCKS = {
     6: (32, 22),  # Q5_0
     8: (32, 34),  # Q8_0
     12: (256, 144),  # Q4_K
+    13: (256, 176),  # Q5_K
     14: (256, 210),  # Q6_K
     30: (1, 2),  # BF16
 }
@@ -272,6 +273,9 @@ class MultiShardGgufReader:
         elif ttype == 12:  # Q4_K
             raw = fd.read(count // 256 * 144)
             DEQUANT["q4_K"](raw, ptr, count)
+        elif ttype == 13:  # Q5_K
+            raw = fd.read(count // 256 * 176)
+            DEQUANT["q5_K"](raw, ptr, count)
         elif ttype == 14:  # Q6_K
             raw = fd.read(count // 256 * 210)
             DEQUANT["q6_K"](raw, ptr, count)

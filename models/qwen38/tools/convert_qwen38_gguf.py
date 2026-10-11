@@ -43,6 +43,61 @@ LAYER_Q4_MAGIC = b"MDFL0006"
 HEAD_Q4_MAGIC = b"MDFL0002"
 EMBEDDING_Q4_MAGIC = b"MDFE0001"
 
+GDN_VALUE_HEADS = 48
+GDN_HEAD_DIM = 128
+GDN_QUERY_DIM = 2048
+# Split GGUF exports store the 48 GDN value heads grouped as three blocks of
+# sixteen; the engine reads them interleaved round-robin. Engine head h lives
+# at GGUF head (h % 3) * 16 + h // 3. Measured against Swift's fused weights:
+# every one of the 48 v blocks and gate blocks matches at ~0.996 correlation
+# only under this mapping, and packages convert cleanly with it.
+GDN_HEAD_ORDER = [(h % 3) * 16 + h // 3 for h in range(GDN_VALUE_HEADS)]
+
+
+def interleave_gdn_heads(values, head_dim=GDN_HEAD_DIM):
+    """Reorder grouped value-head rows into engine (interleaved) order."""
+    rows = np.asarray(values)
+    if rows.shape[0] == GDN_VALUE_HEADS * head_dim:
+        return rows.reshape(GDN_VALUE_HEADS, head_dim, -1)[GDN_HEAD_ORDER].reshape(
+            rows.shape
+        )
+    return rows
+
+
+def interleave_gdn_columns(values, head_dim=GDN_HEAD_DIM):
+    """Reorder grouped value-head columns into engine (interleaved) order."""
+    matrix = np.asarray(values)
+    cols = matrix.shape[1]
+    if cols == GDN_VALUE_HEADS * head_dim:
+        return matrix.reshape(-1, GDN_VALUE_HEADS, head_dim)[
+            :, GDN_HEAD_ORDER, :
+        ].reshape(matrix.shape)
+    return matrix
+
+
+def _interleave_gdn_qkv(qkv_t):
+    """Split a grouped [q, k, v] matrix; q/k stay, v heads interleave."""
+    qkv = np.asarray(qkv_t)
+    v_start = 2 * GDN_QUERY_DIM
+    v_rows = GDN_VALUE_HEADS * GDN_HEAD_DIM
+    if qkv.shape[0] == v_start + v_rows:
+        return np.vstack(
+            [qkv[:v_start], interleave_gdn_heads(qkv[v_start:])]
+        )
+    return qkv
+
+
+def _interleave_gdn_conv_channels(conv_t):
+    """Conv rows index packed channels; the v-channel block interleaves."""
+    conv = np.asarray(conv_t, dtype=np.float32)
+    v_start = 2 * GDN_QUERY_DIM
+    v_rows = GDN_VALUE_HEADS * GDN_HEAD_DIM
+    if conv.shape[0] == v_start + v_rows:
+        return np.vstack(
+            [conv[:v_start], interleave_gdn_heads(conv[v_start:])]
+        )
+    return conv
+
 LAYER_Q8_MAGIC = b"MDFL0008"
 HEAD_Q8_MAGIC = b"MDFL0008"
 EMBEDDING_Q8_MAGIC = b"MDFE0008"
@@ -152,6 +207,9 @@ def convert_single_layer(
     packed.section(to_bf16(norm).tobytes())
 
     # 2. Attention or GDN Mixer
+    # Only the split attn_qkv/attn_gate decomposition is known to group
+    # value heads; fused or MLX-style sources already match engine order.
+    reorder_gdn_heads = False
     if full:
         if reader.has(f"{prefix}.attn_qkv.weight"):
             qkv = reader.read_tensor(f"{prefix}.attn_qkv.weight")
@@ -194,17 +252,38 @@ def convert_single_layer(
             )
             packed.section(tile_q4(*pad_rows(*ssm_in, LAYOUT["packed_gdn"])))
         elif reader.has(f"{prefix}.attn_qkv.weight") and reader.has(f"{prefix}.attn_gate.weight"):
-            # Standard Qwen3.5 / Qwen3.8 GGUF linear attention decomposition
-            qkv_t = reader.read_tensor(f"{prefix}.attn_qkv.weight")
-            gate_t = reader.read_tensor(f"{prefix}.attn_gate.weight")
+            # Standard Qwen3.5 / Qwen3.8 GGUF linear attention decomposition.
+            # Split exports group the 48 value heads as three blocks of
+            # sixteen; the engine reads them interleaved (GDN_HEAD_ORDER).
+            reorder_gdn_heads = True
+            qkv_t = _interleave_gdn_qkv(
+                reader.read_tensor(f"{prefix}.attn_qkv.weight")
+            )
+            gate_t = interleave_gdn_heads(
+                reader.read_tensor(f"{prefix}.attn_gate.weight")
+            )
             qkv = quantize_affine(qkv_t, group=64, bits=4)
             gate = quantize_affine(gate_t, group=64, bits=4)
             parts = [qkv, gate]
             if reader.has(f"{prefix}.ssm_beta.weight"):
-                beta = quantize_affine(reader.read_tensor(f"{prefix}.ssm_beta.weight"), group=64, bits=4)
+                beta = quantize_affine(
+                    interleave_gdn_heads(
+                        reader.read_tensor(f"{prefix}.ssm_beta.weight"),
+                        head_dim=1,
+                    ),
+                    group=64,
+                    bits=4,
+                )
                 parts.append(beta)
             if reader.has(f"{prefix}.ssm_alpha.weight"):
-                alpha = quantize_affine(reader.read_tensor(f"{prefix}.ssm_alpha.weight"), group=64, bits=4)
+                alpha = quantize_affine(
+                    interleave_gdn_heads(
+                        reader.read_tensor(f"{prefix}.ssm_alpha.weight"),
+                        head_dim=1,
+                    ),
+                    group=64,
+                    bits=4,
+                )
                 parts.append(alpha)
             packed.section(tile_q4(*concatenate(parts, LAYOUT["packed_gdn"])))
         else:
@@ -240,7 +319,10 @@ def convert_single_layer(
             if reader.has(f"{prefix}.ssm_conv1d.weight")
             else f"{prefix}.linear_attn.conv1d.weight"
         )
-        packed.section(to_bf16(reader.read_tensor(conv_key)).tobytes())
+        conv_t = reader.read_tensor(conv_key)
+        if reorder_gdn_heads:
+            conv_t = _interleave_gdn_conv_channels(conv_t)
+        packed.section(to_bf16(conv_t).tobytes())
 
         a_key = (
             f"{prefix}.ssm_a"
@@ -248,6 +330,8 @@ def convert_single_layer(
             else f"{prefix}.linear_attn.A_log"
         )
         a_log = reader.read_tensor(a_key)
+        if reorder_gdn_heads:
+            a_log = interleave_gdn_heads(a_log, head_dim=1)
         packed.section((-np.exp(a_log)).astype("<f4").tobytes())
 
         dt_key = (
@@ -257,7 +341,10 @@ def convert_single_layer(
             if reader.has(f"{prefix}.ssm_dt")
             else f"{prefix}.linear_attn.dt_bias"
         )
-        packed.section(to_bf16(reader.read_tensor(dt_key)).tobytes())
+        dt_bias = reader.read_tensor(dt_key)
+        if reorder_gdn_heads:
+            dt_bias = interleave_gdn_heads(dt_bias, head_dim=1)
+        packed.section(to_bf16(dt_bias).tobytes())
 
         norm_key = (
             f"{prefix}.ssm_norm.weight"
@@ -271,7 +358,10 @@ def convert_single_layer(
             if reader.has(f"{prefix}.ssm_out.weight")
             else f"{prefix}.linear_attn.out_proj"
         )
-        out_proj = quantize_affine(reader.read_tensor(out_key), group=64, bits=4)
+        out_t = reader.read_tensor(out_key)
+        if reorder_gdn_heads:
+            out_t = interleave_gdn_columns(out_t)
+        out_proj = quantize_affine(out_t, group=64, bits=4)
         packed.section(tile_q4(*out_proj))
 
     # 3. Post Attention Layernorm
