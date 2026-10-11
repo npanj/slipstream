@@ -10,7 +10,19 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEQUANT_SOURCE = Path(__file__).with_name("fast_dequant.c")
 DEQUANT_LIB = REPO_ROOT / "build/libslipstream-dequant.dylib"
-DEQUANT_TYPES = ("q4_0", "q4_1", "q5_0", "q8_0", "q4_K", "q5_K", "q6_K")
+DEQUANT_TYPES = (
+    "q4_0",
+    "q4_1",
+    "q5_0",
+    "q8_0",
+    "q3_K",
+    "q4_K",
+    "q5_K",
+    "q6_K",
+    "iq4_nl",
+    "iq3_s",
+    "iq4_xs",
+)
 # ggml type id -> (elements per block, bytes per block)
 GGML_BLOCKS = {
     0: (1, 4),  # F32
@@ -19,9 +31,13 @@ GGML_BLOCKS = {
     3: (32, 20),  # Q4_1
     6: (32, 22),  # Q5_0
     8: (32, 34),  # Q8_0
+    11: (256, 110),  # Q3_K
     12: (256, 144),  # Q4_K
     13: (256, 176),  # Q5_K
     14: (256, 210),  # Q6_K
+    20: (32, 18),  # IQ4_NL
+    21: (256, 110),  # IQ3_S
+    23: (256, 136),  # IQ4_XS
     30: (1, 2),  # BF16
 }
 
@@ -270,6 +286,9 @@ class MultiShardGgufReader:
         elif ttype == 8:  # Q8_0
             raw = fd.read(count // 32 * 34)
             DEQUANT["q8_0"](raw, ptr, count)
+        elif ttype == 11:  # Q3_K
+            raw = fd.read(count // 256 * 110)
+            DEQUANT["q3_K"](raw, ptr, count)
         elif ttype == 12:  # Q4_K
             raw = fd.read(count // 256 * 144)
             DEQUANT["q4_K"](raw, ptr, count)
@@ -279,6 +298,15 @@ class MultiShardGgufReader:
         elif ttype == 14:  # Q6_K
             raw = fd.read(count // 256 * 210)
             DEQUANT["q6_K"](raw, ptr, count)
+        elif ttype == 20:  # IQ4_NL
+            raw = fd.read(count // 32 * 18)
+            DEQUANT["iq4_nl"](raw, ptr, count)
+        elif ttype == 21:  # IQ3_S
+            raw = fd.read(count // 256 * 110)
+            DEQUANT["iq3_s"](raw, ptr, count)
+        elif ttype == 23:  # IQ4_XS
+            raw = fd.read(count // 256 * 136)
+            DEQUANT["iq4_xs"](raw, ptr, count)
         else:
             raise ValueError(f"Unsupported ggml type {ttype} for tensor {name}")
 
