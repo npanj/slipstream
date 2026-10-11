@@ -251,6 +251,7 @@ int main(int argc, char **argv) {
         std::cerr << "Prefill completed in " << prefillMs << " ms. Prompt tokens: " << prompt.size() << "\n";
 
         std::vector<double> decodeStepMs;
+        std::vector<uint32_t> decodeStepAccepted;
 
         uint64_t position = prompt.size();
         uint32_t totalGenerated = static_cast<uint32_t>(generatedTokens.size());
@@ -282,12 +283,14 @@ int main(int argc, char **argv) {
                                     stepFinish - stepStart)
                                     .count();
           decodeStepMs.push_back(stepMs);
+          decodeStepAccepted.push_back(0);
 
           if (results.empty())
             break;
           const auto &res = results[0];
           if (res.outputTokens.empty())
             break;
+          decodeStepAccepted.back() = res.acceptedDraftTokens;
 
           for (uint32_t token : res.outputTokens) {
             generatedTokens.push_back(token);
@@ -315,6 +318,9 @@ int main(int argc, char **argv) {
         std::cout << "], \"step_ms\": [";
         for (size_t i = 0; i < decodeStepMs.size(); ++i)
           std::cout << (i ? ", " : "") << decodeStepMs[i];
+        std::cout << "], \"step_accepted\": [";
+        for (size_t i = 0; i < decodeStepAccepted.size(); ++i)
+          std::cout << (i ? ", " : "") << decodeStepAccepted[i];
         std::cout << "]}" << std::endl;
       }
 
