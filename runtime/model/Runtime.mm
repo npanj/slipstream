@@ -928,6 +928,11 @@ struct Runtime::Impl {
     auto *positions =
         contents<uint32_t>(decodeArena->get(lane, DecodeTensor::Positions),
                            "decode RoPE positions");
+    // Measured 2026-10-11 on Swift-27B (4-prompt suite): SPLASH_TREE_DRAFT=1
+    // drops decode 36.2 -> 29.9 tok/s (yield 4.10 -> 3.37 tok/step) with
+    // identical outputs. The tree depths mismatch the linear DFlash
+    // proposals, so acceptance collapses. Keep off unless the proposer is
+    // changed to emit tree branches too.
     static const bool treeDrafting = [] {
       const char *v = std::getenv("SPLASH_TREE_DRAFT");
       return v != nullptr && std::atoi(v) != 0;
