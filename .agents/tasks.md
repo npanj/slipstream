@@ -538,3 +538,9 @@ research and sequencing are in `docs/websearch-retrieval-sources.md` (R1–R6).
 - [x] Regression tests: `dev/tests/test_qwen38_gdn_order.py`, `dev/tests/test_sharded_gguf_reader.py` (both fail pre-fix, pass post-fix)
 - [ ] IQ4_XS/IQ4_NL/IQ3_S/Q3_K kernels still missing — UD-Q4_K_M (131 Q5_K + 117 IQ4_XS + others) not yet convertible
 - [ ] `test_server.py` full + `test_agent.py` unsandboxed reruns before push
+
+## UD-Q4 support (2026-10-11, commit 2d3888b)
+- [x] Q3_K / IQ4_NL / IQ3_S / IQ4_XS kernels + reader dispatch (bit-exact vs libggml-base; 8 hand-built-block tests)
+- [x] UD-Q4_K_M reconverted + probed (72/91 vs HQ) + served clean (~39 tok/s w/ draft)
+- [x] Freed 31 GB (deleted documented-unusable UD-Q8_K_XL.gguf; disk was 100%)
+- [ ] `test_server.py` full + `test_agent.py` unsandboxed reruns before push (still pending)

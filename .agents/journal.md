@@ -1319,3 +1319,6 @@ Blocked on: nothing.
 
 ## 2026-10-11 00:30 PDT — muse-code
 Root-caused the GGUF-prepared 27B loop: split GGUFs group the 48 GDN value heads 3x16, engine reads them interleaved (h -> (h%3)*16+h//3). Fixed converter branch + added Q5_K decode (bit-exact vs libggml). Q8_0 package now 75/91 vs HQ (was 16/91), serves clean at ~50 tok/s; Swift Q4_K_M also fixed. Committed 8616d43. UD-Q4 file still needs IQ/Q3 kernels; test_server/test_agent reruns still pending.
+
+## 2026-10-11 01:15 PDT — muse-code
+Finished UD-Q4 support: added Q3_K, IQ4_NL, IQ3_S, IQ4_XS kernels (ported from the llama-qwen4exp source tree on this machine, all bit-exact vs libggml-base on full tensors). UD converts fully: 72/91 vs HQ, clean text, ~39 tok/s with shared draft. Deleted the documented-unusable 31 GB UD-Q8_K_XL.gguf to free disk (was 100% full). Committed 2d3888b. UD speed gap vs Q8_0-derived (22 vs 50 draftless) traced to the shared draft, not the quants.
