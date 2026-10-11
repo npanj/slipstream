@@ -409,25 +409,36 @@ class AgentToolsAndHarnessTests(unittest.TestCase):
             finally:
                 agent.close()
 
-    def test_agent_preemptive_reference_token_ingestion(self):
+    def test_file_tools_make_no_network_calls(self):
 
-        """Verify view_file and write_file trigger pre-emptive reference token ingestion into stats."""
+        """Verify view_file/replace/write_file do pure local I/O with no /tokenize round-trip.
+
+        The engine's /tokenize endpoint only returns tokens; nothing consumes
+        them (PromptLookup::ingestReferenceTokens has no production caller),
+        so file tools must not pay a blocking HTTP call per invocation.
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             f = Path(tmpdir) / "source.py"
             f.write_text("def calculate_pi():\n    return 3.1415926535\n")
             agent = SlipstreamAgent(cwd=tmpdir)
             try:
-                # Mock /tokenize response
-                mock_resp = mock.MagicMock()
-                mock_resp.read.return_value = json.dumps({"tokens": [101, 102, 103, 104]}).encode("utf-8")
-                mock_resp.__enter__.return_value = mock_resp
-
-                with mock.patch("urllib.request.urlopen", return_value=mock_resp):
-                    agent.execute_tool("view_file", {"path": "source.py", "start_line": 1, "line_count": 10})
-                    self.assertEqual(agent.stats.get("ingested_reference_tokens", 0), 4)
+                with mock.patch("urllib.request.urlopen") as mock_urlopen, mock.patch(
+                    "server.agent.agent.UnixHTTPConnection"
+                ) as mock_unix:
+                    res = agent.execute_tool("view_file", {"path": "source.py", "start_line": 1, "line_count": 10})
+                    self.assertIn("calculate_pi", res)
 
                     agent.execute_tool("write_file", {"path": "new.py", "content": "print('hello world')"})
-                    self.assertEqual(agent.stats.get("ingested_reference_tokens", 0), 8)
+                    self.assertTrue((Path(tmpdir) / "new.py").exists())
+
+                    agent.execute_tool(
+                        "replace_file_content",
+                        {"path": "new.py", "target_chunk": "hello", "replacement_chunk": "goodbye"},
+                    )
+                    self.assertIn("goodbye", (Path(tmpdir) / "new.py").read_text())
+
+                    mock_urlopen.assert_not_called()
+                    mock_unix.assert_not_called()
             finally:
                 agent.close()
 

@@ -543,50 +543,6 @@ class SlipstreamAgent:
                 raise TimeoutError(f"Streaming connection timed out{dur}: {reason}") from err
             raise ConnectionError(f"Could not connect to Slipstream engine at {self.base_url}: {err}") from err
 
-    def _ingest_reference_content(self, text: str) -> None:
-        """Pre-emptively tokenizes and ingests reference text into the engine's PLD index."""
-        if not text or len(text) < 15:
-            return
-        payload = json.dumps({"content": text[:8192]}).encode("utf-8")
-        if self.unix_socket_path and os.path.exists(self.unix_socket_path):
-            try:
-                conn = UnixHTTPConnection(self.unix_socket_path, timeout=1.0)
-                headers = {"Content-Type": "application/json", "Host": "localhost"}
-                if self.api_key:
-                    headers["Authorization"] = f"Bearer {self.api_key}"
-                conn.request("POST", "/tokenize", body=payload, headers=headers)
-                resp = conn.getresponse()
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    tokens = data.get("tokens", [])
-                    if tokens:
-                        self.stats["ingested_reference_tokens"] = self.stats.get("ingested_reference_tokens", 0) + len(tokens)
-                conn.close()
-                return
-            except Exception:
-                pass
-        try:
-            # Query the engine's fast in-process /tokenize endpoint
-            tok_url = f"{self.base_url.rsplit('/v1', 1)[0]}/tokenize"
-            req = urllib.request.Request(
-                tok_url,
-                data=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.api_key}" if self.api_key else "",
-                },
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=1.0) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                tokens = data.get("tokens", [])
-                if tokens:
-                    # Ingested into session tracker for PLD reference proposals
-                    self.stats["ingested_reference_tokens"] = self.stats.get("ingested_reference_tokens", 0) + len(tokens)
-        except Exception:
-            # Non-critical speculative acceleration path; silently fallback
-            pass
-
     @staticmethod
     def cap_tool_output(text: str, max_chars: int = 30000) -> str:
         """Cap large tool outputs while preserving head and tail contexts."""
@@ -616,8 +572,6 @@ class SlipstreamAgent:
                 count = args.get("line_count", 200)
                 file_path = self.cwd / p if not Path(p).is_absolute() else Path(p)
                 res = FileEditor.view_file(file_path, start, count)
-                # Pre-emptively ingest file content tokens into engine PLD reference table
-                self._ingest_reference_content(res)
             elif name == "replace_file_content":
                 p = args.get("path", "")
                 target = args.get("target_chunk", "")
@@ -625,14 +579,12 @@ class SlipstreamAgent:
                 file_path = self.cwd / p if not Path(p).is_absolute() else Path(p)
                 FileEditor.replace_file_content(file_path, target, repl)
                 res = f"Successfully updated {p}"
-                self._ingest_reference_content(repl)
             elif name == "write_file":
                 p = args.get("path", "")
                 content = args.get("content", "")
                 file_path = self.cwd / p if not Path(p).is_absolute() else Path(p)
                 FileEditor.write_file(file_path, content)
                 res = f"Successfully wrote {p}"
-                self._ingest_reference_content(content)
             elif name == "search":
                 pattern = args.get("pattern", "")
                 root = args.get("root_dir", ".")
