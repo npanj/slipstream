@@ -946,16 +946,100 @@ class AgentToolsAndHarnessTests(unittest.TestCase):
                 cb_triggered = any("You have repeated this exact tool call 3 times" in m.get("content", "") for m in agent.messages)
                 self.assertFalse(cb_triggered)
 
-                # Now if the exact same command is executed 3 times consecutively, it should trip
-                same_chunk = [{"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "run_command", "arguments": '{"command":"stuck"}'}}]}}]}]
-                for _ in range(3):
-                    with mock.patch.object(agent, "_post_stream", return_value=iter(same_chunk)):
-                        agent.step("stuck turn", max_turns=1, verbose=False)
+                # The same command across separate user turns must NOT trip:
+                # the detector resets each turn, or a fresh turn would be cut short.
+                agent2 = SlipstreamAgent()
+                try:
+                    same_chunk = [{"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "run_command", "arguments": '{"command":"stuck"}'}}]}}]}]
+                    with mock.patch.object(agent2, "execute_tool", return_value="output"):
+                        for _ in range(3):
+                            with mock.patch.object(agent2, "_post_stream", return_value=iter(same_chunk)):
+                                agent2.step("stuck turn", max_turns=1, verbose=False)
 
-                cb_triggered = any("You have repeated this exact tool call 3 times" in m.get("content", "") for m in agent.messages)
-                self.assertTrue(cb_triggered)
+                    cb_triggered = any("You have repeated this exact tool call 3 times" in m.get("content", "") for m in agent2.messages)
+                    self.assertFalse(cb_triggered)
+                finally:
+                    agent2.close()
+
+                # But 3 identical calls inside ONE turn (a real stuck loop) still trip.
+                agent3 = SlipstreamAgent()
+                try:
+                    same_chunk = [{"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "run_command", "arguments": '{"command":"stuck"}'}}]}}]}]
+                    with mock.patch.object(agent3, "execute_tool", return_value="output"):
+                        with mock.patch.object(agent3, "_post_stream", side_effect=[iter(same_chunk), iter(same_chunk), iter(same_chunk)]):
+                            agent3.step("stuck turn", max_turns=3, verbose=False)
+
+                    cb_triggered = any("You have repeated this exact tool call 3 times" in m.get("content", "") for m in agent3.messages)
+                    self.assertTrue(cb_triggered)
+                finally:
+                    agent3.close()
         finally:
             agent.close()
+
+    def test_todo_update_line_shows_resolved_step(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = SlipstreamAgent(cwd=tmpdir)
+            try:
+                # One task: after the update the plan is complete, so the
+                # plan-guard does not extend the turn with a nudge.
+                agent.todo.set_tasks(["Task A"])
+                resp_update = {
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": "call_1",
+                                "function": {
+                                    "name": "manage_todo",
+                                    "arguments": json.dumps({"action": "update", "status": "completed"}),
+                                },
+                            }],
+                        }
+                    }]
+                }
+                resp_final = {"choices": [{"message": {"role": "assistant", "content": "done"}}]}
+                mock_console = mock.MagicMock()
+                with mock.patch.object(agent, "_post", side_effect=[resp_update, resp_final]):
+                    agent.step("go", console=mock_console)
+                print_calls = [str(call) for call in mock_console.print.call_args_list]
+                # The model named no step; the tracker resolved step 1: the line must say so, not "task #None".
+                self.assertTrue(any("task #1 -> completed" in c for c in print_calls))
+                self.assertFalse(any("task #None" in c for c in print_calls))
+            finally:
+                agent.close()
+
+    def test_streaming_line_buffered_output(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = SlipstreamAgent(cwd=tmpdir)
+            try:
+                stream_chunks = [
+                    {"choices": [{"delta": {"reasoning_content": "Think "}}]},
+                    {"choices": [{"delta": {"reasoning_content": "deep\n"}}]},
+                    {"choices": [{"delta": {"content": "Hel"}}]},
+                    {"choices": [{"delta": {"content": "lo\nwor"}}]},
+                    {"choices": [{"delta": {"content": "ld"}}]},
+                ]
+                mock_console = mock.MagicMock()
+                with mock.patch.object(agent, "_post_stream", return_value=iter(stream_chunks)):
+                    res = agent.step("hello", console=mock_console)
+                    self.assertEqual(res, "Hello\nworld")
+                    token_prints = [
+                        call.args[0] for call in mock_console.print.call_args_list
+                        if call.args and isinstance(call.args[0], str) and call.kwargs.get("end") == ""
+                    ]
+                    joined = "".join(token_prints)
+                    # Byte-identical to unbuffered rendering, including the trailing partial line.
+                    self.assertIn("Think deep\n", joined)
+                    self.assertIn("Hello\nworld", joined)
+                    # 5 token chunks collapse into 3 line writes.
+                    text_writes = [t for t in token_prints if "[" not in t]
+                    self.assertEqual(len(text_writes), 3)
+            finally:
+                agent.close()
 
 
 if __name__ == "__main__":

@@ -497,8 +497,6 @@ class SlipstreamAgent:
                         yield json.loads(body)
                     except json.JSONDecodeError:
                         continue
-                    except json.JSONDecodeError:
-                        continue
                 conn.close()
                 return
             except (socket.timeout, TimeoutError) as err:
@@ -731,6 +729,10 @@ class SlipstreamAgent:
 
         self.messages.append({"role": "user", "content": user_input})
         turns = 0
+        # Fresh turn, fresh loop detector: consecutive-call tracking must not
+        # leak across turns, or a turn ending in two identical calls would trip
+        # the breaker on the next turn's first identical call and cut it short.
+        self.recent_tool_signatures = []
 
         while max_turns is None or turns < max_turns:
             if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
@@ -779,6 +781,36 @@ class SlipstreamAgent:
             last_prompt_tokens = None
             last_cached_tokens = None
             tool_parse_cursors: dict[int, int] = {}
+            # Line-buffered stream rendering: tokens accumulate until a
+            # newline so each terminal write is a full line. This cuts Rich
+            # renders and Live footer rebuilds ~10x without changing a byte
+            # of what is shown (flush before any direct print and at turn end).
+            pending_text = ""
+            pending_style = None
+            def flush_stream() -> None:
+                nonlocal pending_text, pending_style
+                if pending_text and verbose:
+                    out_console.print(pending_text, end="", markup=False, style=pending_style)
+                    if hasattr(out_console, "file") and hasattr(out_console.file, "flush"):
+                        out_console.file.flush()
+                    elif hasattr(sys.stdout, "flush"):
+                        sys.stdout.flush()
+                pending_text = ""
+                pending_style = None
+            def emit_stream(text: str, style: Any = None) -> None:
+                nonlocal pending_text, pending_style
+                if pending_style != style:
+                    flush_stream()
+                    pending_style = style
+                pending_text += text
+                while "\n" in pending_text:
+                    line, pending_text = pending_text.split("\n", 1)
+                    if verbose:
+                        out_console.print(line + "\n", end="", markup=False, style=style)
+                        if hasattr(out_console, "file") and hasattr(out_console.file, "flush"):
+                            out_console.file.flush()
+                        elif hasattr(sys.stdout, "flush"):
+                            sys.stdout.flush()
 
             # Determine streaming strategy for this step:
             # - "always": stream every turn
@@ -875,12 +907,7 @@ class SlipstreamAgent:
                                         elif hasattr(sys.stdout, "flush"):
                                             sys.stdout.flush()
                                 accumulated_thinking.append(reasoning)
-                                if verbose:
-                                    out_console.print(reasoning, end="", markup=False, style="dim italic bright_white")
-                                    if hasattr(out_console, "file") and hasattr(out_console.file, "flush"):
-                                        out_console.file.flush()
-                                    elif hasattr(sys.stdout, "flush"):
-                                        sys.stdout.flush()
+                                emit_stream(reasoning, "dim italic bright_white")
 
                             # Stream standard response tokens
                             text = delta.get("content")
@@ -889,24 +916,21 @@ class SlipstreamAgent:
                                     active_thinking = False
                                     if on_status:
                                         on_status("⚡ Streaming response...")
+                                    flush_stream()
                                     if verbose:
                                         out_console.print("\n\n[bold rgb(100,200,255)]🤖 Response:[/bold rgb(100,200,255)]\n", end="")
                                         if hasattr(out_console, "file") and hasattr(out_console.file, "flush"):
                                             out_console.file.flush()
                                         elif hasattr(sys.stdout, "flush"):
                                             sys.stdout.flush()
-                                if verbose:
-                                    out_console.print(text, end="", markup=False)
-                                    if hasattr(out_console, "file") and hasattr(out_console.file, "flush"):
-                                        out_console.file.flush()
-                                    elif hasattr(sys.stdout, "flush"):
-                                        sys.stdout.flush()
+                                emit_stream(text)
                                 accumulated_content.append(text)
 
                             # Stream tool call fragments
                             tcs = delta.get("tool_calls", [])
                             if tcs and active_thinking:
                                 active_thinking = False
+                                flush_stream()
                                 if verbose:
                                     out_console.print("\n")
                                     if hasattr(out_console, "file") and hasattr(out_console.file, "flush"):
@@ -976,6 +1000,7 @@ class SlipstreamAgent:
                             if hasattr(out_console, "file") and hasattr(out_console.file, "flush"):
                                 out_console.file.flush()
 
+                    flush_stream()
                     msg = {"role": "assistant"}
                     full_content = "".join(accumulated_content)
                     if full_content:
@@ -984,14 +1009,17 @@ class SlipstreamAgent:
                         msg["tool_calls"] = [tool_calls_map[k] for k in sorted(tool_calls_map.keys())]
                 except Exception:
                     if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
+                        flush_stream()
                         return "Turn interrupted by user."
                     # Graceful fallback to standard _post if streaming encounters errors
+                    flush_stream()
                     resp = self._post("/chat/completions", payload)
                     choice = resp.get("choices", [{}])[0]
                     msg = choice.get("message", {})
                     self.last_turn_streamed = False
 
             if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
+                flush_stream()
                 if verbose:
                     out_console.print("\n  [bold red]⚡ [interrupted][/bold red] [dim]Execution paused by user.[/dim]")
                 return "Turn interrupted by user."
@@ -1147,6 +1175,12 @@ class SlipstreamAgent:
                         t0 = time.monotonic()
                         tool_result = self.execute_tool(fn_name, fn_args)
                         dt_ms = (time.monotonic() - t0) * 1000.0
+                    if fn_name == "manage_todo" and fn_args.get("action") == "update":
+                        # The tracker may auto-advance to a different step than
+                        # the model named (or none); display the resolved step.
+                        m = re.search(r"Step (\d+) updated", tool_result)
+                        if m:
+                            arg_desc = f"task #{m.group(1)} -> {fn_args.get('status', 'completed')}"
                     if verbose:
                         cur_ctx = self.estimate_context_tokens()
                         max_c = self.stats.get("max_context", 131072)
@@ -1175,6 +1209,7 @@ class SlipstreamAgent:
                 raw_args = fn.get("arguments", "")
                 sig = f"{fn.get('name')}:{raw_args}"
                 self.recent_tool_signatures.append(sig)
+                del self.recent_tool_signatures[:-3]
                 if len(self.recent_tool_signatures) >= 3 and self.recent_tool_signatures[-1] == self.recent_tool_signatures[-2] == self.recent_tool_signatures[-3]:
                     if verbose:
                         self.console.print("  [bold yellow]⚡ [circuit-breaker][/bold yellow] [dim]Repeated identical tool query detected (3x consecutive). Nudging agent to synthesize final response.[/dim]")
@@ -1577,7 +1612,8 @@ def _run_pinned_tui(agent: SlipstreamAgent) -> int:
             border = "rgb(100,105,120)"
             t.append(f" {spin} ", style="bold rgb(140,160,200)")
             t.append(f"{status_detail} ", style="bold bright_white")
-            t.append(f"· {elapsed:.1f}s ", style="dim white")
+            # Fixed widths so the live footer never reflows as numbers grow.
+            t.append(f"· {elapsed:5.1f}s ", style="dim white")
 
             # Live Context Length & Headroom Tracker during active turn
             cur_ctx = agent.estimate_context_tokens()
@@ -1587,7 +1623,7 @@ def _run_pinned_tui(agent: SlipstreamAgent) -> int:
             filled = min(6, int((c_pct / 100.0) * 6))
             bar = "■" * filled + "□" * (6 - filled)
 
-            t.append(f"· ctx:[{bar}] {cur_ctx:,}/{max_c // 1024}k ({c_pct:.1f}%) ", style=ctx_style)
+            t.append(f"· ctx:[{bar}] {cur_ctx:>8,}/{max_c // 1024}k ({c_pct:4.1f}%) ", style=ctx_style)
             t.append("· [Ctrl+C to steer]\n", style="dim rgb(220,100,100)")
         else:
             border = "rgb(80,85,95)"
@@ -1607,18 +1643,18 @@ def _run_pinned_tui(agent: SlipstreamAgent) -> int:
             # 6-segment visual context bar: e.g. [■■□□□□]
             filled = min(6, int((c_pct / 100.0) * 6))
             bar = "■" * filled + "□" * (6 - filled)
-            t.append(f"  ctx:[{bar}] {cur_ctx:,}/{max_c // 1024}k", style=ctx_style)
+            t.append(f"  ctx:[{bar}] {cur_ctx:>8,}/{max_c // 1024}k", style=ctx_style)
 
             if not agent.todo.is_empty():
                 done = sum(1 for x in agent.todo.tasks if x["status"] == "completed")
                 total = len(agent.todo.tasks)
-                t.append(f"  plan:{done}/{total}", style="dim green" if done == total else "dim yellow")
+                t.append(f"  plan:{done:>2}/{total:<2}", style="dim green" if done == total else "dim yellow")
             if last_stats["dt"] > 0:
                 t.append(
-                    f"  {last_stats['tok_s']:.1f} tok/s ({last_stats['dt']:.1f}s)",
+                    f"  {last_stats['tok_s']:5.1f} tok/s ({last_stats['dt']:5.1f}s)",
                     style="dim green",
                 )
-            t.append(f"  turn #{turn_counter}\n", style="dim")
+            t.append(f"  turn #{turn_counter:>2}\n", style="dim")
 
             current_input = "".join(input_buf)
             ghost_suf, doc_hint = get_lookahead(current_input)
