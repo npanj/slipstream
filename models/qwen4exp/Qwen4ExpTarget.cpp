@@ -1974,6 +1974,18 @@ void Qwen4ExpTarget::addVerify(
   std::vector<std::bitset<512>> predictedNarrow(geometry.layers + 1), predictedWide(geometry.layers + 1);
   static std::array<uint64_t, 5> predictionCounts{};  // used, in narrow, in wide, misses, misses in wide
   const auto verifyEnter = AwakeClock::now();
+  // Declared up here so the per-layer staging work below can skip its
+  // stats bookkeeping when nobody logs: predictionCounts, predictIssued and
+  // hostParts feed only the SPLASH_TRACE JSON lines and the
+  // SPLASH_STEP_TIMING stderr lines.
+  static FILE *traceFile = [] {
+    const char *path = std::getenv("SPLASH_TRACE");
+    return path ? std::fopen(path, "a") : nullptr;
+  }();
+  static const bool collectTiming =
+      traceFile || (std::getenv("SPLASH_STEP_TIMING") != nullptr);
+  static std::string pendingTrace;
+  static uint64_t pendingAnchor = UINT64_MAX;
   double encodeMs = 0.0;  // CPU time building the pipelined stage graphs
   uint32_t hcRows = 0, hcStep = 1;
   HyperConnectionParams hcParams{};
@@ -2285,7 +2297,8 @@ void Qwen4ExpTarget::addVerify(
     for (uint32_t exp : uniqueExperts)
       countExpertUse(cache, exp);
     if (cache.slotReads) {
-      const auto waitStart = AwakeClock::now();
+      const auto waitStart =
+          collectTiming ? AwakeClock::now() : AwakeClock::time_point{};
       for (uint32_t exp : uniqueExperts) {
         const int16_t slot = cache.expertToSlot[exp];
         if (slot >= 0)
@@ -2295,10 +2308,14 @@ void Qwen4ExpTarget::addVerify(
             __builtin_arm_yield();
           }
       }
-      hostParts[0] += std::chrono::duration<double, std::milli>(
-                          AwakeClock::now() - waitStart).count();
+      if (collectTiming) {
+        hostParts[0] += std::chrono::duration<double, std::milli>(
+                            AwakeClock::now() - waitStart).count();
+      }
     }
-    if (layerIndex < geometry.layers && predictedWide[layerIndex].any())
+    // Stats for the timing logs only; skip the bitset scan and the
+    // per-expert accumulation when nobody logs.
+    if (collectTiming && layerIndex < geometry.layers && predictedWide[layerIndex].any())
       for (uint32_t exp : uniqueExperts) {
         ++predictionCounts[0];
         predictionCounts[1] += predictedNarrow[layerIndex][exp];
@@ -2341,7 +2358,9 @@ void Qwen4ExpTarget::addVerify(
     pendingMissSlots.reset();
     for (const Miss &miss : misses) pendingMissSlots.set(miss.slot);
     if (deferReads) {
-      pendingMisses = misses;
+      // `misses` is not read again on this path; move its buffer instead of
+      // copying it.
+      pendingMisses = std::move(misses);
       pendingLayer = layerIndex;
     } else if (!misses.empty()) {
       const auto &layer = layerRef(layerIndex);
@@ -2354,11 +2373,14 @@ void Qwen4ExpTarget::addVerify(
       // expert faults it in one 16 KB page at a time, each its own disk read.
       // Asking for every missed range first lets the reads go out together
       // and in large pieces; the copies below then find the pages in memory.
-      const auto readStart = AwakeClock::now();
+      const auto readStart =
+          collectTiming ? AwakeClock::now() : AwakeClock::time_point{};
       readMissedExperts(layer.expertSource, misses.data(), misses.size(),
                         stride, cg, cu, cd);
-      hostParts[1] += std::chrono::duration<double, std::milli>(
-                          AwakeClock::now() - readStart).count();
+      if (collectTiming) {
+        hostParts[1] += std::chrono::duration<double, std::milli>(
+                            AwakeClock::now() - readStart).count();
+      }
     }
 
     for (uint32_t r = 0; r < rows; ++r) {
@@ -2390,6 +2412,9 @@ void Qwen4ExpTarget::addVerify(
     std::bitset<kMaxPredicted> wanted;
     std::array<uint8_t, kMaxPredicted> votes{};
     std::vector<uint32_t> order;
+    // One live row per lane, a handful of guesses each: size the scratch up
+    // front so the fill loop below never reallocates mid-step.
+    order.reserve(64);
     for (uint32_t r = 0; r < rows; ++r) {
       if (r % ExecutionLimits::targetVerifyRows >= buffers.liveRowsPerLane)
         continue;
@@ -2444,6 +2469,7 @@ void Qwen4ExpTarget::addVerify(
       return fA > fB; // higher frequency affinity first
     });
 
+    misses.reserve(order.size());
     for (const uint32_t expert : order) {
       const int16_t existing = cache.expertToSlot[expert];
       if (existing >= 0) {
@@ -2482,7 +2508,8 @@ void Qwen4ExpTarget::addVerify(
     }
     if (misses.empty())
       return;
-    weights.predictIssued += misses.size();
+    if (collectTiming)
+      weights.predictIssued += misses.size();
     if (!cache.inflight)
       cache.inflight = dispatch_group_create();
     if (!cache.slotReads) {
@@ -2777,10 +2804,6 @@ void Qwen4ExpTarget::addVerify(
   // kept, and the step's timing split. dev/benchmarks/qwen4exp/trace_report.py
   // reads it. A step's line is written when the next step starts, since only
   // then is it known what was kept.
-  static FILE *traceFile = [] {
-    const char *path = std::getenv("SPLASH_TRACE");
-    return path ? std::fopen(path, "a") : nullptr;
-  }();
   struct DraftTrace {
     uint32_t depths = 0;
     std::array<std::array<uint32_t, 4>, 7> ids{};
@@ -3267,8 +3290,6 @@ void Qwen4ExpTarget::addVerify(
   // Finish the previous step's trace line: this step's MTP inputs are the
   // rows the target kept then (guesses kept + 1) and the tokens after them,
   // the last being the target's own next token.
-  static std::string pendingTrace;
-  static uint64_t pendingAnchor = UINT64_MAX;
   if (traceFile && !pendingTrace.empty()) {
     const QwenMtpLane &lane = buffers.mtp[0];
     std::string tail;
@@ -3423,9 +3444,6 @@ void Qwen4ExpTarget::addVerify(
   double totalStageMs = 0.0;
   double totalGpuMs = 0.0;
   double totalPureGpuMs = 0.0;
-
-  static const bool collectTiming =
-      traceFile || (std::getenv("SPLASH_STEP_TIMING") != nullptr);
 
   const bool pipelined = !backend.dispatchProfiling() &&
                          !std::getenv("SPLASH_NO_PIPELINE") &&
