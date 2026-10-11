@@ -1910,9 +1910,12 @@ void Qwen4ExpTarget::addPrefill(
 uint32_t mtpDraftLimit() noexcept {
   static const uint32_t limit = [] {
     const char *value = std::getenv("SPLASH_MTP_DRAFTS");
-    const char *tree = std::getenv("SPLASH_TREE_DRAFT");
-    const bool treeDrafting = tree != nullptr && std::atoi(tree) != 0;
-    const int defaultDrafts = treeDrafting ? 7 : 5;
+    // Default 7: A/B on the 10-prompt greedy suite (2026-10-11, default
+    // cache) showed 7 drafts yielding 3.21 tok/step in all 3 runs vs 3.06
+    // at 5, for ~+1% tok/s (38.3/38.2/37.2 vs 37.2/37.9) with bit-identical
+    // outputs. 1 anchor + 7 fills the 8-row verify window exactly.
+    // SPLASH_MTP_DRAFTS still overrides.
+    const int defaultDrafts = 7;
     const int parsed = value ? std::atoi(value) : defaultDrafts;
     return static_cast<uint32_t>(std::clamp(parsed, 1, 7));
   }();
