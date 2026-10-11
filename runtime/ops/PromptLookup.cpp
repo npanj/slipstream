@@ -1,8 +1,17 @@
 #include "runtime/ops/PromptLookup.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace splash::ops {
+
+uint32_t PromptLookup::scanDepth() {
+  static const uint32_t depth = [] {
+    const char *v = std::getenv("SPLASH_PLD_SCAN_DEPTH");
+    return v ? std::max(1u, static_cast<uint32_t>(std::atoi(v))) : kMaxScanDepth;
+  }();
+  return depth;
+}
 
 void PromptLookup::indexPrompt(std::span<const uint32_t> promptTokens,
                                uint32_t nGramSize) {
@@ -131,7 +140,7 @@ uint32_t PromptLookup::propose(std::span<const uint32_t> recentTokens,
   bool isAmbiguous = false;
 
   // Search in reverse chronological order
-  while (curr != UINT32_MAX && scanned < kMaxScanDepth) {
+  while (curr != UINT32_MAX && scanned < scanDepth()) {
     ++scanned;
     // Check 3-gram match
     if (curr >= 2 && tokens_[curr] == t2 && tokens_[curr - 1] == t1 &&
@@ -144,9 +153,16 @@ uint32_t PromptLookup::propose(std::span<const uint32_t> recentTokens,
           ++matchLen;
         }
 
+        // Align with the query end, not the history end: with a short
+        // pending query (qLen 1-2) t2 sits past the appended history, so
+        // the occurrence end is endShift ahead of the tail end. Without
+        // the shift every extension step compares misaligned tokens and
+        // minMatch >= 4 is unreachable (measured 0 hits on an 81-token
+        // verbatim echo, 2026-10-11).
+        const size_t endShift = (qLen == 1) ? 1 : ((qLen == 2) ? 2 : 0);
         const size_t tailPos = tokens_.size() - 1;
-        while (curr >= matchLen && tailPos >= matchLen &&
-               tokens_[curr - matchLen] == tokens_[tailPos - matchLen]) {
+        while (curr >= matchLen && tailPos + endShift >= matchLen &&
+               tokens_[curr - matchLen] == tokens_[tailPos + endShift - matchLen]) {
           ++matchLen;
         }
 
@@ -232,7 +248,7 @@ PromptLookup::proposeBranches(std::span<const uint32_t> recentTokens,
   };
   std::vector<MatchCandidate> candidates;
 
-  while (curr != UINT32_MAX && scanned < kMaxScanDepth) {
+  while (curr != UINT32_MAX && scanned < scanDepth()) {
     ++scanned;
     if (curr >= 2 && tokens_[curr] == t2 && tokens_[curr - 1] == t1 &&
         tokens_[curr - 2] == t0) {
@@ -243,9 +259,16 @@ PromptLookup::proposeBranches(std::span<const uint32_t> recentTokens,
           ++matchLen;
         }
 
+        // Align with the query end, not the history end: with a short
+        // pending query (qLen 1-2) t2 sits past the appended history, so
+        // the occurrence end is endShift ahead of the tail end. Without
+        // the shift every extension step compares misaligned tokens and
+        // minMatch >= 4 is unreachable (measured 0 hits on an 81-token
+        // verbatim echo, 2026-10-11).
+        const size_t endShift = (qLen == 1) ? 1 : ((qLen == 2) ? 2 : 0);
         const size_t tailPos = tokens_.size() - 1;
-        while (curr >= matchLen && tailPos >= matchLen &&
-               tokens_[curr - matchLen] == tokens_[tailPos - matchLen]) {
+        while (curr >= matchLen && tailPos + endShift >= matchLen &&
+               tokens_[curr - matchLen] == tokens_[tailPos + endShift - matchLen]) {
           ++matchLen;
         }
 

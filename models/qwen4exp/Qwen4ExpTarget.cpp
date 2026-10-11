@@ -1976,6 +1976,7 @@ void Qwen4ExpTarget::addVerify(
   // and a wider top-16 kept only for this count).
   std::vector<std::bitset<512>> predictedNarrow(geometry.layers + 1), predictedWide(geometry.layers + 1);
   static std::array<uint64_t, 5> predictionCounts{};  // used, in narrow, in wide, misses, misses in wide
+  static uint64_t pldQueries = 0, pldHits = 0, pldDrafted = 0;  // prompt-lookup draft telemetry (timing logs only)
   const auto verifyEnter = AwakeClock::now();
   // Declared up here so the per-layer staging work below can skip its
   // stats bookkeeping when nobody logs: predictionCounts, predictIssued and
@@ -3308,6 +3309,10 @@ void Qwen4ExpTarget::addVerify(
     buffers.liveRowsPerLane = 1 + *buffers.mtpProposedOut;
     setLiveRows();
   } else if (buffers.mtpEnabled && weights.mtpLayer && lanes == 1 && buffers.mtp[0].rows) {
+    // Opt-in (SPLASH_PROMPT_LOOKUP=1). Measured 2026-10-11: on an 81-token
+    // verbatim echo PLD fires but verifies worse than MTP (yield 3.0-3.2
+    // vs 3.32 MTP-only), so default-on would regress. Keep opt-in until
+    // the merge prefers MTP on short/uncertain matches.
     static const bool pldEnabled = [] {
       const char *v = std::getenv("SPLASH_PROMPT_LOOKUP");
       return v != nullptr && std::atoi(v) != 0;
@@ -3337,6 +3342,13 @@ void Qwen4ExpTarget::addVerify(
       std::array<uint32_t, ExecutionLimits::draftProposalTokens> pldDrafts{};
       const uint32_t needed = std::min(maxDrafts, pldMaxDrafts);
       const uint32_t pldFound = buffers.promptLookup->propose(queryTokens, pldDrafts, needed, pldMinMatch, pldUnambiguous);
+      if (collectTiming) {
+        ++pldQueries;
+        if (pldFound > 0) {
+          ++pldHits;
+          pldDrafted += pldFound;
+        }
+      }
       if (pldFound > 0) {
         for (uint32_t j = 0; j < pldFound; ++j) {
           drafts[j] = pldDrafts[j];
@@ -3720,7 +3732,9 @@ void Qwen4ExpTarget::addVerify(
               << ", predicted " << weights.predictIssued << " | prediction: used "
               << predictionCounts[0] << " in top-10 " << predictionCounts[1] << " in top-16 "
               << predictionCounts[2] << " misses " << predictionCounts[3]
-              << " of which in top-16 " << predictionCounts[4] << " | encode " << encodeMs
+              << " of which in top-16 " << predictionCounts[4]
+              << " | pld: " << pldHits << "/" << pldQueries << " hits, " << pldDrafted << " drafts"
+              << " | encode " << encodeMs
               << " | inside verify " << std::chrono::duration<double, std::milli>(
                      AwakeClock::now() - verifyEnter).count() << "\n";
   }

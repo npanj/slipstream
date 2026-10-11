@@ -127,6 +127,88 @@ void testPromptLookupMultiBranch() {
   std::cout << "[testPromptLookupMultiBranch] PASS" << std::endl;
 }
 
+void testPromptLookupSingleAnchorVsTail() {
+  std::cout << "[testPromptLookupSingleAnchorVsTail] Starting..." << std::endl;
+
+  PromptLookup pld;
+  // Prompt holds a distinctive passage; decode then emits it verbatim and
+  // commits each token (as the engine's commit path does via appendToken).
+  std::vector<uint32_t> prompt = {10, 20, 30, 100, 200, 300, 400, 500, 600, 40, 50};
+  pld.indexPrompt(prompt);
+  for (uint32_t t : {100u, 200u, 300u, 400u, 500u}) pld.appendToken(t);
+
+  std::array<uint32_t, 4> out{};
+  // Query with an already-appended anchor: qLen==1 assembles
+  // (tokens[-2], tokens[-1], anchor) = (400, 500, 500), a doubled token
+  // that never occurs, so nothing is proposed. Callers must pass the
+  // pending (not yet appended) anchor, or the trailing tokens explicitly.
+  std::array<uint32_t, 1> single{500};
+  uint32_t n1 = pld.propose(single, out, 4, 4, false);
+  std::cout << "  single-appended-anchor query proposed " << n1 << std::endl;
+  assert(n1 == 0 && "doubled-anchor query must find nothing");
+
+  // The last 3 tokens. (300,400,500) occurs in the prompt with follow-on
+  // 600, and the tail extends the match to length 5.
+  std::array<uint32_t, 3> tail{300, 400, 500};
+  uint32_t n3 = pld.propose(tail, out, 4, 4, false);
+  std::cout << "  three-token query proposed " << n3 << " drafts, first=" << out[0] << std::endl;
+  assert(n3 > 0 && "tail query must fire on verbatim repetition");
+  assert(out[0] == 600 && "first draft must continue the passage with 600");
+  std::cout << "[testPromptLookupSingleAnchorVsTail] PASS" << std::endl;
+}
+
+void testPromptLookupPendingAnchorExtends() {
+  std::cout << "[testPromptLookupPendingAnchorExtends] Starting..." << std::endl;
+
+  // Echo in progress: prompt passage [50,7,8,9,200,201] committed as
+  // [50,7,8,9], anchor 200 pending (not appended). The backward extension
+  // must align with the query end (pending), not the history end, or
+  // minMatch=4 is unreachable with a 1-token query.
+  PromptLookup pld;
+  const std::vector<uint32_t> prompt = {1, 2, 3, 50, 7, 8, 9, 200, 201, 4, 5, 6};
+  pld.indexPrompt(prompt);
+  for (uint32_t t : {50u, 7u, 8u, 9u}) pld.appendToken(t);
+
+  std::array<uint32_t, 1> query{200};
+  std::array<uint32_t, 4> out{0, 0, 0, 0};
+  uint32_t n = pld.propose(query, out, 4, 4, false);
+  std::cout << "  pending-anchor query proposed " << n << std::endl;
+  assert(n > 0 && "pending anchor on echo must extend to minMatch=4");
+  assert(out[0] == 201 && "first draft must continue the passage");
+  std::cout << "[testPromptLookupPendingAnchorExtends] PASS" << std::endl;
+}
+
+void testPromptLookupDeepChain() {
+  std::cout << "[testPromptLookupDeepChain] Starting..." << std::endl;
+
+  // Trigram (7,8,9) with 41 indexed occurrences: one buried passage
+  // [50,7,8,9,200] under 40 newer repetitions [7,8,9,1000+i], as with
+  // common trigrams in repetitive code. Tail [50,7,8,9] + pending anchor
+  // 9 extends the buried match to 4; the distractors' prefixes differ
+  // from 50, so minMatch=4 separates them. Buried sits ~42 deep in its
+  // chain: reachable at depth 256, invisible at the default 32.
+  PromptLookup pld;
+  std::vector<uint32_t> stream = {1, 2, 50, 7, 8, 9, 200};
+  for (uint32_t i = 0; i < 40; ++i) {
+    stream.insert(stream.end(), {7, 8, 9, static_cast<uint32_t>(1000 + i)});
+  }
+  stream.insert(stream.end(), {50, 7, 8});  // tail, anchor 9 pending
+  pld.indexPrompt(stream);
+
+  std::array<uint32_t, 1> query{9};
+  std::array<uint32_t, 2> out{0, 0};
+  uint32_t n = pld.propose(query, out, 2, 4, false);
+  const uint32_t depth = PromptLookup::scanDepth();
+  std::cout << "  depth=" << depth << " proposed " << n << std::endl;
+  if (depth > 42) {
+    assert(n > 0 && "deep scan must reach the buried occurrence");
+    assert(out[0] == 200 && "first draft must be the buried follow-on");
+  } else {
+    assert(n == 0 && "shallow scan cannot reach the buried occurrence");
+  }
+  std::cout << "[testPromptLookupDeepChain] PASS" << std::endl;
+}
+
 } // namespace
 
 } // namespace splash::ops
@@ -135,6 +217,10 @@ int main() {
   std::cout << "=== Running RepoTokenIndex Tests ===" << std::endl;
   splash::ops::testRepoTokenIndexWriteAndRead();
   splash::ops::testPromptLookupMultiBranch();
+  splash::ops::testPromptLookupSingleAnchorVsTail();
+  splash::ops::testPromptLookupDeepChain();
+  splash::ops::testPromptLookupPendingAnchorExtends();
+  splash::ops::testPromptLookupSingleAnchorVsTail();
   std::cout << "=== All RepoTokenIndex Tests Passed! ===" << std::endl;
   return 0;
 }

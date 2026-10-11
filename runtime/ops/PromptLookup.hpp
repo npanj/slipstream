@@ -19,6 +19,11 @@ class PromptLookup final {
 public:
   static constexpr uint32_t kDefaultNGram = 3;
   static constexpr uint32_t kMaxScanDepth = 32;
+  /// Chain-scan budget, SPLASH_PLD_SCAN_DEPTH overrides (min 1). Deep
+  /// prompt occurrences hide behind dozens of recent repetitions in
+  /// repetitive code; 32 never reaches them (measured 0 hits on an
+  /// 81-token verbatim echo, 2026-10-11).
+  static uint32_t scanDepth();
 
   PromptLookup() = default;
   ~PromptLookup() = default;
