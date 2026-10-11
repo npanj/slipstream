@@ -1316,3 +1316,6 @@ Updated `UnixHTTPConnection` and `_post`/`_post_stream` to set `sock.settimeout(
 Clarified two-tier architecture: Native C++ Engine <-> Server is 100% binary IPC/shared-memory pipes (FdTransport), while Agent <-> Server was using local HTTP/Unix domain sockets to decouple persistent GPU model caching from client CLI sessions.
 Verified all 57 unit tests in test_launcher.py and test_agent.py pass 100% green. Updated Work Hub with 0 drift.
 Blocked on: nothing.
+
+## 2026-10-11 00:30 PDT — muse-code
+Root-caused the GGUF-prepared 27B loop: split GGUFs group the 48 GDN value heads 3x16, engine reads them interleaved (h -> (h%3)*16+h//3). Fixed converter branch + added Q5_K decode (bit-exact vs libggml). Q8_0 package now 75/91 vs HQ (was 16/91), serves clean at ~50 tok/s; Swift Q4_K_M also fixed. Committed 8616d43. UD-Q4 file still needs IQ/Q3 kernels; test_server/test_agent reruns still pending.

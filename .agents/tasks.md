@@ -531,3 +531,10 @@ research and sequencing are in `docs/websearch-retrieval-sources.md` (R1–R6).
 - [ ] **Generalize the runtime model interface** — replace the `QwenTarget` type-switch front class and abstract KV/state for non-Qwen-hybrid targets (prerequisite for any CUDA/ROCm port).
 - [ ] **Unblock the research path** — register `fetch_url` in `TOOL_DEFINITIONS` (F2) and pin `duckduckgo_search`/`trafilatura`/`rapidfuzz` in `install/requirements.txt` (F6); see `docs/websearch-retrieval-sources.md`.
 - [ ] **Provider-agnostic search adapter** — one `SLIPSTREAM_SEARCH_PROVIDER` switch behind `WebResearcher` (DDG default; Brave fast/cheap; Exa for technical; Parallel for deep research) plus a research loop over the SQLite cache and a thin MCP client.
+
+## Qwen3.8 GGUF converter fixes (2026-10-11, commit 8616d43)
+- [x] GDN value-head interleave in `models/qwen38/tools/convert_qwen38_gguf.py` (split GGUFs group 48 heads 3x16; engine reads interleaved; scoped to attn_qkv/attn_gate branch) — Q8_0 package 16/91 -> 75/91 vs HQ, serves clean ~50 tok/s
+- [x] Q5_K (type 13) decode in `dev/tools/fast_dequant.c` + reader dispatch (bit-exact vs libggml-base) — unblocks Q4_K_M files; Swift Q4_K_M reconverted + probed clean
+- [x] Regression tests: `dev/tests/test_qwen38_gdn_order.py`, `dev/tests/test_sharded_gguf_reader.py` (both fail pre-fix, pass post-fix)
+- [ ] IQ4_XS/IQ4_NL/IQ3_S/Q3_K kernels still missing — UD-Q4_K_M (131 Q5_K + 117 IQ4_XS + others) not yet convertible
+- [ ] `test_server.py` full + `test_agent.py` unsandboxed reruns before push

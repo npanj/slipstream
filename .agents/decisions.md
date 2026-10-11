@@ -1230,3 +1230,8 @@ Adopted 4 cutting-edge research tracks into the active development plan:
    - Env defaults are pinned by `decodeFeatureSwitchDefaults()` in `qwen4exp_layout_test.cpp` so a later edit cannot silently re-enable a measured cost.
 
 
+
+## Qwen3.8 GGUF GDN head order (2026-10-11)
+- **Context**: GGUF-prepared 27B packages looped while matching sources at ~0.996.
+- **Decision**: Reorder grouped value heads to engine-interleaved order in the GGUF converter's split-decomposition branch only (`GDN_HEAD_ORDER = (h%3)*16+h//3`); fused/MLX sources untouched. Verified per-block at 0.996 against Swift fused weights and end-to-end (75/91 top-1 vs HQ).
+- **Q5_K**: bundled C kernel over libggml fallback so the default path works with no env setup; differential-tested bit-exact.
