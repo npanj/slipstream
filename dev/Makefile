@@ -71,8 +71,11 @@ check-python-engine: install-development test-python test-models
 	$(PYTHON) -m ruff format --check --config dev/ruff.toml server \
 		install/*.py dev/tools dev/tests dev/benchmarks models
 
+# Standard library only, so it runs before (and without) the development environment.
 architecture-check:
-	$(PYTHON) dev/tools/check_architecture.py
+	@python=$$(for candidate in $(PYTHON_CANDIDATES); do \
+		command -v "$$candidate" && break; done); \
+		"$${python:-python3}" dev/tools/check_architecture.py
 
 check: check-source check-native-engine check-python-engine
 

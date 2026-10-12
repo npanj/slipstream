@@ -22,23 +22,26 @@ Tracks:
 - Total wall-clock time
 """
 
-import argparse
-import json
-import os
-import random
-import re
-import subprocess
-import sys
-import tempfile
-import time
-import urllib.error
-import urllib.request
-from datetime import datetime
-from pathlib import Path
+import argparse  # noqa: E402
+import json  # noqa: E402
+import random  # noqa: E402
+import re  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+import tempfile  # noqa: E402
+import time  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
+from datetime import datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-BENCH_DATA_DIR = Path("/Users/nitin/Documents/shared-with-google-drive/model-serving/local-mlx/bench_data")
-QUALITY_BENCH_DATA = Path("/Users/nitin/Documents/shared-with-google-drive/benchmarking/model-quality-bench/data/datasets")
+BENCH_DATA_DIR = Path(
+    "/Users/nitin/Documents/shared-with-google-drive/model-serving/local-mlx/bench_data"
+)
+QUALITY_BENCH_DATA = Path(
+    "/Users/nitin/Documents/shared-with-google-drive/benchmarking/model-quality-bench/data/datasets"
+)
 RESULTS_DIR = Path(__file__).resolve().parent / "swift_benchmark_results"
 
 # -----------------------------------------------------------------------------
@@ -47,6 +50,7 @@ RESULTS_DIR = Path(__file__).resolve().parent / "swift_benchmark_results"
 
 BOXED = re.compile(r"\\boxed\{([^}]*)\}")
 NUM = re.compile(r"-?\d[\d,]*\.?\d*")
+
 
 def _boxed(text: str) -> str | None:
     start = text.rfind("\\boxed{")
@@ -63,13 +67,23 @@ def _boxed(text: str) -> str | None:
         i += 1
     return None
 
+
 def _normalise_math(s: str) -> str:
     s = s.strip().strip("$").strip()
     for a, b in (
-        ("\\left", ""), ("\\right", ""), ("\\!", ""), ("\\,", ""),
-        ("\\;", ""), ("dfrac", "frac"), ("tfrac", "frac"),
-        ("^\\circ", ""), ("^{\\circ}", ""), ("\\%", ""), ("%", ""),
-        ("\\$", ""), (" ", "")
+        ("\\left", ""),
+        ("\\right", ""),
+        ("\\!", ""),
+        ("\\,", ""),
+        ("\\;", ""),
+        ("dfrac", "frac"),
+        ("tfrac", "frac"),
+        ("^\\circ", ""),
+        ("^{\\circ}", ""),
+        ("\\%", ""),
+        ("%", ""),
+        ("\\$", ""),
+        (" ", ""),
     ):
         s = s.replace(a, b)
     s = re.sub(r"\\text\{(.*?)\}", r"\1", s)
@@ -78,6 +92,7 @@ def _normalise_math(s: str) -> str:
     if re.fullmatch(r"-?\d+\.0+", s):
         s = s.split(".")[0]
     return s
+
 
 def _as_number(s: str) -> float | None:
     m = re.fullmatch(r"(-?)\\frac\{(-?\d+)\}\{(\d+)\}", s)
@@ -88,6 +103,7 @@ def _as_number(s: str) -> float | None:
         return float(s.replace(",", ""))
     except ValueError:
         return None
+
 
 def score_math(output: str, answer: str) -> tuple[float, str]:
     got = _boxed(output)
@@ -100,6 +116,7 @@ def score_math(output: str, answer: str) -> tuple[float, str]:
     if x is not None and y is not None and abs(x - y) <= 1e-6 * max(1.0, abs(y)):
         return 1.0, f"boxed {got} (numeric match)"
     return 0.0, f"boxed {got} want {answer}"
+
 
 def score_aime(output: str, answer: str) -> tuple[float, str]:
     want = str(int(answer.strip()))
@@ -127,6 +144,7 @@ def score_aime(output: str, answer: str) -> tuple[float, str]:
             pass
     return 0.0, f"no integer match for {want}"
 
+
 def score_gpqa(output: str, answer: str) -> tuple[float, str]:
     want = answer.strip().upper()
     # Check explicit conclusion
@@ -146,6 +164,7 @@ def score_gpqa(output: str, answer: str) -> tuple[float, str]:
         got = matches[-1]
         return (1.0 if got == want else 0.0), f"tail {got} want {want}"
     return 0.0, f"no choice found (want {want})"
+
 
 def score_gsm8k(output: str, answer: str) -> tuple[float, str]:
     want = answer.strip()
@@ -170,6 +189,7 @@ def score_gsm8k(output: str, answer: str) -> tuple[float, str]:
             pass
     return 0.0, f"no number match for {want}"
 
+
 def score_code(output: str, test_code: str, timeout: int = 10) -> tuple[float, str]:
     body = output
     m = re.search(r"```(?:python)?\n(.*?)```", output, re.S)
@@ -180,15 +200,20 @@ def score_code(output: str, test_code: str, timeout: int = 10) -> tuple[float, s
         p = Path(d) / "t.py"
         p.write_text(prog)
         try:
-            r = subprocess.run([sys.executable, str(p)], capture_output=True, timeout=timeout, cwd=d)
+            r = subprocess.run(
+                [sys.executable, str(p)], capture_output=True, timeout=timeout, cwd=d
+            )
             if r.returncode == 0:
                 return 1.0, "pass"
-            err = (r.stderr.decode(errors="replace").strip().splitlines() or ["fail"])[-1][:120]
+            err = (r.stderr.decode(errors="replace").strip().splitlines() or ["fail"])[
+                -1
+            ][:120]
             return 0.0, f"fail: {err}"
         except subprocess.TimeoutExpired:
             return 0.0, "timeout"
         except Exception as e:
             return 0.0, f"execution error: {e}"
+
 
 def score_logic(output: str, meta: dict) -> tuple[float, str]:
     kind = meta.get("kind")
@@ -196,9 +221,15 @@ def score_logic(output: str, meta: dict) -> tuple[float, str]:
         return score_code(output, meta["test"])
     elif kind == "seating":
         o = output.lower()
-        has_1 = ("chair 1" in o or "1:" in o or "1 -" in o or "first chair" in o) and "alice" in o
-        has_2 = ("chair 2" in o or "2:" in o or "2 -" in o or "second chair" in o) and "charlie" in o
-        has_3 = ("chair 3" in o or "3:" in o or "3 -" in o or "third chair" in o) and "bob" in o
+        has_1 = (
+            "chair 1" in o or "1:" in o or "1 -" in o or "first chair" in o
+        ) and "alice" in o
+        has_2 = (
+            "chair 2" in o or "2:" in o or "2 -" in o or "second chair" in o
+        ) and "charlie" in o
+        has_3 = (
+            "chair 3" in o or "3:" in o or "3 -" in o or "third chair" in o
+        ) and "bob" in o
         if has_1 and has_2 and has_3:
             return 1.0, "correct seating (1: Alice, 2: Charlie, 3: Bob)"
         return 0.0, "incorrect seating deduction"
@@ -224,9 +255,11 @@ def score_logic(output: str, meta: dict) -> tuple[float, str]:
         return 0.0, "missing state machine logic"
     return 1.0, "reviewed"
 
+
 # -----------------------------------------------------------------------------
 # Dataset Preparation
 # -----------------------------------------------------------------------------
+
 
 def prepare_dataset(seed: int = 1234) -> list[dict]:
     rng = random.Random(seed)
@@ -243,22 +276,26 @@ def prepare_dataset(seed: int = 1234) -> list[dict]:
             '"Therefore, the final answer is \\boxed{N}" where N is an integer from 0 to 999.\n\n'
             f"Problem:\n{row['problem']}"
         )
-        items.append({
-            "id": f"aime25_{idx+1:02d}",
-            "benchmark": "AIME 2025",
-            "category": "Elite Mathematics",
-            "prompt": prompt,
-            "ground_truth": str(row["answer"]).strip(),
-            "scorer": "aime",
-            "max_tokens": 2560,
-            "meta": {"source": "aime25", "index": idx}
-        })
+        items.append(
+            {
+                "id": f"aime25_{idx + 1:02d}",
+                "benchmark": "AIME 2025",
+                "category": "Elite Mathematics",
+                "prompt": prompt,
+                "ground_truth": str(row["answer"]).strip(),
+                "scorer": "aime",
+                "max_tokens": 2560,
+                "meta": {"source": "aime25", "index": idx},
+            }
+        )
 
     # 2. MATH-500 (35 items, sampling Level 4 and 5)
     math_path = QUALITY_BENCH_DATA / "math500" / "test.jsonl"
     with open(math_path) as f:
         m5_all = [json.loads(line) for line in f]
-    hard_m5 = [x for x in m5_all if str(x.get("level", "")) in ["Level 4", "Level 5", "4", "5"]]
+    hard_m5 = [
+        x for x in m5_all if str(x.get("level", "")) in ["Level 4", "Level 5", "4", "5"]
+    ]
     if len(hard_m5) < 35:
         hard_m5 = m5_all
     rng.shuffle(hard_m5)
@@ -270,16 +307,18 @@ def prepare_dataset(seed: int = 1234) -> list[dict]:
             '"Therefore, the final answer is \\boxed{ANSWER}"\n\n'
             f"Problem:\n{row['problem']}"
         )
-        items.append({
-            "id": f"math500_{idx+1:02d}",
-            "benchmark": "MATH-500",
-            "category": "Olympiad Math",
-            "prompt": prompt,
-            "ground_truth": str(row["answer"]).strip(),
-            "scorer": "math",
-            "max_tokens": 1536,
-            "meta": {"subject": subj, "level": row.get("level")}
-        })
+        items.append(
+            {
+                "id": f"math500_{idx + 1:02d}",
+                "benchmark": "MATH-500",
+                "category": "Olympiad Math",
+                "prompt": prompt,
+                "ground_truth": str(row["answer"]).strip(),
+                "scorer": "math",
+                "max_tokens": 1536,
+                "meta": {"subject": subj, "level": row.get("level")},
+            }
+        )
 
     # 3. GPQA Diamond (35 items)
     gpqa_path = BENCH_DATA_DIR / "gpqa.json"
@@ -293,16 +332,18 @@ def prepare_dataset(seed: int = 1234) -> list[dict]:
             'response with: "Therefore, the correct answer is (X)" where X is one of A, B, C, or D.\n\n'
             f"Question:\n{row['question']}"
         )
-        items.append({
-            "id": f"gpqa_{idx+1:02d}",
-            "benchmark": "GPQA Diamond",
-            "category": "PhD-Level Science",
-            "prompt": prompt,
-            "ground_truth": row["answer"].strip().upper(),
-            "scorer": "gpqa",
-            "max_tokens": 1024,
-            "meta": {"source": "gpqa_diamond"}
-        })
+        items.append(
+            {
+                "id": f"gpqa_{idx + 1:02d}",
+                "benchmark": "GPQA Diamond",
+                "category": "PhD-Level Science",
+                "prompt": prompt,
+                "ground_truth": row["answer"].strip().upper(),
+                "scorer": "gpqa",
+                "max_tokens": 1024,
+                "meta": {"source": "gpqa_diamond"},
+            }
+        )
 
     # 4. GSM8K (25 items)
     gsm_path = QUALITY_BENCH_DATA / "gsm8k" / "test.jsonl"
@@ -316,16 +357,18 @@ def prepare_dataset(seed: int = 1234) -> list[dict]:
             f"Question:\n{row['question']}"
         )
         ans = row["answer"].split("####")[-1].strip()
-        items.append({
-            "id": f"gsm8k_{idx+1:02d}",
-            "benchmark": "GSM8K",
-            "category": "Multi-Step Math",
-            "prompt": prompt,
-            "ground_truth": ans,
-            "scorer": "gsm8k",
-            "max_tokens": 1024,
-            "meta": {}
-        })
+        items.append(
+            {
+                "id": f"gsm8k_{idx + 1:02d}",
+                "benchmark": "GSM8K",
+                "category": "Multi-Step Math",
+                "prompt": prompt,
+                "ground_truth": ans,
+                "scorer": "gsm8k",
+                "max_tokens": 1024,
+                "meta": {},
+            }
+        )
 
     # 5. HumanEval (25 items)
     he_path = QUALITY_BENCH_DATA / "humaneval" / "test.jsonl"
@@ -339,16 +382,18 @@ def prepare_dataset(seed: int = 1234) -> list[dict]:
             f"```python\n{row['prompt']}```"
         )
         test = row["test"] + f"\n\ncheck({row['entry_point']})\n"
-        items.append({
-            "id": f"humaneval_{idx+1:02d}",
-            "benchmark": "HumanEval",
-            "category": "Code Generation",
-            "prompt": prompt,
-            "ground_truth": test,
-            "scorer": "code",
-            "max_tokens": 1536,
-            "meta": {"task_id": row["task_id"], "entry_point": row["entry_point"]}
-        })
+        items.append(
+            {
+                "id": f"humaneval_{idx + 1:02d}",
+                "benchmark": "HumanEval",
+                "category": "Code Generation",
+                "prompt": prompt,
+                "ground_truth": test,
+                "scorer": "code",
+                "max_tokens": 1536,
+                "meta": {"task_id": row["task_id"], "entry_point": row["entry_point"]},
+            }
+        )
 
     # 6. Hard Systems & Logic (5 items)
     hard_probes = [
@@ -374,8 +419,8 @@ def prepare_dataset(seed: int = 1234) -> list[dict]:
                     "assert merge_intervals([[-5,-2],[-3,1]]) == [[-5,1]]\n"
                     "assert merge_intervals([[1,10],[2,3],[4,8]]) == [[1,10]]\n"
                     "print('Intervals OK')\n"
-                )
-            }
+                ),
+            },
         },
         {
             "id": "probe_02_seating",
@@ -392,7 +437,7 @@ def prepare_dataset(seed: int = 1234) -> list[dict]:
             "ground_truth": "Chair 1: Alice, Chair 2: Charlie, Chair 3: Bob",
             "scorer": "logic",
             "max_tokens": 1024,
-            "meta": {"kind": "seating"}
+            "meta": {"kind": "seating"},
         },
         {
             "id": "probe_03_concurrency",
@@ -407,7 +452,7 @@ def prepare_dataset(seed: int = 1234) -> list[dict]:
             "ground_truth": "Acquire-Release vs SeqCst store buffering explanation",
             "scorer": "logic",
             "max_tokens": 1536,
-            "meta": {"kind": "concurrency"}
+            "meta": {"kind": "concurrency"},
         },
         {
             "id": "probe_04_bandwidth",
@@ -421,7 +466,7 @@ def prepare_dataset(seed: int = 1234) -> list[dict]:
             "ground_truth": "Memory bandwidth bottleneck in decode vs prefill",
             "scorer": "logic",
             "max_tokens": 512,
-            "meta": {"kind": "bandwidth"}
+            "meta": {"kind": "bandwidth"},
         },
         {
             "id": "probe_05_csv_parser",
@@ -430,21 +475,23 @@ def prepare_dataset(seed: int = 1234) -> list[dict]:
             "prompt": (
                 "Write an idiomatic Rust zero-copy CSV line parser function `parse_csv_record(line: &str) -> Vec<&str>` "
                 "that correctly parses a comma-separated line, handling double-quoted fields that contain escaped quotes "
-                "(represented as `\"\"`). Explain the state machine transitions in comments and provide unit tests."
+                '(represented as `""`). Explain the state machine transitions in comments and provide unit tests.'
             ),
             "ground_truth": "Rust zero-copy CSV parser",
             "scorer": "logic",
             "max_tokens": 1536,
-            "meta": {"kind": "csv"}
-        }
+            "meta": {"kind": "csv"},
+        },
     ]
     items.extend(hard_probes)
 
     return items
 
+
 # -----------------------------------------------------------------------------
 # HTTP Client
 # -----------------------------------------------------------------------------
+
 
 def query_endpoint(
     url: str,
@@ -453,7 +500,7 @@ def query_endpoint(
     max_tokens: int = 1024,
     temperature: float = 0.0,
     timeout: int = 240,
-    retries: int = 3
+    retries: int = 3,
 ) -> dict:
     payload = {
         "model": model,
@@ -466,7 +513,7 @@ def query_endpoint(
     req = urllib.request.Request(
         f"{url.rstrip('/')}/chat/completions",
         data=data,
-        headers={"Content-Type": "application/json"}
+        headers={"Content-Type": "application/json"},
     )
 
     last_error = ""
@@ -484,12 +531,16 @@ def query_endpoint(
                 usage = body.get("usage", {})
                 prompt_toks = usage.get("prompt_tokens", 0)
                 comp_toks = usage.get("completion_tokens", 0)
-                reason_toks = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0)
+                reason_toks = (usage.get("completion_tokens_details") or {}).get(
+                    "reasoning_tokens", 0
+                )
 
                 # Extract metrics
                 metrics = body.get("metrics", {})
                 req_lat = metrics.get("request_latency", {})
-                ttft_ms = req_lat.get("ttft_ms") or req_lat.get("start_to_first_token_ms")
+                ttft_ms = req_lat.get("ttft_ms") or req_lat.get(
+                    "start_to_first_token_ms"
+                )
                 stream_tps = req_lat.get("stream_tokens_per_second")
 
                 timings = body.get("timings", {})
@@ -512,7 +563,7 @@ def query_endpoint(
                     "wall_ms": wall_ms,
                     "ttft_ms": float(ttft_ms),
                     "tok_per_sec": float(tok_per_sec),
-                    "error": None
+                    "error": None,
                 }
         except Exception as e:
             last_error = f"{type(e).__name__}: {e}"
@@ -528,26 +579,24 @@ def query_endpoint(
         "wall_ms": 0.0,
         "ttft_ms": 0.0,
         "tok_per_sec": 0.0,
-        "error": last_error
+        "error": last_error,
     }
+
 
 # -----------------------------------------------------------------------------
 # Evaluation Runner
 # -----------------------------------------------------------------------------
 
+
 def evaluate_model(
-    model_name: str,
-    base_url: str,
-    model_id: str,
-    items: list[dict],
-    output_file: Path
+    model_name: str, base_url: str, model_id: str, items: list[dict], output_file: Path
 ) -> list[dict]:
-    print(f"\n==================================================================")
+    print("\n==================================================================")
     print(f"Starting Evaluation: {model_name}")
     print(f"Endpoint: {base_url} (Model ID: {model_id})")
     print(f"Total Items: {len(items)}")
     print(f"Output: {output_file}")
-    print(f"==================================================================\n")
+    print("==================================================================\n")
 
     results = []
     if output_file.exists():
@@ -575,12 +624,12 @@ def evaluate_model(
         ground_truth = it["ground_truth"]
         max_tokens = it.get("max_tokens", 1024)
 
-        t0 = time.perf_counter()
         resp = query_endpoint(base_url, model_id, prompt, max_tokens=max_tokens)
-        elapsed = time.perf_counter() - t0
 
         if not resp["ok"]:
-            print(f"[{idx:03d}/{len(items):03d}] {item_id:<18} | {it['benchmark']:<16} | ERROR: {resp['error']}")
+            print(
+                f"[{idx:03d}/{len(items):03d}] {item_id:<18} | {it['benchmark']:<16} | ERROR: {resp['error']}"
+            )
             rec = {
                 "id": item_id,
                 "benchmark": it["benchmark"],
@@ -636,7 +685,9 @@ def evaluate_model(
                 if sc_r > 0.0:
                     score, why = sc_r, f"[in reasoning] {why_r}"
         elif scorer_type == "code":
-            score, why = score_code(full_output if full_output.strip() else reasoning, ground_truth)
+            score, why = score_code(
+                full_output if full_output.strip() else reasoning, ground_truth
+            )
         elif scorer_type == "logic":
             score, why = score_logic(eval_text, it["meta"])
 
@@ -662,16 +713,20 @@ def evaluate_model(
         out_fh.write(json.dumps(rec) + "\n")
 
         status_sym = "PASS" if score > 0.0 else "FAIL"
-        print(f"[{idx:03d}/{len(items):03d}] {item_id:<18} | {it['benchmark']:<16} | {status_sym} ({score:.1f}) | {resp['tok_per_sec']:>5.1f} t/s | TTFT: {resp['ttft_ms']:>6.1f}ms | Out: {resp['completion_tokens']:>4d}tok | {why[:40]}")
+        print(
+            f"[{idx:03d}/{len(items):03d}] {item_id:<18} | {it['benchmark']:<16} | {status_sym} ({score:.1f}) | {resp['tok_per_sec']:>5.1f} t/s | TTFT: {resp['ttft_ms']:>6.1f}ms | Out: {resp['completion_tokens']:>4d}tok | {why[:40]}"
+        )
 
     out_fh.close()
     total_time = time.perf_counter() - t_start
-    print(f"\nFinished {model_name} in {total_time/60:.2f} minutes.")
+    print(f"\nFinished {model_name} in {total_time / 60:.2f} minutes.")
     return results
+
 
 # -----------------------------------------------------------------------------
 # Reporting & Comparison
 # -----------------------------------------------------------------------------
+
 
 def generate_report(v3_file: Path, b27_file: Path, report_file: Path):
     if not v3_file.exists() or not b27_file.exists():
@@ -687,17 +742,31 @@ def generate_report(v3_file: Path, b27_file: Path, report_file: Path):
     b27_map = {r["id"]: r for r in b27_res}
 
     common_ids = sorted(set(v3_map.keys()) & set(b27_map.keys()))
-    print(f"\nGenerating comparative scorecard across {len(common_ids)} common items...")
+    print(
+        f"\nGenerating comparative scorecard across {len(common_ids)} common items..."
+    )
 
-    benchmarks = ["AIME 2025", "MATH-500", "GPQA Diamond", "GSM8K", "HumanEval", "Hard Systems & Logic"]
+    benchmarks = [
+        "AIME 2025",
+        "MATH-500",
+        "GPQA Diamond",
+        "GSM8K",
+        "HumanEval",
+        "Hard Systems & Logic",
+    ]
     stats = {}
 
     for b in benchmarks:
         stats[b] = {
-            "v3_correct": 0, "b27_correct": 0, "total": 0,
-            "v3_tps": [], "b27_tps": [],
-            "v3_ttft": [], "b27_ttft": [],
-            "v3_tokens": [], "b27_tokens": []
+            "v3_correct": 0,
+            "b27_correct": 0,
+            "total": 0,
+            "v3_tps": [],
+            "b27_tps": [],
+            "v3_ttft": [],
+            "b27_ttft": [],
+            "v3_tokens": [],
+            "b27_tokens": [],
         }
 
     for item_id in common_ids:
@@ -706,10 +775,15 @@ def generate_report(v3_file: Path, b27_file: Path, report_file: Path):
         bench = r1["benchmark"]
         if bench not in stats:
             stats[bench] = {
-                "v3_correct": 0, "b27_correct": 0, "total": 0,
-                "v3_tps": [], "b27_tps": [],
-                "v3_ttft": [], "b27_ttft": [],
-                "v3_tokens": [], "b27_tokens": []
+                "v3_correct": 0,
+                "b27_correct": 0,
+                "total": 0,
+                "v3_tps": [],
+                "b27_tps": [],
+                "v3_ttft": [],
+                "b27_ttft": [],
+                "v3_tokens": [],
+                "b27_tokens": [],
             }
         s = stats[bench]
         s["total"] += 1
@@ -732,14 +806,22 @@ def generate_report(v3_file: Path, b27_file: Path, report_file: Path):
         s["b27_tokens"].append(r2.get("completion_tokens", 0))
 
     lines = []
-    lines.append("# Head-to-Head Benchmark: Swift-Qwen3.8-27B-Splash-HQ vs Swift-Qwen3.8-Flash-Next-V3\n")
+    lines.append(
+        "# Head-to-Head Benchmark: Swift-Qwen3.8-27B-Splash-HQ vs Swift-Qwen3.8-Flash-Next-V3\n"
+    )
     lines.append(f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M PDT')}\n")
-    lines.append(f"**Platform:** Apple Silicon (Unified Memory), Single-Engine Sequential Execution\n")
-    lines.append(f"**Total Evaluated Items:** {len(common_ids)} items across 6 rigorous domains\n")
+    lines.append(
+        "**Platform:** Apple Silicon (Unified Memory), Single-Engine Sequential Execution\n"
+    )
+    lines.append(
+        f"**Total Evaluated Items:** {len(common_ids)} items across 6 rigorous domains\n"
+    )
     lines.append("\n---\n")
 
     lines.append("## 1. Executive Summary & Scorecard\n")
-    lines.append("| Domain / Benchmark | Items | Swift-Flash-Next-V3 Accuracy | Swift-27B-Splash-HQ Accuracy | Accuracy Delta | Flash-Next Speed | 27B-Splash Speed | Speed Ratio |")
+    lines.append(
+        "| Domain / Benchmark | Items | Swift-Flash-Next-V3 Accuracy | Swift-27B-Splash-HQ Accuracy | Accuracy Delta | Flash-Next Speed | 27B-Splash Speed | Speed Ratio |"
+    )
     lines.append("|---|---:|---:|---:|---:|---:|---:|---:|")
 
     tot_items = 0
@@ -776,7 +858,9 @@ def generate_report(v3_file: Path, b27_file: Path, report_file: Path):
         speed_ratio = (b27_speed / v3_speed) if v3_speed > 0 else 0.0
         diff_str = f"+{diff:.1f}%" if diff > 0 else f"{diff:.1f}%"
 
-        lines.append(f"| **{b}** | {tot} | {v3_acc:.1f}% ({v3_c}/{tot}) | {b27_acc:.1f}% ({b27_c}/{tot}) | {diff_str} | {v3_speed:.1f} tok/s | {b27_speed:.1f} tok/s | {speed_ratio:.2f}x |")
+        lines.append(
+            f"| **{b}** | {tot} | {v3_acc:.1f}% ({v3_c}/{tot}) | {b27_acc:.1f}% ({b27_c}/{tot}) | {diff_str} | {v3_speed:.1f} tok/s | {b27_speed:.1f} tok/s | {speed_ratio:.2f}x |"
+        )
 
     overall_v3_acc = (tot_v3_corr / tot_items * 100.0) if tot_items else 0.0
     overall_b27_acc = (tot_b27_corr / tot_items * 100.0) if tot_items else 0.0
@@ -784,9 +868,13 @@ def generate_report(v3_file: Path, b27_file: Path, report_file: Path):
     overall_v3_tps = (sum(all_v3_tps) / len(all_v3_tps)) if all_v3_tps else 0.0
     overall_b27_tps = (sum(all_b27_tps) / len(all_b27_tps)) if all_b27_tps else 0.0
     overall_ratio = (overall_b27_tps / overall_v3_tps) if overall_v3_tps else 0.0
-    overall_diff_str = f"+{overall_diff:.1f}%" if overall_diff > 0 else f"{overall_diff:.1f}%"
+    overall_diff_str = (
+        f"+{overall_diff:.1f}%" if overall_diff > 0 else f"{overall_diff:.1f}%"
+    )
 
-    lines.append(f"| **TOTAL / OVERALL** | **{tot_items}** | **{overall_v3_acc:.1f}% ({tot_v3_corr}/{tot_items})** | **{overall_b27_acc:.1f}% ({tot_b27_corr}/{tot_items})** | **{overall_diff_str}** | **{overall_v3_tps:.1f} tok/s** | **{overall_b27_tps:.1f} tok/s** | **{overall_ratio:.2f}x** |")
+    lines.append(
+        f"| **TOTAL / OVERALL** | **{tot_items}** | **{overall_v3_acc:.1f}% ({tot_v3_corr}/{tot_items})** | **{overall_b27_acc:.1f}% ({tot_b27_corr}/{tot_items})** | **{overall_diff_str}** | **{overall_v3_tps:.1f} tok/s** | **{overall_b27_tps:.1f} tok/s** | **{overall_ratio:.2f}x** |"
+    )
 
     lines.append("\n---\n")
 
@@ -798,12 +886,18 @@ def generate_report(v3_file: Path, b27_file: Path, report_file: Path):
     avg_b27_ttft = (sum(all_b27_ttft) / len(all_b27_ttft)) if all_b27_ttft else 0.0
     ttft_ratio = (avg_v3_ttft / avg_b27_ttft) if avg_b27_ttft else 0.0
 
-    lines.append(f"| **Average Decode Throughput** | **{overall_v3_tps:.1f} tok/s** | **{overall_b27_tps:.1f} tok/s** | **{overall_ratio:.2f}x speed** |")
-    lines.append(f"| **Average Time-To-First-Token (TTFT)** | **{avg_v3_ttft:.1f} ms** | **{avg_b27_ttft:.1f} ms** | **{ttft_ratio:.2f}x faster** |")
+    lines.append(
+        f"| **Average Decode Throughput** | **{overall_v3_tps:.1f} tok/s** | **{overall_b27_tps:.1f} tok/s** | **{overall_ratio:.2f}x speed** |"
+    )
+    lines.append(
+        f"| **Average Time-To-First-Token (TTFT)** | **{avg_v3_ttft:.1f} ms** | **{avg_b27_ttft:.1f} ms** | **{ttft_ratio:.2f}x faster** |"
+    )
 
     v3_tot_toks = sum(r.get("completion_tokens", 0) for r in v3_map.values())
     b27_tot_toks = sum(r.get("completion_tokens", 0) for r in b27_map.values())
-    lines.append(f"| **Total Generated Tokens** | {v3_tot_toks:,} tokens | {b27_tot_toks:,} tokens | {((b27_tot_toks-v3_tot_toks)/v3_tot_toks*100.0 if v3_tot_toks else 0.0):+.1f}% tokens |")
+    lines.append(
+        f"| **Total Generated Tokens** | {v3_tot_toks:,} tokens | {b27_tot_toks:,} tokens | {((b27_tot_toks - v3_tot_toks) / v3_tot_toks * 100.0 if v3_tot_toks else 0.0):+.1f}% tokens |"
+    )
 
     report_text = "\n".join(lines)
     with open(report_file, "w") as f:
@@ -811,23 +905,35 @@ def generate_report(v3_file: Path, b27_file: Path, report_file: Path):
     print(f"Report written to {report_file}")
     print("\n" + report_text)
 
+
 # -----------------------------------------------------------------------------
 # Main Entry Point
 # -----------------------------------------------------------------------------
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Swift 27B vs Swift V3 Quality & Speed Benchmark")
-    parser.add_argument("--target", choices=["v3", "27b", "report"], default="v3",
-                        help="Target model to evaluate or 'report' to generate scorecard")
-    parser.add_argument("--limit", type=int, default=0, help="Optional limit on total items")
-    parser.add_argument("--seed", type=int, default=1234, help="Random seed for deterministic sampling")
+    parser = argparse.ArgumentParser(
+        description="Swift 27B vs Swift V3 Quality & Speed Benchmark"
+    )
+    parser.add_argument(
+        "--target",
+        choices=["v3", "27b", "report"],
+        default="v3",
+        help="Target model to evaluate or 'report' to generate scorecard",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=0, help="Optional limit on total items"
+    )
+    parser.add_argument(
+        "--seed", type=int, default=1234, help="Random seed for deterministic sampling"
+    )
     args = parser.parse_args()
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     items = prepare_dataset(seed=args.seed)
     if args.limit > 0:
-        items = items[:args.limit]
+        items = items[: args.limit]
 
     v3_file = RESULTS_DIR / "swift_flash_next_v3_results.jsonl"
     b27_file = RESULTS_DIR / "swift_27b_splash_hq_results.jsonl"
@@ -846,7 +952,7 @@ def main():
             base_url="http://127.0.0.1:8090/v1",
             model_id="local/swift-qwen38-flash-next-v3",
             items=items,
-            output_file=v3_file
+            output_file=v3_file,
         )
     elif args.target == "27b":
         print(f"Loaded {len(items)} benchmark test items across 6 domains:")
@@ -861,10 +967,11 @@ def main():
             base_url="http://127.0.0.1:8000/v1",
             model_id="nitinpanj/Swift-Qwen3.8-27B-Splash-HQ",
             items=items,
-            output_file=b27_file
+            output_file=b27_file,
         )
     elif args.target == "report":
         generate_report(v3_file, b27_file, report_file)
+
 
 if __name__ == "__main__":
     main()

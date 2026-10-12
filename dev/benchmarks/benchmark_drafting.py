@@ -18,7 +18,6 @@ Tracks:
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 import time
@@ -28,16 +27,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "dev/benchmarks"))
-from benchmark_swift27b_vs_swiftv3 import (
+from benchmark_swift27b_vs_swiftv3 import (  # noqa: E402
     prepare_dataset,
-    score_gsm8k,
-    score_code,
-    score_logic,
-    score_gpqa,
-    score_aime,
-    score_math,
     query_endpoint,
+    score_aime,
+    score_code,
+    score_gpqa,
+    score_gsm8k,
+    score_logic,
+    score_math,
 )
+
 
 def fetch_metrics(base_url: str = "http://127.0.0.1:8090/v1") -> dict:
     root_url = re.sub(r"/v1/?$", "", base_url)
@@ -58,8 +58,11 @@ def fetch_metrics(base_url: str = "http://127.0.0.1:8090/v1") -> dict:
                     pass
         return m
     except Exception as e:
-        print(f"Warning: failed to fetch /metrics from {root_url}: {e}", file=sys.stderr)
+        print(
+            f"Warning: failed to fetch /metrics from {root_url}: {e}", file=sys.stderr
+        )
         return {}
+
 
 def prepare_suite(seed: int = 1234, count_per_domain: int = 5) -> list[dict]:
     all_dataset = prepare_dataset(seed)
@@ -70,10 +73,17 @@ def prepare_suite(seed: int = 1234, count_per_domain: int = 5) -> list[dict]:
         selected.extend(d_items[:count_per_domain])
     return selected
 
-def run_benchmark(base_url: str = "http://127.0.0.1:8090/v1", model: str = "local/swift-qwen38-flash-next-v3", count_per_domain: int = 5) -> dict:
+
+def run_benchmark(
+    base_url: str = "http://127.0.0.1:8090/v1",
+    model: str = "local/swift-qwen38-flash-next-v3",
+    count_per_domain: int = 5,
+) -> dict:
     suite = prepare_suite(count_per_domain=count_per_domain)
     print(f"=== Running Speculative Drafting Evaluation on {base_url} ({model}) ===")
-    print(f"Items: {len(suite)} across {len(set(it['benchmark'] for it in suite))} domains")
+    print(
+        f"Items: {len(suite)} across {len(set(it['benchmark'] for it in suite))} domains"
+    )
 
     m_start = fetch_metrics(base_url)
     t0_wall = time.perf_counter()
@@ -84,13 +94,17 @@ def run_benchmark(base_url: str = "http://127.0.0.1:8090/v1", model: str = "loca
     decode_speeds = []
 
     for i, it in enumerate(suite):
-        print(f"[{i+1:02d}/{len(suite):02d}] {it['benchmark']:<20} ({it['id']})... ", end="", flush=True)
+        print(
+            f"[{i + 1:02d}/{len(suite):02d}] {it['benchmark']:<20} ({it['id']})... ",
+            end="",
+            flush=True,
+        )
         res = query_endpoint(
             url=base_url,
             model=model,
             prompt=it["prompt"],
             max_tokens=it["max_tokens"],
-            temperature=0.0
+            temperature=0.0,
         )
         if not res["ok"]:
             print(f"FAILED ({res['error']})")
@@ -131,23 +145,31 @@ def run_benchmark(base_url: str = "http://127.0.0.1:8090/v1", model: str = "loca
                 if sc_r > 0.0:
                     score, why = sc_r, f"[in reasoning] {why_r}"
         elif scorer_type == "code":
-            score, why = score_code(full_output if full_output.strip() else reasoning, ground_truth)
+            score, why = score_code(
+                full_output if full_output.strip() else reasoning, ground_truth
+            )
         elif scorer_type == "logic":
             score, why = score_logic(eval_text, it.get("meta", {}))
         else:
             score, why = 1.0, "ok"
 
-        correct_count += (score >= 0.99)
+        correct_count += score >= 0.99
         total_tokens += res["completion_tokens"]
         decode_speeds.append(res["tok_per_sec"])
         status = "PASS" if score >= 0.99 else "FAIL"
-        print(f"{status} | {res['tok_per_sec']:.1f} tok/s | {res['completion_tokens']} toks ({why})")
+        print(
+            f"{status} | {res['tok_per_sec']:.1f} tok/s | {res['completion_tokens']} toks ({why})"
+        )
 
     t1_wall = time.perf_counter()
     m_end = fetch_metrics(base_url)
 
-    drafted_delta = m_end.get("splash_drafted_tokens_total", 0) - m_start.get("splash_drafted_tokens_total", 0)
-    accepted_delta = m_end.get("splash_accepted_draft_tokens_total", 0) - m_start.get("splash_accepted_draft_tokens_total", 0)
+    drafted_delta = m_end.get("splash_drafted_tokens_total", 0) - m_start.get(
+        "splash_drafted_tokens_total", 0
+    )
+    accepted_delta = m_end.get("splash_accepted_draft_tokens_total", 0) - m_start.get(
+        "splash_accepted_draft_tokens_total", 0
+    )
     acc_ratio = (accepted_delta / drafted_delta * 100.0) if drafted_delta > 0 else 0.0
 
     avg_tps = (sum(decode_speeds) / len(decode_speeds)) if decode_speeds else 0.0
@@ -180,10 +202,13 @@ def run_benchmark(base_url: str = "http://127.0.0.1:8090/v1", model: str = "loca
 
     return summary
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:8090/v1")
     parser.add_argument("--model", default="local/swift-qwen38-flash-next-v3")
     parser.add_argument("--count-per-domain", type=int, default=5)
     args = parser.parse_args()
-    run_benchmark(base_url=args.url, model=args.model, count_per_domain=args.count_per_domain)
+    run_benchmark(
+        base_url=args.url, model=args.model, count_per_domain=args.count_per_domain
+    )

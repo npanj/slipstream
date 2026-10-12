@@ -827,6 +827,20 @@ void Engine::apply(const BatchPlan &plan,
     if (result.outputTokensWithoutKv > result.outputTokens.size()) {
       throw std::logic_error("model reported more uncommitted tokens than output");
     }
+    const auto outOfVocabulary = std::find_if(
+        result.outputTokens.begin(), result.outputTokens.end(),
+        [&](uint32_t token) { return token >= config_.vocabularySize; });
+    if (outOfVocabulary != result.outputTokens.end()) {
+      // A token outside the vocabulary, such as the 0xffffffff the sampling
+      // kernels leave for a non-finite logit row, fails this lane like a
+      // model-reported result: before any output or cache publication.
+      active.failure = Failure{
+          "model_result_invalid", "model emitted out-of-vocabulary token " +
+                                      std::to_string(*outOfVocabulary)};
+      schedulerResults.push_back({active.request.id, result.consumedPromptTokens,
+                                  true, result.nextDecodeStage});
+      continue;
+    }
     if (plan.kind == WorkKind::Prefill) {
       const uint32_t promptProcessed =
           item.promptOffset + result.consumedPromptTokens;

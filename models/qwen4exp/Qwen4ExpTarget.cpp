@@ -1,4 +1,5 @@
 #include "models/qwen4exp/Qwen4ExpTarget.hpp"
+#include "AwakeClock.hpp"
 
 #include "models/qwen4exp/abi/HyperConnection.h"
 #include "metal/abi/MoE.h"
@@ -1169,6 +1170,205 @@ void Qwen4ExpTarget::addPrefill(
     };
   };
 
+  double totalStageMs = 0.0;
+  double totalGpuMs = 0.0;
+
+  const bool lookahead = !std::getenv("SPLASH_NO_LOOKAHEAD") &&
+                         !std::getenv("SPLASH_NO_PREFILL_PREFETCH");
+
+  auto encodePrefillPredictRoute = [&](metal::CommandGraph &g, uint32_t target) {
+    const uint64_t neededScratch = std::max<uint64_t>(
+        buffers.groupedInput.sizeBytes(),
+        uint64_t{rows} * moePlan.shape().routerWidth() * sizeof(uint16_t));
+    if (!weights.predictScratch || weights.predictScratch.sizeBytes() < neededScratch) {
+      weights.predictScratch = backend.allocateBuffer(
+          neededScratch, metal::BufferStorage::Shared,
+          "qwen4exp-predict-scratch");
+    }
+    if (!weights.predictSelected || weights.predictSelected.sizeBytes() < buffers.selectedExperts.sizeBytes()) {
+      weights.predictSelected = backend.allocateBuffer(
+          buffers.selectedExperts.sizeBytes(), metal::BufferStorage::Shared,
+          "qwen4exp-predict-selected");
+    }
+    if (!weights.predictWeights || weights.predictWeights.sizeBytes() < buffers.routingWeights.sizeBytes()) {
+      weights.predictWeights = backend.allocateBuffer(
+          buffers.routingWeights.sizeBytes(), metal::BufferStorage::Shared,
+          "qwen4exp-predict-weights");
+    }
+    ops::MoE::addRouteScores(
+        g,
+        {buffers.hyperMixed, buffers.hyperMixed, buffers.gdnOutput,
+         weights.predictSelected, weights.predictWeights,
+         buffers.tileDescriptors, buffers.tileCount, buffers.groupedRoutes,
+         buffers.routeRows, weights.predictScratch, buffers.expertIntermediate,
+         buffers.expertOutput},
+        weights.layers[target].ffn, moePlan);
+  };
+
+  auto prefetchPrefillPredicted = [&](uint32_t layer) {
+    if (!weights.predictSelected || layer >= geometry.layers)
+      return;
+    auto &cache = weights.layers[layer].expertCache;
+    const auto *predictedScores =
+        static_cast<const uint16_t *>(weights.predictScratch.contents());
+    const uint32_t width = moePlan.shape().routerWidth();
+    struct Miss { uint32_t expert; uint32_t slot; };
+    std::vector<Miss> misses;
+    ++cache.clock;
+    constexpr uint32_t kMaxPredicted = 512;
+    std::bitset<kMaxPredicted> wanted;
+    std::vector<uint32_t> order;
+
+    const uint32_t perToken = weights.layout.expertsPerToken;
+    const uint32_t experts = weights.layout.experts;
+    uint32_t ids[16];
+    for (uint32_t r = 0; r < rows; ++r) {
+      topExperts(predictedScores + uint64_t{r} * width, experts,
+                 perToken, ids, nullptr);
+      for (uint32_t k = 0; k < perToken; ++k) {
+        const uint32_t exp = ids[k];
+        if (exp < experts && !wanted.test(exp)) {
+          wanted.set(exp);
+          order.push_back(exp);
+        }
+      }
+    }
+
+    for (const uint32_t expert : order) {
+      const int16_t existing = cache.expertToSlot[expert];
+      if (existing >= 0) {
+        cache.lruTime[existing] = cache.clock;
+        continue;
+      }
+      uint32_t slot = 0;
+      if (cache.numCached < cache.capacity) {
+        slot = cache.numCached++;
+      } else {
+        const int32_t victim = pickVictim(cache);
+        if (victim < 0)
+          break;
+        slot = static_cast<uint32_t>(victim);
+        if (cache.slotToExpert[slot] >= 0)
+          cache.expertToSlot[cache.slotToExpert[slot]] = -1;
+      }
+      cache.slotToExpert[slot] = static_cast<int16_t>(expert);
+      cache.expertToSlot[expert] = static_cast<int16_t>(slot);
+      cache.lruTime[slot] = cache.clock;
+      misses.push_back({expert, slot});
+    }
+
+    if (misses.empty())
+      return;
+
+    const auto &source = weights.layers[layer].expertSource;
+    const uint64_t stride = weights.layers[layer].ffn.expertGate.expertStrideBytes;
+
+    struct AdviseMiss { uint32_t expert; };
+    std::vector<AdviseMiss> advise;
+    advise.reserve(misses.size());
+    for (const auto &m : misses) advise.push_back({m.expert});
+    adviseMissedExperts(source, advise.data(), advise.size(), stride);
+
+    if (!cache.inflight)
+      cache.inflight = dispatch_group_create();
+    if (!cache.slotReads) {
+      cache.slotReads.reset(new std::atomic<uint32_t>[cache.capacity]);
+      for (uint32_t s = 0; s < cache.capacity; ++s) cache.slotReads[s] = 0;
+    }
+    for (const auto &miss : misses)
+      cache.slotReads[miss.slot].fetch_add(3 * readPieces(), std::memory_order_relaxed);
+
+    auto slotReads = cache.slotReads;
+    char *gate = static_cast<char *>(cache.cacheGate.contents());
+    char *up = static_cast<char *>(cache.cacheUp.contents());
+    char *down = static_cast<char *>(cache.cacheDown.contents());
+    auto owned = std::make_shared<std::vector<Miss>>(std::move(misses));
+    dispatch_group_async(cache.inflight,
+                         dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      readMissedExperts(source, owned->data(), owned->size(), stride,
+                        gate, up, down, slotReads.get());
+    });
+    cache.pending = true;
+  };
+
+  auto prefetchLayerMisses = [&](uint32_t targetLayer) -> bool {
+    if (targetLayer >= geometry.layers)
+      return false;
+    static const bool prefetchEnabled = !std::getenv("SPLASH_NO_PREFILL_PREFETCH");
+    if (!prefetchEnabled)
+      return false;
+    auto &cache = weights.layers[targetLayer].expertCache;
+    const auto &source = weights.layers[targetLayer].expertSource;
+    const uint64_t stride = weights.layers[targetLayer].ffn.expertGate.expertStrideBytes;
+    const auto *selPtr = static_cast<const uint32_t *>(buffers.selectedExperts.contents());
+    const uint32_t routesPerRow = moePlan.shape().routesPerToken();
+    const uint32_t perToken = weights.layout.expertsPerToken;
+    const uint32_t totalExperts = weights.layout.experts;
+
+    std::bitset<512> seen;
+    struct Miss { uint32_t expert; uint32_t slot; };
+    std::vector<Miss> toRead;
+    ++cache.clock;
+
+    for (uint32_t r = 0; r < rows; ++r) {
+      for (uint32_t k = 0; k < perToken; ++k) {
+        uint32_t exp = selPtr[r * routesPerRow + k];
+        if (exp < totalExperts && !seen.test(exp)) {
+          seen.set(exp);
+          if (cache.expertToSlot[exp] >= 0) {
+            cache.lruTime[cache.expertToSlot[exp]] = cache.clock;
+          } else {
+            uint32_t slot = 0;
+            if (cache.numCached < cache.capacity) {
+              slot = cache.numCached++;
+            } else {
+              const int32_t victim = pickVictim(cache);
+              if (victim < 0) break;
+              slot = static_cast<uint32_t>(victim);
+              if (cache.slotToExpert[slot] >= 0)
+                cache.expertToSlot[cache.slotToExpert[slot]] = -1;
+            }
+            cache.slotToExpert[slot] = static_cast<int16_t>(exp);
+            cache.expertToSlot[exp] = static_cast<int16_t>(slot);
+            cache.lruTime[slot] = cache.clock;
+            toRead.push_back({exp, slot});
+          }
+        }
+      }
+    }
+
+    if (toRead.empty())
+      return true;
+
+    struct AdviseMiss { uint32_t expert; };
+    std::vector<AdviseMiss> advise;
+    advise.reserve(toRead.size());
+    for (const auto &m : toRead) advise.push_back({m.expert});
+    adviseMissedExperts(source, advise.data(), advise.size(), stride);
+
+    if (!cache.inflight)
+      cache.inflight = dispatch_group_create();
+    if (!cache.slotReads) {
+      cache.slotReads.reset(new std::atomic<uint32_t>[cache.capacity]);
+      for (uint32_t s = 0; s < cache.capacity; ++s) cache.slotReads[s] = 0;
+    }
+    for (const auto &miss : toRead)
+      cache.slotReads[miss.slot].fetch_add(3 * readPieces(), std::memory_order_relaxed);
+
+    auto slotReads = cache.slotReads;
+    char *gate = static_cast<char *>(cache.cacheGate.contents());
+    char *up = static_cast<char *>(cache.cacheUp.contents());
+    char *down = static_cast<char *>(cache.cacheDown.contents());
+    auto owned = std::make_shared<std::vector<Miss>>(std::move(toRead));
+    dispatch_group_async(cache.inflight,
+                         dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      readMissedExperts(source, owned->data(), owned->size(), stride,
+                        gate, up, down, slotReads.get());
+    });
+    cache.pending = true;
+    return true;
+  };
+
   metal::CommandGraph residentGraph = std::move(graph);
   for (uint32_t layerIndex = 0; layerIndex < R; ++layerIndex) {
     encodeAttentionHC(residentGraph, layerIndex);
@@ -1192,19 +1392,26 @@ void Qwen4ExpTarget::addPrefill(
   encodeMixerUpdate(residentGraph, R, mixerOutR);
   encodeMlpHC(residentGraph, R);
   encodeMoERoute(residentGraph, R);
+  if (lookahead && R + 1 < geometry.layers) {
+    encodePrefillPredictRoute(residentGraph, R + 1);
+  }
 
   // Submit residentGraph and prefetch streaming experts in background
-  auto t0 = std::chrono::steady_clock::now();
+  auto t0 = AwakeClock::now();
   metal::CommandTicket residentTicket = backend.submitCommandAsync(residentGraph.dispatches());
   // No blanket read-ahead of the previous step's experts: after a long
   // prompt that is nearly every expert, ~68 GB the OS then reads in the
   // background for minutes, stalling decode. Misses are fetched on demand.
   (void)residentTicket.wait();
-  auto t1 = std::chrono::steady_clock::now();
+  auto t1 = AwakeClock::now();
   double residentMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-  double totalStageMs = 0.0;
-  double totalGpuMs = 0.0;
+  if (R < geometry.layers) {
+    prefetchLayerMisses(R);
+  }
+  if (lookahead && R + 1 < geometry.layers) {
+    prefetchPrefillPredicted(R + 1);
+  }
 
   // Loop through streaming layers R .. geometry.layers - 2
   // Every range but the last runs now, each after its experts are loaded
@@ -1221,10 +1428,13 @@ void Qwen4ExpTarget::addPrefill(
   auto encodeLayerExpertsByExpert = [&](metal::CommandGraph &g, uint32_t L) {
     auto &cache = weights.layers[L].expertCache;
     if (cache.pending) {
+      const auto waitStart = AwakeClock::now();
       dispatch_group_wait(cache.inflight, DISPATCH_TIME_FOREVER);
+      totalStageMs += std::chrono::duration<double, std::milli>(
+                          AwakeClock::now() - waitStart).count();
       cache.pending = false;
     }
-    const auto ts0 = std::chrono::steady_clock::now();
+    const auto ts0 = AwakeClock::now();
     const uint32_t routesPerRow = moePlan.shape().routesPerToken();
     const uint32_t perToken = weights.layout.expertsPerToken;
     const uint32_t experts = weights.layout.experts;
@@ -1407,10 +1617,10 @@ void Qwen4ExpTarget::addPrefill(
           metal::BufferStorage::Private, "qwen4exp-prefill-gate");
     }
     totalStageMs += std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - ts0).count();
+                        AwakeClock::now() - ts0).count();
     const auto &source = weights.layers[L].expertSource;
     auto loadWave = [&](size_t w) {
-      const auto readStart = std::chrono::steady_clock::now();
+      const auto readStart = AwakeClock::now();
       const Wave &wave = waves[w];
       struct Miss { uint32_t expert, slot; };
       std::vector<Miss> reads;
@@ -1422,7 +1632,7 @@ void Qwen4ExpTarget::addPrefill(
                         static_cast<char *>(into.cacheUp.contents()),
                         static_cast<char *>(into.cacheDown.contents()));
       totalStageMs += std::chrono::duration<double, std::milli>(
-                          std::chrono::steady_clock::now() - readStart).count();
+                          AwakeClock::now() - readStart).count();
     };
     for (const Load &load : waves[0].loads) cache.lruTime[load.slot] = cache.clock;
     auto addWave = [&](metal::CommandGraph &stage, size_t w) {
@@ -1463,7 +1673,7 @@ void Qwen4ExpTarget::addPrefill(
       for (const auto &d : stage.dispatches()) all.push_back(d);
     }
     const uint64_t base = backend.reservePipelineEvents(static_cast<uint32_t>(waves.size()));
-    const auto gpuStart = std::chrono::steady_clock::now();
+    const auto gpuStart = AwakeClock::now();
     metal::CommandTicket ticket = backend.submitPipelineAsync(all, starts, base);
     for (size_t w = 1; w < waves.size(); ++w) {
       if (waves[w].after >= 0 &&
@@ -1474,7 +1684,7 @@ void Qwen4ExpTarget::addPrefill(
     }
     (void)ticket.wait();
     totalGpuMs += std::chrono::duration<double, std::milli>(
-                      std::chrono::steady_clock::now() - gpuStart).count();
+                      AwakeClock::now() - gpuStart).count();
     ops::MoE::addCombine(g, moe, moePlan, /*addResidual=*/false);
     totalSlices += static_cast<uint32_t>(waves.size());
   };
@@ -1485,21 +1695,21 @@ void Qwen4ExpTarget::addPrefill(
     totalSlices += static_cast<uint32_t>(ends.size());
     uint32_t begin = 0;
     for (size_t i = 0; i + 1 < ends.size(); ++i) {
-      auto ts0 = std::chrono::steady_clock::now();
+      auto ts0 = AwakeClock::now();
       stageActiveExperts(L, begin, ends[i]);
-      auto ts1 = std::chrono::steady_clock::now();
+      auto ts1 = AwakeClock::now();
       totalStageMs += std::chrono::duration<double, std::milli>(ts1 - ts0).count();
       metal::CommandGraph slice;
       encodeMoESlice(slice, makeCacheWeights(L), begin, ends[i] - begin);
       (void)backend.submitCommandAsync(slice.dispatches()).wait();
       totalGpuMs += std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - ts1).count();
+                        AwakeClock::now() - ts1).count();
       begin = ends[i];
     }
-    auto ts0 = std::chrono::steady_clock::now();
+    auto ts0 = AwakeClock::now();
     stageActiveExperts(L, begin, rows);
     totalStageMs += std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - ts0).count();
+                        AwakeClock::now() - ts0).count();
     if (begin == 0)
       encodeMoEExecute(g, makeCacheWeights(L));
     else
@@ -1517,35 +1727,44 @@ void Qwen4ExpTarget::addPrefill(
     encodeMixerUpdate(stepGraph, L + 1, mixerOutNext);
     encodeMlpHC(stepGraph, L + 1);
     encodeMoERoute(stepGraph, L + 1);
+    if (lookahead && L + 2 < geometry.layers) {
+      encodePrefillPredictRoute(stepGraph, L + 2);
+    }
 
-    auto tg0 = std::chrono::steady_clock::now();
+    auto tg0 = AwakeClock::now();
     (void)backend.submitCommandAsync(stepGraph.dispatches()).wait();
-    auto tg1 = std::chrono::steady_clock::now();
+    auto tg1 = AwakeClock::now();
     totalGpuMs += std::chrono::duration<double, std::milli>(tg1 - tg0).count();
 
-    // Layer L + 1 router has completed on the GPU; advise kernel of its missed experts early
+    // Layer L + 1 router has completed on the GPU; prefetch missed experts early
     if (L + 1 < geometry.layers) {
-      const auto &nextSource = weights.layers[L + 1].expertSource;
-      const auto &nextCache = weights.layers[L + 1].expertCache;
-      const uint64_t nextStride = weights.layers[L + 1].ffn.expertGate.expertStrideBytes;
-      const auto *selPtr = static_cast<const uint32_t *>(buffers.selectedExperts.contents());
-      const uint32_t routesPerRow = moePlan.shape().routesPerToken();
-      const uint32_t perToken = weights.layout.expertsPerToken;
-      std::bitset<512> nextSeen;
-      struct AdviseMiss { uint32_t expert; };
-      std::vector<AdviseMiss> nextMisses;
-      for (uint32_t r = 0; r < rows; ++r) {
-        for (uint32_t k = 0; k < perToken; ++k) {
-          uint32_t exp = selPtr[r * routesPerRow + k];
-          if (exp < weights.layout.experts && !nextSeen.test(exp)) {
-            nextSeen.set(exp);
-            if (nextCache.expertToSlot[exp] < 0) {
-              nextMisses.push_back({exp});
+      if (!prefetchLayerMisses(L + 1)) {
+        const auto &nextSource = weights.layers[L + 1].expertSource;
+        const auto &nextCache = weights.layers[L + 1].expertCache;
+        const uint64_t nextStride = weights.layers[L + 1].ffn.expertGate.expertStrideBytes;
+        const auto *selPtr = static_cast<const uint32_t *>(buffers.selectedExperts.contents());
+        const uint32_t routesPerRow = moePlan.shape().routesPerToken();
+        const uint32_t perToken = weights.layout.expertsPerToken;
+        std::bitset<512> nextSeen;
+        struct AdviseMiss { uint32_t expert; };
+        std::vector<AdviseMiss> nextMisses;
+        for (uint32_t r = 0; r < rows; ++r) {
+          for (uint32_t k = 0; k < perToken; ++k) {
+            uint32_t exp = selPtr[r * routesPerRow + k];
+            if (exp < weights.layout.experts && !nextSeen.test(exp)) {
+              nextSeen.set(exp);
+              if (nextCache.expertToSlot[exp] < 0) {
+                nextMisses.push_back({exp});
+              }
             }
           }
         }
+        adviseMissedExperts(nextSource, nextMisses.data(), nextMisses.size(), nextStride);
       }
-      adviseMissedExperts(nextSource, nextMisses.data(), nextMisses.size(), nextStride);
+    }
+    // Launch lookahead prediction reads for layer L + 2 while layer L + 1 prepares to run
+    if (lookahead && L + 2 < geometry.layers) {
+      prefetchPrefillPredicted(L + 2);
     }
   }
 
@@ -1734,7 +1953,7 @@ void Qwen4ExpTarget::addVerify(
   // and a wider top-16 kept only for this count).
   std::vector<std::bitset<512>> predictedNarrow(geometry.layers + 1), predictedWide(geometry.layers + 1);
   static std::array<uint64_t, 5> predictionCounts{};  // used, in narrow, in wide, misses, misses in wide
-  const auto verifyEnter = std::chrono::steady_clock::now();
+  const auto verifyEnter = AwakeClock::now();
   double encodeMs = 0.0;  // CPU time building the pipelined stage graphs
   uint32_t hcRows = 0, hcStep = 1;
   HyperConnectionParams hcParams{};
@@ -2046,14 +2265,14 @@ void Qwen4ExpTarget::addVerify(
     for (uint32_t exp : uniqueExperts)
       countExpertUse(cache, exp);
     if (cache.slotReads) {
-      const auto waitStart = std::chrono::steady_clock::now();
+      const auto waitStart = AwakeClock::now();
       for (uint32_t exp : uniqueExperts) {
         const int16_t slot = cache.expertToSlot[exp];
         if (slot >= 0)
           while (cache.slotReads[slot].load(std::memory_order_acquire)) {}
       }
       hostParts[0] += std::chrono::duration<double, std::milli>(
-                          std::chrono::steady_clock::now() - waitStart).count();
+                          AwakeClock::now() - waitStart).count();
     }
     if (layerIndex < geometry.layers && predictedWide[layerIndex].any())
       for (uint32_t exp : uniqueExperts) {
@@ -2111,11 +2330,11 @@ void Qwen4ExpTarget::addVerify(
       // expert faults it in one 16 KB page at a time, each its own disk read.
       // Asking for every missed range first lets the reads go out together
       // and in large pieces; the copies below then find the pages in memory.
-      const auto readStart = std::chrono::steady_clock::now();
+      const auto readStart = AwakeClock::now();
       readMissedExperts(layer.expertSource, misses.data(), misses.size(),
                         stride, cg, cu, cd);
       hostParts[1] += std::chrono::duration<double, std::milli>(
-                          std::chrono::steady_clock::now() - readStart).count();
+                          AwakeClock::now() - readStart).count();
     }
 
     for (uint32_t r = 0; r < rows; ++r) {
@@ -2598,9 +2817,9 @@ void Qwen4ExpTarget::addVerify(
                          buffers.normalized, buffers.hyperReduced,
                          buffers.hyperMixed, buffers.hyperInjection, kRows, 1);
       encodeRouteScores(a, mtpIndex, buffers.groupedInput);
-      const auto clockA = std::chrono::steady_clock::now();
+      const auto clockA = AwakeClock::now();
       (void)backend.submitCommand(a.dispatches());
-      const auto clockStage = std::chrono::steady_clock::now();
+      const auto clockStage = AwakeClock::now();
 
       const uint32_t saved = buffers.liveRowsPerLane;
       buffers.liveRowsPerLane = live;
@@ -2609,7 +2828,7 @@ void Qwen4ExpTarget::addVerify(
         throw std::logic_error("MTP head needs more experts than its cache holds");
       hostGroup();
       buffers.liveRowsPerLane = saved;
-      const auto clockB = std::chrono::steady_clock::now();
+      const auto clockB = AwakeClock::now();
 
       metal::CommandGraph b;
       encodeMoEExecute(b, makeCacheWeights(mtpIndex), /*hostGrouped=*/true);
@@ -2637,7 +2856,7 @@ void Qwen4ExpTarget::addVerify(
              weights.mtpPickIds, weights.mtpPickValues, weights.mtpPickMass},
             scored, {kSlices, 1, 1}, {256, 1, 1});
       (void)backend.submitCommand(b.dispatches());
-      const auto clockPick = std::chrono::steady_clock::now();
+      const auto clockPick = AwakeClock::now();
       auto ms = [](auto from, auto to) {
         return std::chrono::duration<double, std::milli>(to - from).count();
       };
@@ -2645,11 +2864,11 @@ void Qwen4ExpTarget::addVerify(
       mtpParts[1] += ms(clockStage, clockB);
       mtpParts[2] += ms(clockB, clockPick);
       struct PickTimer {
-        std::chrono::steady_clock::time_point start;
+        AwakeClock::time_point start;
         double &sink;
         ~PickTimer() {
           sink += std::chrono::duration<double, std::milli>(
-                      std::chrono::steady_clock::now() - start).count();
+                      AwakeClock::now() - start).count();
         }
       } pickTimer{clockPick, mtpParts[3]};
 
@@ -2782,6 +3001,13 @@ void Qwen4ExpTarget::addVerify(
       const char *value = std::getenv("SPLASH_MTP_CHAIN_MIN");
       return value ? static_cast<float>(std::atof(value)) : 0.35f;
     }();
+    // Early-exit factor: token k only pays off if chainConfidence * P(k) >= chainConfident.
+    // If chainConfidence * earlyExitFactor < chainConfident, drafting token k is almost
+    // guaranteed to fail the chain check, so stop before dispatching MTP to the GPU.
+    static const float earlyExitFactor = [] {
+      const char *value = std::getenv("SPLASH_MTP_EARLY_EXIT_P");
+      return value ? static_cast<float>(std::atof(value)) : 0.85f;
+    }();
     static const bool treeDrafting = [] {
       const char *value = std::getenv("SPLASH_TREE_DRAFT");
       return value != nullptr && std::atoi(value) != 0;
@@ -2897,6 +3123,8 @@ void Qwen4ExpTarget::addVerify(
     // positions with the accepted tokens' real rows.
     static const bool rerun = std::getenv("SPLASH_MTP_RERUN") != nullptr;
     for (uint32_t k = 1; k < maxDrafts; ++k) {
+      if (chainConfidence * earlyExitFactor < chainConfident)
+        break;
       // One new row writes an 8-row window from its own position; when that
       // runs past the pages the request holds (a decode step reserves its
       // verify window only), re-run from the anchor, which stays inside it.
@@ -2917,7 +3145,7 @@ void Qwen4ExpTarget::addVerify(
       draftProbabilities[k] = lastProbabilities;
       chainConfidence *= lastConfidence;
       if (lastConfidence < confident || chainConfidence < chainConfident)
-        return drafts;
+        break;
       drafted = k + 1;
       std::memcpy(chain.data() + uint64_t{k} * width,
                   y + uint64_t{rerunThis ? k - 1 : 0} * width, width * 2);
@@ -2989,10 +3217,10 @@ void Qwen4ExpTarget::addVerify(
     }
 
     if (drafted == 0) {
-      const auto mtpStart = std::chrono::steady_clock::now();
+      const auto mtpStart = AwakeClock::now();
       drafts = runMtpDraft();
       mtpMs = std::chrono::duration<double, std::milli>(
-                  std::chrono::steady_clock::now() - mtpStart).count();
+                  AwakeClock::now() - mtpStart).count();
     }
     if (!buffers.mtpShadow) {
       adaptiveController.lastProposed = drafted;
@@ -3069,13 +3297,13 @@ void Qwen4ExpTarget::addVerify(
   encodeMoERoute(residentGraph, R);
 
   // Submit residentGraph and prefetch streaming experts in background
-  auto t0 = std::chrono::steady_clock::now();
+  auto t0 = AwakeClock::now();
   metal::CommandTicket residentTicket = backend.submitCommandAsync(residentGraph.dispatches());
   // No blanket read-ahead of the previous step's experts: after a long
   // prompt that is nearly every expert, ~68 GB the OS then reads in the
   // background for minutes, stalling decode. Misses are fetched on demand.
   (void)residentTicket.wait();
-  auto t1 = std::chrono::steady_clock::now();
+  auto t1 = AwakeClock::now();
   double residentMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
   double totalStageMs = 0.0;
@@ -3126,7 +3354,7 @@ void Qwen4ExpTarget::addVerify(
         buffers.selectedExperts, buffers.routingWeights, buffers.tileDescriptors,
         buffers.tileCount, buffers.groupedRoutes, buffers.routeRows,
         buffers.groupedInput, buffers.expertIntermediate, buffers.expertOutput};
-    const auto encodeStart = std::chrono::steady_clock::now();
+    const auto encodeStart = AwakeClock::now();
     for (uint32_t L = R; L < geometry.layers - 1; ++L) {
       deferredPerStage.emplace_back();
       pipelineDeferred = &deferredPerStage.back();
@@ -3160,17 +3388,17 @@ void Qwen4ExpTarget::addVerify(
     }
     // The first stage's host work (layer R's experts) happens before commit:
     // its router result is already in memory. Shift so stage 0 needs none.
-    auto ts0 = std::chrono::steady_clock::now();
+    auto ts0 = AwakeClock::now();
     encodeMs = std::chrono::duration<double, std::milli>(ts0 - encodeStart).count();
     if (!stageActiveExperts(R))
       throw std::logic_error("pipelined decode found more experts than the cache holds");
     hostGroup();
     for (auto &work : deferredPerStage[0]) work();
     totalStageMs += std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - ts0).count();
+                        AwakeClock::now() - ts0).count();
     const uint32_t stages = static_cast<uint32_t>(starts.size());
     const uint64_t base = backend.reservePipelineEvents(stages);
-    auto tg0 = std::chrono::steady_clock::now();
+    auto tg0 = AwakeClock::now();
     metal::CommandTicket ticket = backend.submitPipelineAsync(
         all, starts, base, waves ? std::span<const bool>(quiet.data(), quietCount) : std::span<const bool>{});
     static uint32_t tracedSteps = 0;
@@ -3182,13 +3410,13 @@ void Qwen4ExpTarget::addVerify(
       const uint32_t mainStage = waves ? 2 * k : k;
       const uint32_t cachedStage = mainStage - 1;
       const uint32_t previous = waves ? (k == 1 ? 0 : 2 * (k - 1)) : k - 1;
-      const auto waitStart = std::chrono::steady_clock::now();
+      const auto waitStart = AwakeClock::now();
       if (!backend.waitPipelineEvent(base + 2 * previous + 1, 60000))
         throw std::runtime_error("pipelined decode stage timed out");
       if (trace)
         waits.push_back(std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() - waitStart).count());
-      auto ts = std::chrono::steady_clock::now();
+                            AwakeClock::now() - waitStart).count());
+      auto ts = AwakeClock::now();
       const uint32_t layer = R + k;
       const auto hostStart = ts;
       hostSelect(layer);
@@ -3202,14 +3430,14 @@ void Qwen4ExpTarget::addVerify(
         if (!pendingMisses.empty()) {
           const auto &src = layerRef(pendingLayer);
           auto &cache = src.expertCache;
-          const auto readStart = std::chrono::steady_clock::now();
+          const auto readStart = AwakeClock::now();
           readMissedExperts(src.expertSource, pendingMisses.data(), pendingMisses.size(),
                             src.ffn.expertGate.expertStrideBytes,
                             static_cast<char *>(cache.cacheGate.contents()),
                             static_cast<char *>(cache.cacheUp.contents()),
                             static_cast<char *>(cache.cacheDown.contents()));
           hostParts[1] += std::chrono::duration<double, std::milli>(
-                              std::chrono::steady_clock::now() - readStart).count();
+                              AwakeClock::now() - readStart).count();
         }
       }
       // Stage k-1 also predicted layer + 1; start those reads now so they
@@ -3217,14 +3445,14 @@ void Qwen4ExpTarget::addVerify(
       if (lookahead)
         prefetchPredicted(layer + 1);
       totalStageMs += std::chrono::duration<double, std::milli>(
-                          std::chrono::steady_clock::now() - ts).count();
+                          AwakeClock::now() - ts).count();
       hostParts[2] += std::chrono::duration<double, std::milli>(
-                          std::chrono::steady_clock::now() - hostStart).count();
+                          AwakeClock::now() - hostStart).count();
       backend.signalPipelineEvent(base + 2 * mainStage);
     }
     metal::CommandTiming timing = ticket.wait();
     totalGpuMs += std::chrono::duration<double, std::milli>(
-                      std::chrono::steady_clock::now() - tg0).count();
+                      AwakeClock::now() - tg0).count();
     totalPureGpuMs += timing.gpuSeconds * 1000.0;
     if (trace) {
       std::cerr << "[stage waits ms]";
@@ -3234,9 +3462,9 @@ void Qwen4ExpTarget::addVerify(
   } else {
     // Loop through streaming layers R .. geometry.layers - 2
     for (uint32_t L = R; L < geometry.layers - 1; ++L) {
-      auto ts0 = std::chrono::steady_clock::now();
+      auto ts0 = AwakeClock::now();
       bool staged = stageActiveExperts(L);
-      auto ts1 = std::chrono::steady_clock::now();
+      auto ts1 = AwakeClock::now();
       totalStageMs += std::chrono::duration<double, std::milli>(ts1 - ts0).count();
 
       ops::MoeWeights cacheW = staged ? makeCacheWeights(L) : weights.layers[L].ffn;
@@ -3252,23 +3480,23 @@ void Qwen4ExpTarget::addVerify(
       encodeMlpHC(stepGraph, L + 1);
       encodeMoERoute(stepGraph, L + 1);
 
-      auto tg0 = std::chrono::steady_clock::now();
+      auto tg0 = AwakeClock::now();
       metal::CommandTiming timing = backend.submitCommandAsync(stepGraph.dispatches()).wait();
-      auto tg1 = std::chrono::steady_clock::now();
+      auto tg1 = AwakeClock::now();
       totalGpuMs += std::chrono::duration<double, std::milli>(tg1 - tg0).count();
       totalPureGpuMs += timing.gpuSeconds * 1000.0;
     }
   }
 
   const uint32_t lastL = geometry.layers - 1;
-  auto ts0 = std::chrono::steady_clock::now();
+  auto ts0 = AwakeClock::now();
   // The pipeline's last stage stopped at the last layer's router scores.
   if (pipelined)
     hostSelect(lastL);
   bool stagedLast = stageActiveExperts(lastL);
   if (pipelined)
     hostGroup();
-  auto ts1 = std::chrono::steady_clock::now();
+  auto ts1 = AwakeClock::now();
   totalStageMs += std::chrono::duration<double, std::milli>(ts1 - ts0).count();
 
   ops::MoeWeights cacheWLast = stagedLast ? makeCacheWeights(lastL) : weights.layers[lastL].ffn;
@@ -3311,7 +3539,7 @@ void Qwen4ExpTarget::addVerify(
     list(draftTrace.confidence.data(), draftTrace.depths);
     line << ",\"misses\":" << totalMisses << ",\"ms\":{\"verify\":"
          << std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - verifyEnter).count()
+                AwakeClock::now() - verifyEnter).count()
          << ",\"mtp\":" << mtpMs << ",\"mtp_gpu_a\":" << mtpParts[0]
          << ",\"mtp_stage\":" << mtpParts[1] << ",\"mtp_gpu_b\":" << mtpParts[2]
          << ",\"staging\":" << totalStageMs << ",\"gpu_wall\":" << totalGpuMs
@@ -3334,7 +3562,7 @@ void Qwen4ExpTarget::addVerify(
               << predictionCounts[2] << " misses " << predictionCounts[3]
               << " of which in top-16 " << predictionCounts[4] << " | encode " << encodeMs
               << " | inside verify " << std::chrono::duration<double, std::milli>(
-                     std::chrono::steady_clock::now() - verifyEnter).count() << "\n";
+                     AwakeClock::now() - verifyEnter).count() << "\n";
   }
 }
 

@@ -29,8 +29,13 @@ ModelPackage loadPackage(metal::MetalBackend &backend,
   result.target = std::visit(
       [&](const auto &layout) -> TargetWeights {
         using L = std::remove_cvref_t<decltype(layout)>;
-        static_assert(std::is_same_v<L, Qwen4ExpLayout>);
-        return loadQwen4ExpWeights(backend, root / "target", layout);
+        if constexpr (std::is_same_v<L, Qwen4ExpLayout>) {
+          return loadQwen4ExpWeights(backend, root / "target", layout);
+        } else if constexpr (std::is_same_v<L, Qwen3_8Layout>) {
+          return loadQwen3_8Weights(backend, root / "target", layout);
+        } else if constexpr (std::is_same_v<L, Qwen3_8Q8Layout>) {
+          return loadQwen3_8Q8Weights(backend, root / "target", layout);
+        }
       },
       result.descriptor.target);
 

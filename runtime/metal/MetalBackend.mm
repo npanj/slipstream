@@ -1,4 +1,5 @@
 #import "MetalBackend.hpp"
+#include "AwakeClock.hpp"
 #include "CommandWatchdog.hpp"
 #include "DeviceQueries.hpp"
 #include "MetalEvent.hpp"
@@ -12,6 +13,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -118,9 +120,9 @@ MTLSparsePageSize metalSparsePageSize(uint64_t bytes) {
     return kPlacementSparsePageSize;
 }
 
-double steadySeconds() noexcept {
+double awakeSeconds() noexcept {
     return std::chrono::duration<double>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+        AwakeClock::now().time_since_epoch()).count();
 }
 
 template <typename T>
@@ -264,7 +266,7 @@ struct BackendAsyncState {
     bool commitSubmission(uint64_t sequence, id<MTLCommandBuffer> command) {
         std::lock_guard lock(gateMutex);
         if (stopping.stop_requested()) return false;
-        commandWatchdog.start(sequence, steadySeconds());
+        commandWatchdog.start(sequence, awakeSeconds());
         [command commit];
         return true;
     }
@@ -283,7 +285,7 @@ struct BackendAsyncState {
     void checkCommandHealth() {
         {
             std::lock_guard lock(gateMutex);
-            if (commandWatchdog.expired(steadySeconds())) {
+            if (commandWatchdog.expired(awakeSeconds())) {
                 markUnhealthy("Metal command exceeded " +
                     std::to_string(commandWatchdog.timeoutSeconds()) +
                     " seconds without completing");
@@ -403,7 +405,7 @@ struct MetalBackend::Impl {
     struct PendingSparseUnmap {
         uint64_t eventValue = 0;
         SparseHeap heap;
-        std::chrono::steady_clock::time_point issued;
+        AwakeClock::time_point issued;
     };
     std::optional<PendingSparseUnmap> pendingUnmap;
     std::atomic<uint64_t> pendingUnmapCount{0};
@@ -433,7 +435,7 @@ struct MetalBackend::Impl {
         if (!pendingUnmap) return false;
         if (sparseEvent.signaledValue < pendingUnmap->eventValue) return false;
         const double seconds = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - pendingUnmap->issued).count();
+            AwakeClock::now() - pendingUnmap->issued).count();
         lastUnmapSeconds.store(seconds, std::memory_order_relaxed);
         raisePeak(maxUnmapSeconds, seconds);
         completedUnmaps.fetch_add(1, std::memory_order_relaxed);
@@ -1094,7 +1096,7 @@ void MetalBackend::unmapSparse(
     }
     const uint64_t eventValue = ++impl_->nextSparseEventValue;
     [impl_->sparseQueue signalEvent:impl_->sparseEvent value:eventValue];
-    const auto issued = std::chrono::steady_clock::now();
+    const auto issued = AwakeClock::now();
     impl_->pendingUnmap.emplace();
     impl_->pendingUnmap->eventValue = eventValue;
     impl_->pendingUnmap->heap = std::move(heap);
@@ -1121,8 +1123,7 @@ bool MetalBackend::sparseUnmapPending() noexcept {
     // replaces the engine.
     const double issued =
         impl_->pendingUnmapIssuedSeconds.load(std::memory_order_relaxed);
-    const double now = std::chrono::duration<double>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const double now = awakeSeconds();
     if (issued > 0.0 &&
         (now - issued) * 1000.0 > double(kSparseUnmapTimeoutMilliseconds)) {
         try {
@@ -1177,7 +1178,8 @@ MetalBuffer MetalBackend::wrapSharedMemory(
             (void)lifetime;
         }];
     if (!buffer) {
-        throw MetalBackendError("zero-copy Metal buffer creation failed");
+        // The checks passed, so the driver refused the mapping.
+        throw MetalAllocationError("zero-copy Metal buffer creation failed");
     }
     if (!label.empty()) buffer.label = checkedNSString(label, "buffer label");
     return impl_->registerBuffer(buffer, BufferStorage::Shared,
@@ -1216,6 +1218,11 @@ CommandTiming MetalBackend::submit(const ComputeDispatch &dispatch) {
 CommandTiming MetalBackend::submitCommand(
     std::span<const ComputeDispatch> dispatches) {
     return submitCommandAsync(dispatches).wait();
+}
+
+void MetalBackend::preparePipeline(std::string_view name) {
+    impl_->ensureHealthy();
+    static_cast<void>(impl_->pipeline(name));
 }
 
 CommandTicket MetalBackend::submitAsync(
@@ -1272,8 +1279,8 @@ bool MetalBackend::waitPipelineEvent(uint64_t value, uint64_t timeoutMs) {
     // Poll first: a pipeline hands off once per layer, and a blocking wait's
     // wake-up latency, paid 47 times a token, cost ~9 ms. Spinning costs one
     // core for the few hundred microseconds a stage takes.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
-    while (std::chrono::steady_clock::now() < deadline) {
+    const auto deadline = AwakeClock::now() + std::chrono::milliseconds(20);
+    while (AwakeClock::now() < deadline) {
         if (impl_->pipelineEvent.signaledValue >= value) return true;
     }
     return [impl_->pipelineEvent waitUntilSignaledValue:value timeoutMS:timeoutMs];
@@ -1282,8 +1289,8 @@ bool MetalBackend::waitPipelineEvent(uint64_t value, uint64_t timeoutMs) {
 bool MetalBackend::waitPipelineStageDone(uint64_t base, uint32_t stage,
                                          uint64_t timeoutMs) {
     const uint64_t value = base + 2ull * stage + 1;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
-    while (std::chrono::steady_clock::now() < deadline) {
+    const auto deadline = AwakeClock::now() + std::chrono::milliseconds(20);
+    while (AwakeClock::now() < deadline) {
         if (impl_->pipelineDoneEvent.signaledValue >= value) return true;
     }
     return [impl_->pipelineDoneEvent waitUntilSignaledValue:value timeoutMS:timeoutMs];
@@ -1352,6 +1359,7 @@ CommandTicket MetalBackend::submitCommandAsync(
         MTLSize groups{};
         MTLSize threads{};
         uint64_t threadCount = 0;
+        uint32_t bufferIndices = 0;
         __strong id<MTLComputePipelineState> pipeline = nil;
     };
     std::vector<PreparedDispatch> prepared;
@@ -1393,6 +1401,9 @@ CommandTicket MetalBackend::submitCommandAsync(
                 }
                 seenIndices |= (1ULL << binding.index);
             }
+            if (binding.index < 31) {
+                item.bufferIndices |= (1U << binding.index);
+            }
         }
         for (const BytesBinding &binding : dispatch.bytes) {
             if (!binding.data || !binding.sizeBytes) {
@@ -1424,17 +1435,22 @@ CommandTicket MetalBackend::submitCommandAsync(
     auto ticketState = std::make_shared<CommandTicket::State>();
     ticketState->backend = impl_->asyncState;
     ticketState->completion = std::move(completion);
-    std::vector<const MetalAllocation *> retained;
-    retained.reserve(32);
+    std::vector<const std::shared_ptr<MetalAllocation> *> bound;
+    bound.reserve(dispatches.size() * 4);
     for (const ComputeDispatch &dispatch : dispatches) {
         for (const BufferBinding &binding : dispatch.buffers) {
-            const auto &allocation = binding.buffer.impl_->allocation;
-            const MetalAllocation *alloc = allocation.get();
-            if (std::find(retained.begin(), retained.end(), alloc) == retained.end()) {
-                retained.push_back(alloc);
-                ticketState->retainedAllocations.push_back(allocation);
-            }
+            bound.push_back(&binding.buffer.impl_->allocation);
         }
+    }
+    const auto allocation = [](const std::shared_ptr<MetalAllocation> *owner) {
+        return owner->get();
+    };
+    std::ranges::sort(bound, {}, allocation);
+    const auto repeated = std::ranges::unique(bound, {}, allocation);
+    bound.erase(repeated.begin(), repeated.end());
+    ticketState->retainedAllocations.reserve(bound.size());
+    for (const std::shared_ptr<MetalAllocation> *owner : bound) {
+        ticketState->retainedAllocations.push_back(*owner);
     }
     ticketState->sequence = impl_->asyncState->beginSubmission();
 
@@ -1505,7 +1521,7 @@ CommandTicket MetalBackend::submitCommandAsync(
         }
     }
 
-    auto wallStart = std::chrono::steady_clock::now();
+    auto wallStart = AwakeClock::now();
     const uint64_t sparseEventValue = impl_->pendingSparseEventValue;
 
     std::vector<id<MTLCommandBuffer>> commands;
@@ -1544,30 +1560,45 @@ CommandTicket MetalBackend::submitCommandAsync(
                     }
                     return parts;
                 }();
-                for (const PreparedDispatch &item : chunks[c]) {
-                    const ComputeDispatch &dispatch = *item.source;
-                    if (!skipped.empty() &&
-                        std::any_of(skipped.begin(), skipped.end(), [&](const std::string &part) {
-                            return dispatch.pipelineName.find(part) != std::string::npos;
-                        }))
-                        continue;
-                    [encoder setComputePipelineState:item.pipeline];
-                    for (const BufferBinding &binding : dispatch.buffers) {
-                        const MetalBuffer::Impl &buffer = *binding.buffer.impl_;
+            constexpr uint32_t kMaxBufferEntries = 31;
+            __unsafe_unretained id<MTLBuffer> mtlBuffers[kMaxBufferEntries];
+            NSUInteger mtlOffsets[kMaxBufferEntries];
+            for (const PreparedDispatch &item : chunks[c]) {
+                const ComputeDispatch &dispatch = *item.source;
+                if (!skipped.empty() &&
+                    std::any_of(skipped.begin(), skipped.end(), [&](const std::string &part) {
+                        return dispatch.pipelineName.find(part) != std::string::npos;
+                    }))
+                    continue;
+                [encoder setComputePipelineState:item.pipeline];
+                for (const BufferBinding &binding : dispatch.buffers) {
+                    const MetalBuffer::Impl &buffer = *binding.buffer.impl_;
+                    if (binding.index < kMaxBufferEntries) {
+                        mtlBuffers[binding.index] = buffer.allocation->buffer;
+                        mtlOffsets[binding.index] = static_cast<NSUInteger>(buffer.offsetBytes);
+                    } else {
                         [encoder setBuffer:buffer.allocation->buffer
-                                    offset:checkedNSUInteger(buffer.offsetBytes,
-                                                             "buffer offset")
+                                    offset:static_cast<NSUInteger>(buffer.offsetBytes)
                                    atIndex:binding.index];
                     }
-                    for (const BytesBinding &binding : dispatch.bytes) {
-                        [encoder setBytes:binding.data
-                                   length:checkedNSUInteger(binding.sizeBytes,
-                                                            "byte binding size")
-                                  atIndex:binding.index];
-                    }
-                    [encoder dispatchThreadgroups:item.groups
-                             threadsPerThreadgroup:item.threads];
                 }
+                for (uint32_t unbound = item.bufferIndices; unbound;) {
+                    const uint32_t first = std::countr_zero(unbound);
+                    const uint32_t count = std::countr_one(unbound >> first);
+                    [encoder setBuffers:mtlBuffers + first
+                                offsets:mtlOffsets + first
+                              withRange:NSMakeRange(first, count)];
+                    unbound &= ~(((uint32_t{1} << count) - 1U) << first);
+                }
+                for (const BytesBinding &binding : dispatch.bytes) {
+                    [encoder setBytes:binding.data
+                               length:checkedNSUInteger(binding.sizeBytes,
+                                                        "byte binding size")
+                              atIndex:binding.index];
+                }
+                [encoder dispatchThreadgroups:item.groups
+                         threadsPerThreadgroup:item.threads];
+            }
                 [encoder endEncoding];
             } catch (...) {
                 impl_->asyncState->releaseSubmission(ticketState->sequence);
@@ -1598,12 +1629,9 @@ CommandTicket MetalBackend::submitCommandAsync(
     std::shared_ptr<BackendAsyncState> observer = impl_->asyncState;
     for (size_t c = 0; c < commands.size(); ++c) {
         id<MTLCommandBuffer> command = commands[c];
-        [command addScheduledHandler:^(id<MTLCommandBuffer>) {
-          observer->sampleDeviceMemory();
-        }];
         [command addCompletedHandler:^(id<MTLCommandBuffer> completedCommand) {
           observer->sampleDeviceMemory();
-          auto wallEnd = std::chrono::steady_clock::now();
+          auto wallEnd = AwakeClock::now();
           CommandTiming timing;
           timing.gpuSeconds =
               completedCommand.GPUEndTime - completedCommand.GPUStartTime;
@@ -1647,11 +1675,10 @@ CommandTicket MetalBackend::submitCommandAsync(
           }
         }];
     }
-    impl_->sampleDeviceMemory();
     id<MTLSharedEvent> event = impl_->sparseEvent;
     const bool pendingMap =
         sparseEventValue && event.signaledValue < sparseEventValue;
-    const double mapWaitStart = steadySeconds();
+    const double mapWaitStart = awakeSeconds();
     if (pendingMap) {
         observer->mapWaitStarted.store(mapWaitStart, std::memory_order_relaxed);
         observer->mapWaitEvent.store(sparseEventValue, std::memory_order_release);
@@ -1660,7 +1687,7 @@ CommandTicket MetalBackend::submitCommandAsync(
         [commands, event, observer, ticketState, sparseEventValue,
          pendingMap, mapWaitStart, wallStart](bool signaled) {
             if (pendingMap) {
-                const double waited = steadySeconds() - mapWaitStart;
+                const double waited = awakeSeconds() - mapWaitStart;
                 observer->lastMapWaitSeconds.store(waited, std::memory_order_relaxed);
                 raisePeak(observer->maxMapWaitSeconds, waited);
                 observer->mapWaitEvent.store(0, std::memory_order_release);
@@ -1679,7 +1706,7 @@ CommandTicket MetalBackend::submitCommandAsync(
                             << kSparseMapTimeoutMilliseconds << " ms";
                 CommandTiming timing;
                 timing.wallSeconds = std::chrono::duration<double>(
-                    std::chrono::steady_clock::now() - wallStart).count();
+                    AwakeClock::now() - wallStart).count();
                 ticketState->finish(timing, message.str());
                 return;
             }
@@ -1724,13 +1751,13 @@ MetalMemoryStats MetalBackend::memoryStats() const noexcept {
         impl_->lastUnmapSeconds.load(std::memory_order_relaxed),
         impl_->maxUnmapSeconds.load(std::memory_order_relaxed),
         pendingUnmaps
-            ? std::max(0.0, steadySeconds() -
+            ? std::max(0.0, awakeSeconds() -
                                 impl_->pendingUnmapIssuedSeconds.load(
                                     std::memory_order_relaxed))
             : 0.0,
         impl_->asyncState->mapWaitEvent.load(std::memory_order_acquire),
         impl_->asyncState->mapWaitEvent.load(std::memory_order_acquire)
-            ? std::max(0.0, steadySeconds() -
+            ? std::max(0.0, awakeSeconds() -
                 impl_->asyncState->mapWaitStarted.load(std::memory_order_relaxed))
             : 0.0,
         impl_->asyncState->lastMapWaitSeconds.load(std::memory_order_relaxed),

@@ -214,7 +214,9 @@ class ServerAccessTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"SPLASH_API_KEY": "test-server-key"}):
                 self.assertIn("data", launcher._request_json("/v1/models"))
             with mock.patch.dict(os.environ, {"SPLASH_API_KEY": "incorrect"}):
-                with self.assertRaisesRegex(launcher.LauncherError, "SPLASH_API_KEY"):
+                with self.assertRaisesRegex(
+                    launcher.LauncherError, "SLIPSTREAM(_V2)?_API_KEY"
+                ):
                     launcher._request_json("/v1/models")
 
     def test_unauthenticated_request_has_bearer_challenge(self):

@@ -24,7 +24,6 @@ import argparse
 import http.client
 import json
 import re
-import sys
 import time
 from pathlib import Path
 
@@ -107,8 +106,8 @@ def _generate_log_prompt() -> str:
             )
         else:
             lines.append(
-                f"[{timestamp}] [INFO] [service=node-health] Heartbeat OK. Mem: {40 + (i%15)}% CPU: {12 + (i%20)}% "
-                f"Disk: 54% Requests: {1000 + i*17}/sec."
+                f"[{timestamp}] [INFO] [service=node-health] Heartbeat OK. Mem: {40 + (i % 15)}% CPU: {12 + (i % 20)}% "
+                f"Disk: 54% Requests: {1000 + i * 17}/sec."
             )
     lines.append(
         "\nIdentify the single critical failure in these logs.\n"
@@ -166,8 +165,10 @@ WORKLOADS = [
         "reasoning_effort": "none",
         "max_tokens": 128,
         "validator": lambda resp: (
-            len(resp.get("choices", [{}])[0].get("message", {}).get("tool_calls", [])) > 0
-            and resp["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "git_commit"
+            len(resp.get("choices", [{}])[0].get("message", {}).get("tool_calls", []))
+            > 0
+            and resp["choices"][0]["message"]["tool_calls"][0]["function"]["name"]
+            == "git_commit"
         ),
     },
     {
@@ -203,8 +204,12 @@ WORKLOADS = [
         "reasoning_effort": "none",
         "max_tokens": 160,
         "validator": lambda resp: (
-            len(resp.get("choices", [{}])[0].get("message", {}).get("tool_calls", [])) > 0
-            and "query" in json.loads(resp["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
+            len(resp.get("choices", [{}])[0].get("message", {}).get("tool_calls", []))
+            > 0
+            and "query"
+            in json.loads(
+                resp["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            )
         ),
     },
     {
@@ -224,7 +229,9 @@ WORKLOADS = [
         ],
         "reasoning_effort": "medium",
         "max_tokens": 512,
-        "validator": lambda resp: "3060" in resp.get("choices", [{}])[0].get("message", {}).get("content", ""),
+        "validator": lambda resp: (
+            "3060" in resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+        ),
     },
     {
         "id": "code_generation",
@@ -242,8 +249,10 @@ WORKLOADS = [
         "reasoning_effort": "none",
         "max_tokens": 384,
         "validator": lambda resp: (
-            "def merge_intervals" in resp.get("choices", [{}])[0].get("message", {}).get("content", "")
-            and "assert" in resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+            "def merge_intervals"
+            in resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+            and "assert"
+            in resp.get("choices", [{}])[0].get("message", {}).get("content", "")
         ),
     },
     {
@@ -272,9 +281,12 @@ WORKLOADS = [
         "reasoning_effort": "none",
         "max_tokens": 160,
         "validator": lambda resp: (
-            "auth-service" in resp.get("choices", [{}])[0].get("message", {}).get("content", "")
-            and "ingress-gateway" in resp.get("choices", [{}])[0].get("message", {}).get("content", "")
-            and "metrics-agent" in resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+            "auth-service"
+            in resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+            and "ingress-gateway"
+            in resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+            and "metrics-agent"
+            in resp.get("choices", [{}])[0].get("message", {}).get("content", "")
         ),
     },
     {
@@ -319,8 +331,16 @@ WORKLOADS = [
         "reasoning_effort": "none",
         "max_tokens": 300,
         "validator": lambda resp: (
-            "dirty" in resp.get("choices", [{}])[0].get("message", {}).get("content", "").lower()
-            and "write-through" in resp.get("choices", [{}])[0].get("message", {}).get("content", "").lower()
+            "dirty"
+            in resp.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+            .lower()
+            and "write-through"
+            in resp.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+            .lower()
         ),
     },
     {
@@ -336,20 +356,28 @@ WORKLOADS = [
         "reasoning_effort": "none",
         "max_tokens": 160,
         "validator": lambda resp: (
-            "database_connection_pool_exhausted" in resp.get("choices", [{}])[0].get("message", {}).get("content", "")
-            or "pool" in resp.get("choices", [{}])[0].get("message", {}).get("content", "").lower()
+            "database_connection_pool_exhausted"
+            in resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+            or "pool"
+            in resp.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+            .lower()
         ),
     },
 ]
 
 
-
 def run_workloads(port: int = 8090, model: str = "local/swift-qwen38-flash-next-v3"):
-    print(f"\n==========================================================================")
-    print(f"  SLIPSTREAM DIVERSE WORKLOAD BENCHMARK SUITE")
+    print(
+        "\n=========================================================================="
+    )
+    print("  SLIPSTREAM DIVERSE WORKLOAD BENCHMARK SUITE")
     print(f"  Target: http://127.0.0.1:{port} ({model})")
     print(f"  Total Workloads: {len(WORKLOADS)}")
-    print(f"==========================================================================\n")
+    print(
+        "==========================================================================\n"
+    )
 
     initial_status = get_status(port)
     initial_metrics = initial_status.get("metrics", {})
@@ -359,7 +387,11 @@ def run_workloads(port: int = 8090, model: str = "local/swift-qwen38-flash-next-
     results = []
 
     for idx, wl in enumerate(WORKLOADS, 1):
-        print(f"[{idx:02d}/{len(WORKLOADS):02d}] {wl['category']} — {wl['name']}... ", end="", flush=True)
+        print(
+            f"[{idx:02d}/{len(WORKLOADS):02d}] {wl['category']} — {wl['name']}... ",
+            end="",
+            flush=True,
+        )
 
         st_before = get_status(port)
         m_before = st_before.get("metrics", {})
@@ -380,13 +412,15 @@ def run_workloads(port: int = 8090, model: str = "local/swift-qwen38-flash-next-
 
         if status_code != 200:
             print(f"FAILED (HTTP {status_code})")
-            results.append({
-                "id": wl["id"],
-                "category": wl["category"],
-                "name": wl["name"],
-                "ok": False,
-                "error": resp_data.get("error", {}).get("message", "unknown error"),
-            })
+            results.append(
+                {
+                    "id": wl["id"],
+                    "category": wl["category"],
+                    "name": wl["name"],
+                    "ok": False,
+                    "error": resp_data.get("error", {}).get("message", "unknown error"),
+                }
+            )
             continue
 
         usage = resp_data.get("usage", {})
@@ -394,9 +428,17 @@ def run_workloads(port: int = 8090, model: str = "local/swift-qwen38-flash-next-
         completion_tokens = usage.get("completion_tokens", 0)
 
         # Delta metrics
-        delta_drafted = m_after.get("drafted_tokens", 0) - m_before.get("drafted_tokens", 0)
-        delta_accepted = m_after.get("accepted_draft_tokens", 0) - m_before.get("accepted_draft_tokens", 0)
-        acceptance_pct = (delta_accepted / max(1, delta_drafted)) * 100.0 if delta_drafted > 0 else 0.0
+        delta_drafted = m_after.get("drafted_tokens", 0) - m_before.get(
+            "drafted_tokens", 0
+        )
+        delta_accepted = m_after.get("accepted_draft_tokens", 0) - m_before.get(
+            "accepted_draft_tokens", 0
+        )
+        acceptance_pct = (
+            (delta_accepted / max(1, delta_drafted)) * 100.0
+            if delta_drafted > 0
+            else 0.0
+        )
 
         # Timing
         resp_metrics = resp_data.get("metrics", {})
@@ -405,56 +447,86 @@ def run_workloads(port: int = 8090, model: str = "local/swift-qwen38-flash-next-
         if decode_ms <= 0:
             decode_ms = wall_time * 1000.0 - ttft_ms
 
-        decode_tok_s = (completion_tokens / (decode_ms / 1000.0)) if decode_ms > 0 else 0.0
+        decode_tok_s = (
+            (completion_tokens / (decode_ms / 1000.0)) if decode_ms > 0 else 0.0
+        )
 
         # Validator
         validator = wl.get("validator")
         valid = validator(resp_data) if validator else True
 
-        print(f"OK | {completion_tokens:3d} toks | {decode_tok_s:5.1f} tok/s | Draft Acc: {acceptance_pct:5.1f}% | TTFT: {ttft_ms:6.1f} ms | {'PASS' if valid else 'WARN-VALIDATION'}")
+        print(
+            f"OK | {completion_tokens:3d} toks | {decode_tok_s:5.1f} tok/s | Draft Acc: {acceptance_pct:5.1f}% | TTFT: {ttft_ms:6.1f} ms | {'PASS' if valid else 'WARN-VALIDATION'}"
+        )
 
-        results.append({
-            "id": wl["id"],
-            "category": wl["category"],
-            "name": wl["name"],
-            "ok": True,
-            "valid": valid,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "decode_tok_s": decode_tok_s,
-            "ttft_ms": ttft_ms,
-            "delta_drafted": delta_drafted,
-            "delta_accepted": delta_accepted,
-            "acceptance_pct": acceptance_pct,
-            "response": resp_data,
-        })
+        results.append(
+            {
+                "id": wl["id"],
+                "category": wl["category"],
+                "name": wl["name"],
+                "ok": True,
+                "valid": valid,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "decode_tok_s": decode_tok_s,
+                "ttft_ms": ttft_ms,
+                "delta_drafted": delta_drafted,
+                "delta_accepted": delta_accepted,
+                "acceptance_pct": acceptance_pct,
+                "response": resp_data,
+            }
+        )
 
     # Summary
     final_status = get_status(port)
     final_metrics = final_status.get("metrics", {})
     total_drafted = final_metrics.get("drafted_tokens", 0) - init_drafted
     total_accepted = final_metrics.get("accepted_draft_tokens", 0) - init_accepted
-    overall_acc = (total_accepted / max(1, total_drafted)) * 100.0 if total_drafted > 0 else 0.0
+    overall_acc = (
+        (total_accepted / max(1, total_drafted)) * 100.0 if total_drafted > 0 else 0.0
+    )
 
-    print(f"\n==========================================================================")
-    print(f"  BENCHMARK RESULTS SUMMARY ACROSS ALL WORKLOADS")
-    print(f"==========================================================================")
-    print(f"{'Category / Workload':<35} | {'Tok/s':<8} | {'Draft Acc':<10} | {'Tokens':<8} | {'TTFT':<9} | {'Status'}")
-    print(f"------------------------------------------------------------------------------------------------")
+    print(
+        "\n=========================================================================="
+    )
+    print("  BENCHMARK RESULTS SUMMARY ACROSS ALL WORKLOADS")
+    print("==========================================================================")
+    print(
+        f"{'Category / Workload':<35} | {'Tok/s':<8} | {'Draft Acc':<10} | {'Tokens':<8} | {'TTFT':<9} | {'Status'}"
+    )
+    print(
+        "------------------------------------------------------------------------------------------------"
+    )
     for r in results:
         if not r["ok"]:
-            print(f"{r['name']:<35} | {'FAIL':<8} | {'N/A':<10} | {'N/A':<8} | {'N/A':<9} | FAIL: {r.get('error','')}")
+            print(
+                f"{r['name']:<35} | {'FAIL':<8} | {'N/A':<10} | {'N/A':<8} | {'N/A':<9} | FAIL: {r.get('error', '')}"
+            )
         else:
             status_str = "PASS" if r["valid"] else "WARN"
-            print(f"{r['name']:<35} | {r['decode_tok_s']:<6.1f}   | {r['acceptance_pct']:<5.1f}%    | {r['completion_tokens']:<8} | {r['ttft_ms']:<6.1f} ms | {status_str}")
+            print(
+                f"{r['name']:<35} | {r['decode_tok_s']:<6.1f}   | {r['acceptance_pct']:<5.1f}%    | {r['completion_tokens']:<8} | {r['ttft_ms']:<6.1f} ms | {status_str}"
+            )
 
-    print(f"------------------------------------------------------------------------------------------------")
-    avg_speed = sum(r["decode_tok_s"] for r in results if r["ok"]) / max(1, len([r for r in results if r["ok"]]))
+    print(
+        "------------------------------------------------------------------------------------------------"
+    )
+    avg_speed = sum(r["decode_tok_s"] for r in results if r["ok"]) / max(
+        1, len([r for r in results if r["ok"]])
+    )
     total_output = sum(r["completion_tokens"] for r in results if r["ok"])
-    print(f"Aggregate Draft Acceptance : {overall_acc:.1f}% ({total_accepted}/{total_drafted} tokens)")
-    print(f"Average Decode Throughput  : {avg_speed:.1f} tok/s across {total_output} output tokens")
-    print(f"Current Host Available RAM : {final_status.get('memory_governor', {}).get('host_available_bytes', 0) / (1024**3):.2f} GiB")
-    print(f"==========================================================================\n")
+    print(
+        f"Aggregate Draft Acceptance : {overall_acc:.1f}% ({total_accepted}/{total_drafted} tokens)"
+    )
+    print(
+        f"Average Decode Throughput  : {avg_speed:.1f} tok/s across {total_output} output tokens"
+    )
+    print(
+        f"Current Host Available RAM : {final_status.get('memory_governor', {}).get('host_available_bytes', 0) / (1024**3):.2f} GiB"
+    )
+    print(
+        "==========================================================================\n"
+    )
 
     return results
 

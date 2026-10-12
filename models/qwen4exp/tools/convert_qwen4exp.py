@@ -1019,7 +1019,8 @@ def main() -> int:
         idx_data = json.loads(index.read_text())["weight_map"]
         if arguments.non_layers_only:
             needed_tensors = [
-                name for name in idx_data
+                name
+                for name in idx_data
                 if ".ple." in name or "mtp." in name or ".layers." not in name
             ]
             wanted = {idx_data[name] for name in needed_tensors}
@@ -1066,9 +1067,7 @@ def main() -> int:
                     [
                         name
                         for name in source._where
-                        if ".ple." in name
-                        or "mtp." in name
-                        or ".layers." not in name
+                        if ".ple." in name or "mtp." in name or ".layers." not in name
                     ]
                 )
             freed = source.release(still_needed)

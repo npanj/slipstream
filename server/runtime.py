@@ -451,7 +451,7 @@ class MultiplexedRuntime:
         self._mask_slots = threading.BoundedSemaphore(pending_limit)
         self._mask_executor = ThreadPoolExecutor(
             max_workers=mask_workers,
-            thread_name_prefix="slipstream-v2-mask",
+            thread_name_prefix="slipstream-mask",
         )
 
         self._state_lock = threading.RLock()
@@ -731,7 +731,7 @@ class MultiplexedRuntime:
                 threading.Thread(
                     target=self._run_startup_attempt,
                     args=(attempt, old_process, old_reader),
-                    name="slipstream-v2-native-startup",
+                    name="slipstream-native-startup",
                     daemon=True,
                 ).start()
             deadline = min(attempt.deadline, caller_deadline or attempt.deadline)
@@ -842,7 +842,7 @@ class MultiplexedRuntime:
                 reader = threading.Thread(
                     target=self._reader_loop,
                     args=(process, generation),
-                    name=f"slipstream-v2-native-reader-{generation}",
+                    name=f"slipstream-native-reader-{generation}",
                     daemon=True,
                 )
                 self._reader_thread = reader
@@ -875,7 +875,11 @@ class MultiplexedRuntime:
     ) -> None:
         caller_deadline = deadline
         io_deadline = time.monotonic() + self._io_timeout
-        deadline = min(caller_deadline, io_deadline) if caller_deadline is not None else io_deadline
+        deadline = (
+            min(caller_deadline, io_deadline)
+            if caller_deadline is not None
+            else io_deadline
+        )
         if not self._write_lock.acquire(timeout=_remaining(deadline)):
             raise TimeoutError("native write lock timed out")
         failure: BaseException | None = None
@@ -918,7 +922,11 @@ class MultiplexedRuntime:
                     # frames or high-context prompts are not killed when the engine is actively
                     # draining the OS pipe buffer.
                     io_deadline = time.monotonic() + self._io_timeout
-                    deadline = min(caller_deadline, io_deadline) if caller_deadline is not None else io_deadline
+                    deadline = (
+                        min(caller_deadline, io_deadline)
+                        if caller_deadline is not None
+                        else io_deadline
+                    )
                 self._crash_trace.record_bytes(generation, "client_to_engine", encoded)
             except TimeoutError:
                 if offset == 0:
@@ -1268,12 +1276,17 @@ class MultiplexedRuntime:
 
         def finish() -> None:
             if not isinstance(failure, RuntimeClosed):
-                self._crash_trace.dump(
-                    generation,
-                    failure,
-                    process_returncode=returncode,
-                    last_status=last_status,
-                )
+                try:
+                    self._crash_trace.dump(
+                        generation,
+                        failure,
+                        process_returncode=returncode,
+                        last_status=last_status,
+                    )
+                except Exception:
+                    # A diagnostic: one not written must not keep the failure
+                    # from reaching the listener, the calls and the engine.
+                    pass
             for call in calls:
                 self._admission_slots.release()
                 call._set_terminal(error=failure)

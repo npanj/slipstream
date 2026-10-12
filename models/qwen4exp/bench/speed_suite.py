@@ -21,13 +21,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 PROMPTS = ROOT / "build/qwen4exp-speed-prompts.json"
 
+
 def model_path():
     env_dir = os.environ.get("SPLASH_MODEL_DIR", "").strip()
     if env_dir and Path(env_dir).exists():
         return Path(env_dir)
     p = Path.home() / "models/swift-qwen38-flash-next-v3/prepared"
-    if p.exists(): return p
+    if p.exists():
+        return p
     return Path.home() / "models/qwen38-flash-next-splash"
+
 
 TOKENIZER = model_path() / "tokenizer"
 

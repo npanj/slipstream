@@ -67,9 +67,11 @@ jobs:
           SH
           chmod 755 "$PKG/bin/slipstream"
 
-          mkdir -p "$PKG/models/qwen4exp/tools" "$PKG/dev/tools" "$PKG/build"
+          mkdir -p "$PKG/models/qwen4exp/tools" "$PKG/models/qwen38/tools" "$PKG/dev/tools" "$PKG/build"
           cp models/qwen4exp/tools/convert_qwen4exp_gguf.py models/qwen4exp/tools/convert_qwen4exp.py \
             "$PKG/models/qwen4exp/tools/"
+          cp models/qwen38/tools/convert_qwen38_gguf.py models/qwen38/tools/convert_qwen38_mlx.py \
+            "$PKG/models/qwen38/tools/"
           cp dev/__init__.py "$PKG/dev/"
           cp dev/tools/__init__.py dev/tools/quantize.py dev/tools/package_format.py \
             dev/tools/sharded_gguf_reader.py dev/tools/fast_dequant.c "$PKG/dev/tools/"
@@ -90,6 +92,8 @@ jobs:
           "smoke/$PACKAGE/python/bin/python3" -c "import sys; sys.path.insert(0, 'smoke/$PACKAGE'); \
             import dev.tools.sharded_gguf_reader as r; print('dequantizers:', ', '.join(r.DEQUANT))"
           "smoke/$PACKAGE/python/bin/python3" "smoke/$PACKAGE/models/qwen4exp/tools/convert_qwen4exp_gguf.py" --help >/dev/null
+          "smoke/$PACKAGE/python/bin/python3" "smoke/$PACKAGE/models/qwen38/tools/convert_qwen38_gguf.py" --help >/dev/null
+
 
       - name: Publish the release
         uses: softprops/action-gh-release@v2
@@ -108,7 +112,7 @@ jobs:
             ### macOS (Apple Silicon)
 
             ```sh
-            curl -fsSL https://github.com/${{ github.repository }}/raw/main/install.sh | SLIPSTREAM_TAG=${{ env.TAG }} sh
+            curl -fsSL https://github.com/${{ github.repository }}/raw/main/install.sh | SLIPSTREAM_REPO=${{ github.repository }} SLIPSTREAM_TAG=${{ env.TAG }} sh
             ```
 
             Installs into `~/.local/share/slipstream/<version>` and links `slipstream` into
@@ -123,9 +127,11 @@ jobs:
             ```
 
             A Hugging Face id is downloaded on the first start (`slipstream pull <owner/repo>`
-            downloads without serving), with the MTP draft head a GGUF repository lacks.
-            Models go to `~/.slipstream/models` (`SLIPSTREAM_MODELS` moves them); a GGUF model is
-            prepared there on its first start, which needs about as much disk again.
+            downloads without serving; `--check` only says whether it can be served, and its
+            size), with the MTP draft head a GGUF repository lacks. Models go to
+            `~/.slipstream/models` (`SLIPSTREAM_MODELS` moves them). A GGUF model is converted
+            there on its first start, using its downloaded files up as it goes, so it needs little
+            more disk than the model (`serve --keep-gguf` keeps them, and needs as much again).
 
             Requires macOS 26.4 or later on Apple Silicon; a 64 GB Mac for the Qwen3.8-Flash-Next
             models. Other data and caches go to `~/Library/Application Support/Slipstream-v2`.

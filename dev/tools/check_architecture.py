@@ -22,6 +22,12 @@ OPERATOR_WORKSPACE_POLICY = re.compile(
     r"VerifyAttentionConfig|AttentionScalePlacement|MoeExpertTile|MoeConfig|"
     r"DraftAttentionConfiguration|selectorShards)\b"
 )
+# The standard library's clocks that also count sleep, and the timed waits
+# that measure on them; production measures time on AwakeClock.
+SLEEP_COUNTING_CLOCK = re.compile(
+    r"\b(?:steady_clock|high_resolution_clock|wait_for|try_lock_for"
+    r"|try_acquire_for)\b"
+)
 
 
 def production_sources() -> list[Path]:
@@ -171,6 +177,10 @@ def check() -> list[str]:
             errors.append(
                 f"{name}: production backend contains client-specific behavior"
             )
+        # Every timeout and duration counts time the Mac is awake, as the
+        # server's time.monotonic() does.
+        if SLEEP_COUNTING_CLOCK.search(text):
+            errors.append(f"{name}: measures time on a clock that counts sleep")
     return errors
 
 

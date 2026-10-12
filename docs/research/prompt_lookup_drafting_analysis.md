@@ -1,7 +1,7 @@
 # Analysis & Plan: Fast Prompt Lookup Decoding for Slipstream
 
-**Author:** antigravity  
-**Date:** 2026-09-26  
+**Author:** antigravity\
+**Date:** 2026-09-26\
 **Subject:** Technical evaluation of Hayder Tirmazi's *"42x Faster Prompt Lookup Drafting in llama.cpp"* and its application to Slipstream.
 
 ---

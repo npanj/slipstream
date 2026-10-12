@@ -343,6 +343,9 @@ public:
   submitCommandAsync(std::span<const ComputeDispatch> dispatches,
                      CommandCompletion completion = {});
 
+  // Pre-compiles a compute pipeline state into the Metal device cache.
+  void preparePipeline(std::string_view name);
+
   // A pipeline: the dispatches split into stages at `stageStarts`, one
   // command buffer each, committed together. Stage k > 0 waits for the
   // pipeline event to reach base + 2k and raises it to base + 2k + 1 when it

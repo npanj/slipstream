@@ -41,8 +41,14 @@ def prometheus_metrics(status):
         "slipstream_requests_failed_total": ("requests", "failed"),
         "slipstream_scheduler_queued": ("scheduler", "queued"),
         "slipstream_scheduler_waiting_resources": ("scheduler", "waiting_resources"),
-        "slipstream_cache_resource_suspensions_total": ("cache", "resource_suspensions"),
-        "slipstream_cache_resource_resumptions_total": ("cache", "resource_resumptions"),
+        "slipstream_cache_resource_suspensions_total": (
+            "cache",
+            "resource_suspensions",
+        ),
+        "slipstream_cache_resource_resumptions_total": (
+            "cache",
+            "resource_resumptions",
+        ),
         "slipstream_cache_resource_replay_tokens_total": (
             "cache",
             "resource_replay_tokens",
@@ -150,9 +156,15 @@ def prometheus_metrics(status):
         "slipstream_memory_limit_bytes": ("memory_governor", "limit_bytes"),
         "slipstream_memory_headroom_bytes": ("memory_governor", "headroom_bytes"),
         "slipstream_admission_waiting_memory": ("admission", "waiting_memory"),
-        "slipstream_admission_waiting_concurrency": ("admission", "waiting_concurrency"),
+        "slipstream_admission_waiting_concurrency": (
+            "admission",
+            "waiting_concurrency",
+        ),
         "slipstream_admission_suspended": ("admission", "suspended"),
-        "slipstream_admission_oldest_wait_milliseconds": ("admission", "oldest_wait_ms"),
+        "slipstream_admission_oldest_wait_milliseconds": (
+            "admission",
+            "oldest_wait_ms",
+        ),
         "slipstream_ttft_p50_milliseconds": ("metrics", "ttft_ms", "p50"),
         "slipstream_ttft_p95_milliseconds": ("metrics", "ttft_ms", "p95"),
         "slipstream_itl_p50_milliseconds": ("metrics", "itl_ms", "p50"),
@@ -198,7 +210,7 @@ def prometheus_metrics(status):
         metric_value = value(path)
         if metric_value is not None:
             if name.startswith("slipstream_"):
-                suffix = name[len("slipstream_"):]
+                suffix = name[len("slipstream_") :]
                 lines.append(f"slipstream_v2_{suffix} {metric_value}")
                 lines.append(f"{name} {metric_value}")
                 lines.append(f"splash_{suffix} {metric_value}")

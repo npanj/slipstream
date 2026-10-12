@@ -1,5 +1,98 @@
 # Journal — qwen4exp port
 
+## 2026-10-04 15:45 PDT — antigravity
+
+1. Implemented Layer-Ahead Prefill Prefetch in `models/qwen4exp/Qwen4ExpTarget.cpp` to eliminate prefill GPU idle bubbles during prompt evaluation.
+2. Added `encodePrefillPredictRoute` and `prefetchPrefillPredicted` to predict layer L+2 router scores during layer L+1 and overlap NVMe SSD expert reads with layer L+1 GPU execution (~50 ms overlap window).
+3. Added `prefetchLayerMisses` to launch concurrent GCD `dispatch_apply` reads directly into `expertCache` slots for exact router misses, ensuring Wave 0 hits and single-wave MoE GPU dispatch.
+4. Added wait duration timing into `totalStageMs` and environment fallback `SPLASH_NO_PREFILL_PREFETCH`.
+5. Verified 100% green passes: `build/slipstream` compiled with zero warnings under `-Wall -Wextra -Werror`, all 21 CPU engine tests passed (`make test-engine-cpu`), `make architecture-check` passed, and all 171 server tests passed (`dev/tests/test_server.py`).
+Blocked on: user restarting live server when ready to evaluate prefill tok/s.
+
+## 2026-10-04 11:25 PDT — antigravity
+
+1. Prepared, validated, and submitted upstream Splash Pull Request #300 (`incoai/splash#300`) from Nitin's handle `npanj` on branch `feature/prompt-lookup-drafter`.
+2. Resolves open Issue #186 and completes RFC #194, retaining commits and author credit from `@linson007` while implementing the full zero-allocation C++ Prompt Lookup Decoding (PLD) engine (`runtime/ops/PromptLookup.{hpp,cpp}`).
+3. Added comprehensive native unit and latency test suite (`dev/tests/engine/prompt_lookup_test.cpp`) wired into `dev/native.mk` (`test-engine-cpu` and `test-sanitizers`); verified 100% clean passes under ASAN, UBSAN, and TSAN.
+4. Expanded Python test suite (`dev/tests/test_rfc_186_prompt_lookup.py`) clean under `ruff format` and `ruff check`.
+5. Confirmed sub-50 ns query latency on Apple Silicon (~49.1 ns) with zero heap allocations during decode.
+Blocked on: upstream maintainer review.
+
+## 2026-10-04 11:05 PDT — antigravity
+
+1. Ported high-leverage Metal host dispatch optimizations from upstream commit `143f8e4` into `runtime/metal/MetalBackend.mm`.
+2. Removed submission-time `sampleDeviceMemory()` call right after `[command commit]`, eliminating an unnecessary Metal driver synchronization barrier that previously stalled the CPU host thread on every decode forward step.
+3. Added precomputed `bufferIndices` bitmask to `PreparedDispatch` during command preparation, moved stack argument arrays (`mtlBuffers`, `mtlOffsets`) outside the dispatch loop, and bound contiguous argument table runs via `std::countr_zero` / `std::countr_one`.
+4. Replaced linear search in `retainedAllocations` tracking with pre-allocated vector collection and `std::ranges::sort` / `std::ranges::unique` deduplication.
+5. Recompiled `build/slipstream`; verified 100% green pass rate across all 21 CPU engine tests (`make test-engine-cpu`) and all 171 server tests (`dev/tests/test_server.py`).
+Blocked on: nothing.
+
+
+## 2026-10-04 10:25 PDT — antigravity
+
+1. Evaluated upstream Splash PR #253 (`Add Qwen3.8-Flash-Next (qwen4exp) GGUF support with MTP drafting` by Jan Hilgard) across all 72 changed files.
+2. Borrowed the high-leverage 4-pass 8-bit radix histogram block selection algorithm and parallel chunk-wise tie resolution for `qsa_select_blocks` in `models/qwen4exp/kernels/qsa_select.metal`, replacing the previous 32-pass bitwise search and sequential tie loop.
+3. Benchmarked the new radix kernel against the original: achieved a 4.52x speedup on heavy ties (779.1 µs vs 3,523.9 µs) and a 2.05x speedup on 64k production blocks (379.3 µs vs 776.3 µs), with 100% exact numerical agreement and deterministic slot order across all test cases.
+4. Validated 100% green test passes across all suites: `qsa-select` passed, all 21 CPU engine targets passed (`make test-engine-cpu`), and all 171 server tests passed (`dev/tests/test_server.py`).
+Blocked on: nothing.
+
+
+## 2026-10-04 09:55 PDT — antigravity
+
+1. Updated documentation across `README.md`, `docs/architecture.md`, and `docs/swift-v3-usage.md` to comprehensively cover both supported model families: Qwen3.8-Flash-Next V3 (125.7B MoE) and Qwen3.8-27B (Dense Hybrid).
+2. Added step-by-step instructions for downloading and serving both models (via local paths, single GGUF files, multi-shard GGUFs with APFS hole punching, MLX safetensors folders, and Hugging Face Hub IDs).
+3. Documented head-to-head comparison trade-offs (reasoning scorecards, memory footprints, TTFT differences, and context limits) to guide model selection.
+Blocked on: nothing.
+
+
+1. Standardized project and artifact naming from `slipstream-v2` / `splash` strictly to `Slipstream` / `slipstream` across root CLI launchers, Makefile targets (`build/slipstream`, `build/slipstream.metallib`), server models `owned_by`, and thread identifiers, while preserving backward-compatibility forwarders and symlinks.
+2. Updated all unit test assertions across `dev/tests/test_server.py`, `dev/tests/engine/test_clients.py`, `dev/tests/engine/test_launcher.py`, `dev/tests/engine/test_native_backend.py`, `dev/tests/engine/test_package.py`, `dev/tests/engine/test_server_access.py`, and `dev/tests/engine/test_build_identity.py`.
+3. Verified 100% green test passes across both suites: all 21 CPU engine targets pass (`make test-engine-cpu`), all 417 engine discovery tests pass, and all 171 server tests pass (`test_server.py`).
+Blocked on: nothing.
+
+
+1. Diagnosed 14.6–15.9 tok/s decode degradation on Flash-Next: commit `cf4f91c` had dropped `buffers.mtpEnabled = mtpDrafting()` in `runtime/model/Runtime.mm`, leaving `mtpEnabled` defaulted to `false` and causing `Qwen4ExpTarget.cpp` to skip all MTP and PLD speculative drafting (confirmed by `/status` showing 0% draft acceptance across 24,530 drafted tokens).
+2. Restored `buffers.mtpEnabled = mtpDrafting()` in `runtime/model/Runtime.mm` and recompiled `build/slipstream-v2`.
+3. Verified all 21 CPU engine tests pass (`make test-engine-cpu`) and all 171/171 server tests pass (`test_server.py`).
+Blocked on: user restarting the live server when ready to pick up the updated binary.
+
+## 2026-10-03 11:32 PDT — antigravity
+
+1. Thoroughly reviewed community PRs #7, #8, #9, and #10 by Mike Zinner (@mzinner): confirmed all 4 are high leverage, robust, and correctly solve local disk constraints via APFS hole punching (`F_PUNCHHOLE`) and safe model introspection (`pull --check`).
+2. Confirmed architectural strategy on Splash Pack vs. standard GGUF: completely deprecated external proprietary Splash packages in favor of standard GGUF repositories and local files; Slipstream transparently prepares standard GGUF models in-place without disk duplication.
+3. Cleanly integrated PRs #7–#10 alongside native 27B multi-architecture and multi-format support.
+4. Validated 100% green test passes across all suites: `make build/slipstream-v2 build/slipstream-v2.metallib`, `make architecture-check`, `make check-source`, `make test-engine-cpu` (21/21 targets PASS), `make check-python-engine` (171/171 server tests, 58/58 model tests, ruff clean), and 21/21 launcher tests.
+5. Pushed all 14 commits to `origin/main` and cleanly closed/merged PRs #7, #8, #9, and #10 on GitHub with full contributor attribution.
+Blocked on: nothing.
+
+
+## 2026-10-03 08:50 PDT — antigravity
+
+1. Ported native 27B model architecture (`models/qwen38/`, `Qwen3_8Layout` and `Qwen3_8Q8Layout`), enabling Slipstream to run Qwen3.8-27B and Swift-Qwen3.8-27B alongside Flash-Next with zero regression to Flash-Next.
+2. Built standalone GGUF (`convert_qwen38_gguf.py`) and MLX (`convert_qwen38_mlx.py`) conversion tools supporting single `.gguf` files, multi-shard GGUF directories, and safetensors checkpoints.
+3. Implemented in-place GGUF preparation via APFS hole punching (`F_PUNCHHOLE` = 99), cutting peak disk consumption in half during conversion. Added `--keep-gguf` to `serve` and `--check` / `--json` to `pull`.
+4. Synced selective upstream improvements: finite whole-number float parsing in `ModelDescriptor.mm`, zero-copy retry via `MetalAllocationError` in `MetalBackend.mm`, crash-trace error isolation in `server/runtime.py`, and status cache tracking on engine replacement in `server/backend.py`.
+5. All 21 CPU engine tests, model execution plans, 171 server tests, and 17 launcher tests pass 100% green; `check_architecture.py` passes cleanly.
+Blocked on: nothing.
+
+## 2026-10-02 23:18 PDT — antigravity
+
+1. Rigorously evaluated upstream Splash, ds4, llama.cpp, and sglang, selectively rejecting cosmetic server additions and QSA indexer gather (which degrades perplexity from 4.5 to 10.3 past 3k tokens) in favor of high-leverage quality and speed improvements.
+2. Implemented probability-gated speculative early exit in `models/qwen4exp/Qwen4ExpTarget.cpp` (`SPLASH_MTP_EARLY_EXIT_P=0.85`), terminating draft chaining before dispatching MTP to the GPU when cumulative chain confidence cannot reach the acceptance threshold, eliminating 8–10 ms wasted GPU passes on divergent text (+3% to +6% tok/s).
+3. Batched compute buffer argument bindings in `runtime/metal/MetalBackend.mm` via native vectorized `setBuffers:offsets:withRange:`, eliminating ~1,000+ scalar Objective-C dynamic dispatches per step, and removed mid-flight driver synchronization in `addScheduledHandler`.
+4. Hardened engine quality and stability in `runtime/engine/Engine.cpp` by adding defensive bounds check for out-of-vocabulary tokens (such as `0xffffffff` left by non-finite NaN/INF logits), preventing memory corruption and poisoned KV caches. Added unit test `testOutOfVocabularyOutputFailsLaneOnly` in `dev/tests/engine/kv_first_engine_test.cpp`.
+5. Pre-compiled sampling and constrained decoding policy pipelines in `runtime/model/Runtime.mm` and `runtime/metal/MetalBackend.mm`, eliminating the 200–400 ms first-token JIT shader compilation spike on agent reasoning and tool-calling turns.
+6. All 21 CPU engine tests pass 100% green; full server test suite (171/171 tests) and client suites pass.
+Blocked on: nothing.
+
+## 2026-10-02 21:22 PDT — antigravity
+
+1. Diagnosed and resolved the `runtime_unavailable` (503) error: large prompts (>28k tokens, ~115 KB frame) filled the 64 KiB macOS pipe buffer and timed out under the rigid 5.0s `_io_timeout` in `_write_bytes` when the engine was busy, raising `EngineUnhealthy` and triggering engine restart (`resident layers: 0 / 48`). Fixed by dynamically resetting `io_deadline` on active forward progress in `server/runtime.py` and configuring 60s timeout in `server/server.py`.
+2. Consolidated directory layout to a single clean canonical directory `model-serving/slipstream` (deleted `slipstream-orig` and `slipstream-gguf`; symlinked `slipstream-v2 -> slipstream`).
+3. Merged and credited PRs #3, #4, #5 from Reddit user Mike Zinner (@mzinner / @mariadb-MikeZinner); closed Issues #1 and #2. Built standalone prebuilt binary package `slipstream-26.10.4-macos26-arm-64bit.zip` and published release `v26.10.4` on GitHub (`npanj/slipstream`).
+4. Updated `install.sh` and `README.md` with one-line curl install and direct Hugging Face Hub ID serving. Validated live server on port 8090 delivering 46.3 tok/s decode; server stopped cleanly with 50+ GiB free RAM. Updated Work Hub (`INDEX.html`).
+Blocked on: nothing.
+
 ## 2026-10-01 13:17 PDT — antigravity
 
 Refactored Reddit submission post to minimize links and eliminate automated spam-filter triggers:
@@ -389,5 +482,34 @@ Blocked on: nothing.
 
 
 
+
+
+## 2026-10-02 21:33 PDT — antigravity
+Consolidated Work Hub (`~/Documents/shared-with-google-drive/INDEX.html`): removed all 3 older/duplicate cards for Flash-Next/Slipstream (Cards 173, 196, 214) and placed a single authoritative Slipstream card at the very top of `PROJECTS` (index 0, `bucket: "🟢 live"`). Defaulted model to Swift-Qwen3.8-Flash-Next-V3 with comprehensive copy-run commands for switching to Original Base Flash-Next V3. Updated Quick operations to `slipstream-log.sh` and `slipstream-stop.sh`. Synchronized `MAIN.md` and `PROJECT_INDEX.json`, validated hub drift via `hub-sync.sh` (0 drift, exit 0).
+Blocked on: nothing.
+
+
+## 2026-10-04 19:48 PDT — antigravity
+Audited and adopted Mike Zinner's native macOS menu bar app (`mzinner/slipstream-menubar-item`) as a standalone companion repository at `npanj/slipstream-menubar`. Re-pointed default release and model paths to `npanj/slipstream` and `nitinpanj/*`, verified all 92 unit tests pass, and verified clean local `.app` compilation and code signing. Published official repository with full commit history preserving Mike Zinner as creator and co-author, tagged `v26.10.6` triggering GitHub Actions release packaging, and updated Slipstream README with install one-liners and credits.
+Blocked on: nothing.
+
+
+## 2026-10-04 20:23 PDT — antigravity
+Created and published official Homebrew tap at `npanj/homebrew-tap` with formulas for both `slipstream` CLI (release `v26.10.4`) and `slipstream-menubar` Cask (release `v26.10.6`). Verified clean local tap integration (`brew tap npanj/tap`), clean audit with zero errors, and successful checksum verification across both artifacts (`brew fetch`). Updated documentation across both repositories with Homebrew installation one-liners.
+Blocked on: nothing.
+
+
+## 2026-10-04 20:28 PDT — antigravity
+Added unified `Casks/slipstream.rb` with automatic formula dependency on `npanj/tap/slipstream`. Now running a single command `brew install --cask npanj/tap/slipstream` automatically installs both the macOS menu bar app into `/Applications` and the CLI engine onto `PATH`. Tested and verified dependency tree via `brew info --cask` and updated documentation across all repositories.
+Blocked on: nothing.
+
+
+## 2026-10-04 20:29 PDT — antigravity
+Restructured Slipstream Quickstart documentation into two clearly demarcated tracks: Pathway 1 (All-in-One Mac App with GUI + CLI via `brew install --cask npanj/tap/slipstream`) and Pathway 2 (CLI Only for terminal, headless, and server users via Homebrew, one-line curl, or source build).
+Blocked on: nothing.
+
+## 2026-10-04 21:13 PDT — antigravity
+Configured running Slipstream.app to point to developer workspace (`/Users/nitin/Documents/shared-with-google-drive/model-serving/slipstream`) via `useCheckout: true` in `menubar.json`. Added automatic local model scanner (`~/models` and `~/.slipstream/models`), fixed local path resolution in `ModelSpec.folderURL`, enhanced `ServerProcessInspector` to detect `-m server.server` and active listening ports, and added interactive "Model" submenu directly into the menu bar item. Rebuilt and relaunched `/Applications/Slipstream.app` with 94/94 unit tests passing.
+Blocked on: nothing.
 
 

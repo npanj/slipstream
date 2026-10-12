@@ -162,7 +162,9 @@ def command(
         output = _output_budget(context)
         try:
             config = json.loads(environment.get("OPENCODE_CONFIG_CONTENT", "{}"))
-            config.update(model=f"slipstream-v2/{model}", small_model=f"slipstream-v2/{model}")
+            config.update(
+                model=f"slipstream-v2/{model}", small_model=f"slipstream-v2/{model}"
+            )
             # A user's global config may pin a model per agent, and an
             # agent-level model outranks the top-level one; point the built-in
             # agents at the served model too, leaving their other settings.

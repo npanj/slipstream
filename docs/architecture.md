@@ -12,7 +12,8 @@ enforces who may depend on whom.
  runtime/engine/      requests, scheduling, KV prefix cache, memory plan and governor
  runtime/model/       shared model runtime: decode loop, drafting, per-request state
    │  reaches a concrete model only through 4 plug-in files (below)
- models/qwen4exp/     this model: layout, loader, forward pass, own kernels, tools
+ models/qwen4exp/     Flash-Next (125.7B MoE): layout, loader, forward pass, own kernels, tools
+ models/qwen38/       Qwen3.8-27B (Dense): layout, loader, forward pass, own kernels, tools
  runtime/ops/         one C++ entry point per shared kernel family
  runtime/metal/       GPU backend: buffers, command graphs, submission; shared kernels
 ```
@@ -26,7 +27,7 @@ enforces who may depend on whom.
 | **server** | OpenAI and Anthropic request shapes, chat template, thinking levels, tool-call grammar, streaming | `api_shapes.py`, `frontend.py`, `backend.py`, `runtime.py`, `protocol.py` |
 | **engine** | Admitting requests within memory, batching, prompt chunks, reusing cached prompt prefixes, status | `Engine.cpp`, `Scheduler.cpp`, `Cache.cpp`, `KvCache.cpp`, `MemoryPlan.cpp`, `MemoryGovernor.cpp` |
 | **shared model runtime** | The decode loop, guess checking, per-request recurrent state, buffers | `Runtime.mm`, `QwenState.*`, `QwenTarget.*`, `ModelDescriptor.*` |
-| **model folder** | Everything only this model has | `models/qwen4exp/` (see next table) |
+| **model folder** | Everything only this model has | `models/qwen4exp/`, `models/qwen38/` |
 | **ops** | Launching shared kernels with the right sizes and variant | `Linear.*`, `MoE.*`, `PagedAttention.*`, `GDN.*`, `Sampling.*` |
 | **metal** | Talking to the GPU: allocations, pipelines, events, pipelined submission | `MetalBackend.mm`, `CommandGraph.hpp`, `kernels/`, `abi/` |
 
@@ -35,14 +36,17 @@ enforces who may depend on whom.
 
 ## Inside a model folder
 
-| Path in `models/qwen4exp/` | What it is |
-|---|---|
-| `Qwen4Exp.hpp/.cpp` | **Layout** (the model's fixed sizes), package loader, expert cache plan, draft vocabulary |
-| `Qwen4ExpTarget.hpp/.cpp` | **Forward pass**: prompt processing, checking guesses, output layer, draft head |
-| `kernels/*.metal` | GPU code only this model uses (hyper-connections, n-gram embedding, sparse attention picker, draft pick) |
-| `abi/*.h` | Parameter structs shared by those kernels and the C++ that launches them |
-| `tools/` | Converter (checkpoint → package), draft-vocabulary builder, `checks/` that compare against the original model |
-| `bench/` | Speed and quality tools for this model (see `docs/profiling.md`) |
+### Flash-Next 125.7B MoE (`models/qwen4exp/`)
+- `Qwen4Exp.hpp/.cpp`: 125.7B layout (512 routed experts, 7.3B active/token, 48 layers), package loader, expert cache plan.
+- `Qwen4ExpTarget.hpp/.cpp`: Forward pass: prompt processing, checking guesses, output layer, MTP draft head.
+- `kernels/*.metal`: Hyper-connection mixing, n-gram embedding, sparse attention picker, MTP pick.
+- `tools/`: GGUF converter (`convert_qwen4exp_gguf.py`) with APFS hole punching.
+
+### Qwen3.8-27B Dense (`models/qwen38/`)
+- `Qwen3_8.hpp/.cpp`: 27B layout (64 dense hybrid layers, 5,120 hidden dim, 17,408 intermediate FFN).
+- `Qwen3_8Target.hpp/.cpp`: Forward pass: prompt processing, dense attention + GDN verification, output layer.
+- `kernels/*.metal`: `capture.metal`, `draft.metal`, `draft_context.metal`.
+- `tools/`: GGUF converter (`convert_qwen38_gguf.py`) and MLX converter (`convert_qwen38_mlx.py`).
 
 The build picks up `models/*/kernels/*.metal` and `models/*/*.cpp` automatically.
 

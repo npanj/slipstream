@@ -1,5 +1,147 @@
 # Decisions — qwen4exp port
 
+## Layer-Ahead Prefill Prefetch & Lookahead Routing in Qwen4Exp (2026-10-04)
+
+- **Context**: During prompt prefill in `models/qwen4exp/Qwen4ExpTarget.cpp`, each layer L previously encoded MoE experts, ran `stepGraph` synchronously (`.wait()`), and then only issued an `adviseMissedExperts` hint (`fcntl(F_RDADVISE)`). When layer L+1 began, `encodeLayerExpertsByExpert` blocked sequentially on `pread` to load missed experts while the GPU sat idle for 70–80 ms per layer, limiting Flash-Next prefill throughput on SSD streaming Macs to ~207 tok/s.
+- **Decision**:
+  - Implemented `encodePrefillPredictRoute` and `prefetchPrefillPredicted` in `Qwen4ExpTarget.cpp`: predicts layer L+2's router scores during layer L+1 and begins background SSD expert streaming via GCD `dispatch_async` across performance cores during layer L+1 GPU execution (~50 ms overlap window).
+  - Implemented `prefetchLayerMisses`: scans exact router selections from `buffers.selectedExperts`, allocates `expertCache` slots (with LRU eviction via `pickVictim`), and launches concurrent `readMissedExperts` via `dispatch_apply` directly into cache MTLBuffers.
+  - When all prefetched experts hit in cache, MoE dispatches as a single GPU wave (`waves.size() == 1`), eliminating wave pipeline event stalls and inter-wave GPU bubbles.
+  - Added timing instrumentation into `totalStageMs` and an environment fallback `SPLASH_NO_PREFILL_PREFETCH=1`.
+- **Measured Results**:
+  - Clean compilation under `-Wall -Wextra -Werror`.
+  - All 21 CPU engine tests passed (`make test-engine-cpu`).
+  - Architecture boundary check passed (`make architecture-check`).
+  - All 171 server tests passed (`dev/tests/test_server.py`).
+
+## Upstream Contribution: Zero-Allocation Prompt Lookup Drafter (PR #300, 2026-10-04)
+
+- **Context**: Upstream Splash had open Issue #186 (`[perf] Prompt-lookup drafter alongside DFlash2`) and RFC scaffolding PR #194 by `@linson007`. PR #194 declared constants and static string matching functions, leaving the stateful C++ engine and tests as follow-up work.
+- **Decision**:
+  - Authored and submitted upstream PR #300 (`incoai/splash#300`) under Nitin's GitHub handle (`npanj`) from branch `feature/prompt-lookup-drafter`.
+  - Rebased and preserved `@linson007`'s 3 RFC scaffolding commits with full author attribution, completing the implementation with the production-grade zero-allocation PLD engine (`runtime/ops/PromptLookup.{hpp,cpp}`).
+  - Built a flat chained inverted hash table (`head_` power-of-two table with load factor < 0.5, `next_` parallel array) ensuring zero heap allocations during decode with reverse-chronological search and multi-order n-gram tie breaking.
+  - Added native C++ unit and latency test suite (`dev/tests/engine/prompt_lookup_test.cpp`) wired into `dev/native.mk` (`test-engine-cpu` and `test-sanitizers`), passing 100% clean under ASAN, UBSAN, and TSAN.
+- **Measured Results**:
+  - Sub-50 ns query latency on Apple Silicon (~49.1 ns per lookup).
+  - ~7.9 µs prompt ingestion for 400 tokens (~20 ns/token).
+  - 100% green test passes across unit, sanitizer, and python test suites.
+
+
+## Metal Host Dispatch Latency Optimizations & Driver Synchronization Elimination (2026-10-04)
+
+- **Problem**:
+  1. In `runtime/metal/MetalBackend.mm`, `impl_->sampleDeviceMemory()` was called directly on command submission right after `[command commit]`. Querying `MTLDevice.currentAllocatedSize` right after commit forced the CPU host thread to synchronize with the in-flight Metal command queue on Apple Silicon, injecting a driver pipeline stall into every decode step.
+  2. Inside the inner dispatch encoding loop, buffer indices were dynamically scanned and tested using a bitmask reconstructed per dispatch, and stack arrays were re-instantiated inside the dispatch loop.
+  3. Tracking retained allocations previously scanned vectors linearly ($O(N)$ find per binding).
+- **Solution (Borrowed from Upstream Commit `143f8e4`)**:
+  - Eliminated the submission-time `sampleDeviceMemory()` call entirely. Driver memory telemetry is already sampled upon command retirement in `addCompletedHandler` and on request admission in `refreshMemoryStats`.
+  - Added precomputed `bufferIndices` bitmask to `PreparedDispatch`, and moved stack argument arrays (`mtlBuffers`, `mtlOffsets`) outside the dispatch loop, binding consecutive spans with `std::countr_zero` / `std::countr_one`.
+  - Replaced linear search of retained allocations with vector collection and `std::ranges::sort` / `std::ranges::unique` deduplication.
+- **Measured Impact**: Eliminates driver synchronization stalls on submission, saving ~50–150 µs of CPU dispatch overhead per forward step without affecting memory accounting or GPU safety. Passed all 21 CPU engine tests and all 171 server tests.
+
+
+## 4-Pass Radix Block Selection in QSA (2026-10-04)
+
+- **Problem**: In `models/qwen4exp/kernels/qsa_select.metal`, `qsa_select_blocks` previously executed a 32-pass bitwise binary search (`for (int bit = 31; bit >= 0; --bit)`) requiring 64 threadgroup barriers per row. Furthermore, resolving ties at the threshold used a sequential loop `for (uint taken = 0; taken < ties_wanted; ++taken)` running a full reduction across all blocks for every single tie (up to 512 passes and 1,024 barriers on heavily tied scores, taking 3.52 ms).
+- **Solution (Borrowed & Adapted from Upstream PR #253)**:
+  - Replaced the 32-pass bit search with an **8-bit radix histogram selection** over four passes (`shift = 24, 16, 8, 0`) using 256 atomic bins in threadgroup memory.
+  - Replaced the sequential $O(\text{ties})$ reduction loop with **parallel chunk-wise prefix scans**, resolving all ties in parallel in ascending index order in at most $\lceil \text{blocks} / 1024 \rceil$ chunk passes.
+- **Measured Results**:
+  - All-equal scores (512 ties): latency dropped from **3,523.9 µs down to 779.1 µs** (**4.52x speedup**).
+  - Production shape (65,536 blocks, 512 budget): latency dropped from **776.3 µs down to 379.3 µs** (**2.05x speedup**).
+  - Preserved 100% exact numerical match and deterministic slot ordering across all test suites (`dev/tests/engine/qsa_select_metal_test.mm`).
+
+
+## Canonical Naming Standardization to Slipstream (2026-10-04)
+
+- **Universal Naming**: Standardized the project and binary names universally from `slipstream-v2` and `splash` to canonical **Slipstream** (matching the GitHub repository `npanj/slipstream`).
+- **Primary Artifacts**:
+  - Main binary: `build/slipstream` (built by `make` / `make all` / `make build/slipstream`).
+  - Metal library: `build/slipstream.metallib`.
+  - Root CLI launcher: `./slipstream`.
+- **Backward Compatibility**:
+  - Scripts `./slipstream-v2` and `./splash` serve as backward-compatibility forwarders delegating directly to `./slipstream`.
+  - `Makefile` maintains symlink aliases `build/slipstream-v2 -> slipstream` and `build/slipstream-v2.metallib -> slipstream.metallib` so existing pipelines and scripts remain uninterrupted.
+  - Server reports `"owned_by": "slipstream"` in `/v1/models` (with client and test harnesses accepting both `"slipstream"` and `"slipstream-v2"`).
+  - SSE heartbeats emit `: slipstream-keepalive` (with test harnesses accepting legacy format).
+
+
+Historically, Splash lacked GGUF ingestion and required proprietary, engine-specific binary package archives (`splash-packed-q4`, `splash-packed-q4-qwen4exp`) hosted on Hugging Face.
+- **Universal Standard**: GGUF is the universal, open standard adopted across llama.cpp, Ollama, LM Studio, and community model uploaders. Community users and developers should never be forced to download vendor-locked formats.
+- **In-Place Transparent Ingestion**: With native GGUF conversion and Darwin APFS hole-punching (`F_PUNCHHOLE`), Slipstream ingests standard multi-shard or single-file GGUF models directly, punching holes in the source file in-place to prevent disk duplication.
+- **Clean Deprecation**: Proprietary Splash packages on Hugging Face are officially deprecated and retired for downloads. User-facing documentation, CLI prompts, and guides exclusively direct users to standard GGUF repositories and files (e.g. `nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF` or standard 27B GGUFs).
+- **Zero-Copy Engine Cache**: The internal `prepared/` directory structure is treated strictly as an engine implementation detail for zero-copy memory mapping (`mmap`), entirely transparent to end users.
+
+## Full Native Qwen3.8-27B Architecture Port & Multi-Format Support (2026-10-03)
+
+
+Ported complete native C++ and Metal support for 27B dense hybrid models (`Swift-Qwen3.8-27B` and `Qwen3.8-27B`):
+- Architecture layout in `models/qwen38/`: 64 layers (hybrid GDN recurrent + full attention every 4th layer), hidden dimension 5,120, intermediate FFN size 17,408, vocabulary 248,320.
+- Implemented `Qwen3_8.cpp`, `Qwen3_8.hpp`, `Qwen3_8Target.cpp`, `Qwen3_8Target.hpp` with clean isolation matching `check_architecture.py`. Shared code reaches concrete models only via `ModelDescriptor.hpp`, `ModelFactory.hpp`, `QwenTarget.cpp`, and `Runtime.mm`.
+- Integrated `models/qwen38/tools/convert_qwen38_gguf.py` and `convert_qwen38_mlx.py` allowing users to serve single `.gguf` files, multi-shard GGUF directories, MLX safetensors folders, or pre-converted `splash-packed-q4` / `splash-packed-q8` packages.
+- Added automatic format and architecture detection in `install/launcher.py` (`_detect_model_format_and_arch`), routing to appropriate converters and preserving draft/tokenizer invariants without manual flags.
+
+## In-Place GGUF Preparation with APFS Hole-Punching (2026-10-03)
+
+Standard GGUF conversion previously duplicated weight storage on disk, requiring 2x the model size in free disk space (~197 GB for Flash-Next, ~34 GB for 27B).
+- Integrated `F_PUNCHHOLE = 99` via macOS Darwin `fcntl(fd, F_PUNCHHOLE, struct.pack("IIqq", 0, 0, start, length))` across `package_format.py`, `sharded_gguf_reader.py`, `convert_qwen4exp_gguf.py`, and `convert_qwen38_gguf.py`.
+- Slices of source GGUF shards are freed in-place as soon as target layers are written. Peak disk requirements drop by ~50% (~102 GB for Flash-Next, ~17 GB for 27B).
+- Added `--keep-gguf` flag in `serve` to allow users to retain original GGUF files when desired.
+
+## Upstream Synchronization & Defensive Hardening (2026-10-03)
+
+Selectively ported high-leverage upstream fixes from `upstream-incoai` and community PRs:
+1. `runtime/model/ModelDescriptor.mm`: Accept finite whole-number floats up to $2^{53}-1$ in `requireUnsigned` (`rope_theta=1e7` written as `10000000.0` by Python configs) without throwing invalid argument errors.
+2. `runtime/metal/MetalBackend.mm`: In `wrapSharedMemory`, throw `MetalAllocationError` rather than `MetalBackendError` on zero-copy mapping refusal, enabling driver allocation retries.
+3. `server/runtime.py`: Isolate crash-trace diagnostic dumps in `try...except Exception: pass` inside `_begin_generation_failure` so diagnostic failures never block request completion or process teardown.
+4. `server/backend.py`: Track engine restarts in `_cache_status` so status responses from crashed/replaced engines are immediately invalidated.
+5. `server/schema_validation.py`: Preserved bounded regular expression evaluation across `evolve` on schemas with nested `$schema` dialect declarations.
+
+## Pre-Compiled Sampling & Constrained Policy Pipelines (2026-10-02)
+
+Metal compute pipeline state creation (`newComputePipelineStateWithFunction:error:`) compiles MSL shader bytecode into hardware machine code for the Apple Silicon GPU execution cores. Previously, policy-conditioned kernels (`decode_sample_top32_sharded`, `decode_sample_top32_probs`, `decode_sample_sparse_draw`, `decode_sample_sparse_top1`, `decode_sample_top32_sharded_batch`, `decode_sample_top32_probs_batch`) were compiled lazily upon first invocation.
+- On the first sampled ($T > 0$) request or tool-calling request, this lazy JIT compilation caused a 200–400 ms latency spike on Token 1.
+- Added `MetalBackend::preparePipeline(name)` and wired `preparePolicyPipelines()` directly into `Runtime::Impl` initialization, warming up all sampling pipelines at engine startup.
+- Eliminates first-turn jitter on agent reasoning and structured sampling turns.
+
+## Probability-Gated Speculative Early Exit in MTP Chaining (2026-10-02)
+
+MTP draft chaining in `Qwen4ExpTarget.cpp` previously executed sequential GPU `step()` calls up to `maxDrafts` (2–5) even when cumulative chain confidence had already collapsed below the acceptance threshold ($C_{k-1} < 0.35$).
+- Because $C_k = C_{k-1} \times P(k) \le C_{k-1}$, drafting token $k$ when $C_{k-1} \times 0.85 < 0.35$ has almost zero chance of passing the chain threshold, resulting in 8–10 ms of wasted MTP GPU compute per discarded draft.
+- Added pre-step early-exit gating: `if (chainConfidence * earlyExitFactor < chainConfident) break;` (default `earlyExitFactor = 0.85`, overrideable via `SPLASH_MTP_EARLY_EXIT_P`).
+- Changed loop exit on low confidence from `return drafts;` to `break;`, ensuring that valid proposals are cleanly retained in `drafted` rather than silently dropped.
+- Speedup: Eliminates 1–3 wasted GPU forward dispatches per step on divergent text (+3% to +6% tok/s decode on difficult reasoning/coding prompts).
+
+## Vectorized Metal Buffer Argument Binding & Driver Sync Removal (2026-10-02)
+
+In `runtime/metal/MetalBackend.mm`:
+- Previously, `submitCommandAsync` iterated over `dispatch.buffers` calling `[encoder setBuffer:offset:atIndex:]` individually, resulting in 1,000+ dynamic Objective-C runtime dispatches (`objc_msgSend`) per token step on the CPU.
+- Batched contiguous buffer arguments using Apple Metal's native vectorized API `[encoder setBuffers:offsets:withRange:]`.
+- Removed `addScheduledHandler` device memory sampling (`observer->sampleDeviceMemory()`), eliminating mid-flight IOGPU driver synchronization stalls while commands are queued.
+- Speedup: Reduces host CPU dispatch latency per step from ~8 ms down to ~2–3 ms.
+
+## Defensive Non-Finite / Out-of-Vocabulary Logits Guard (2026-10-02)
+
+In `runtime/engine/Engine.cpp`:
+- If an FP16/BF16 underflow/overflow or NaN occurs during sampling (leaving sentinel `0xffffffff`), the engine previously inserted the invalid token into `active.exactTokens` and published it to the KV cache, triggering an out-of-bounds Metal memory crash or engine deadlock on the next embedding lookup.
+- Added explicit validation in `Engine::apply`: fails the specific lane cleanly with `model_result_invalid` ("model emitted out-of-vocabulary token") before cache publication or output emission, allowing peer requests in the batch to complete safely.
+- Added regression test `testOutOfVocabularyOutputFailsLaneOnly` in `dev/tests/engine/kv_first_engine_test.cpp`.
+
+## Dynamic Pipe Write Deadline Refresh for Deep Context Prompts (2026-10-02)
+
+High-context prompts (>28,000 tokens) produce RequestFrames >115 KB. Because macOS OS pipe capacity is 64 KiB (65,536 bytes), the initial `stream.write` fills the buffer, forcing subsequent chunks to wait for the native engine to drain the pipe. Previously, `MultiplexedRuntime._write_bytes` set a single static 5.0-second deadline across the entire multi-chunk frame. If the engine was busy executing a prefill chunk or SSD expert read, the timer expired, raising `EngineUnhealthy("native frame write timed out after 65536 bytes")` and triggering an unrecoverable process restart (`resident layers: 0 / 48`) with HTTP 503 `runtime_unavailable`.
+- Increased default `io_timeout` to 30.0s (and 60.0s in `server.py`), overrideable via `SLIPSTREAM_IO_TIMEOUT`.
+- In `_write_bytes`, refreshed `io_deadline = time.monotonic() + self._io_timeout` on each successful partial chunk write (`written > 0`). As long as the engine process actively consumes bytes, the write stream is healthy and permitted to complete without timing out.
+
+## Standalone GGUF Ingestion & Prebuilt Binary Packaging (2026-10-02)
+
+Integrated contributions from Mike Zinner (@mariadb-MikeZinner):
+- Converted `ngram.bin` directly from multi-shard GGUF by streaming `per_layer_token_embd.weight` 512k rows at a time, eliminating the need for reference packages or external files.
+- Automatically fetched tokenizer metadata from Hugging Face if missing.
+- Implemented standalone prebuilt packaging (`make package` + `.zip` repackaging) including bundled `libslipstream-dequant.dylib` compiled from `fast_dequant.c`.
+- Published Release `v26.10.4` on GitHub (`npanj/slipstream`) with one-line installer (`curl -fsSL .../install.sh | sh`).
+
 ## Graceful Output Budget Clamping for Context Ceilings (2026-09-30)
 
 When prompt tokens approach the context window ceiling (e.g. during lengthy agent tool loops), OpenAI `/v1/chat/completions` previously raised an unrecoverable HTTP 400 `context_length_exceeded` if `prompt_tokens + max_completion_tokens > max_context`. We added `--clamp-output-budget` (and `FrontendServer.clamp_output_budget`) to gracefully clamp the output budget to `max_context - prompt_tokens` and return `finish_reason: "length"`, aligning `/v1/chat/completions` with the graceful behavior of Anthropic `/v1/messages`.
@@ -514,3 +656,61 @@ To create a Swift version of Nitin's V3 model (`Swift-Qwen3.8-Flash-Next-V3`) de
 2. **Upstream Contribution Stance**:
    - Package Flash-Next architectural extensions, SSD expert streaming, and PLD speculative drafting as an upstream PR/patch to Incoai Splash.
 
+## 2026-10-04 — Restore Flash-Next MTP Speculative Drafting (`buffers.mtpEnabled`)
+
+1. **Restoration of `buffers.mtpEnabled`**:
+   - In `runtime/model/Runtime.mm`, restored `buffers.mtpEnabled = mtpDrafting()` in `encodeTargetVerifyBatchForward()`.
+   - In multi-architecture merge `cf4f91c`, the assignment had been omitted when introducing `isProposing`. Because `mtpEnabled` defaulted to `false`, `Qwen4ExpTarget::addVerify()` skipped both MTP draft passes and Prompt Lookup Decoding, dropping throughput to ~15 tok/s (0% acceptance rate).
+   - Restoring the flag re-engages the MTP draft head and Prompt Lookup engine for Flash-Next, returning decode speed to ~40–50+ tok/s.
+
+
+## 2026-10-04 — Separate Companion Repository for macOS Menu Bar App (`npanj/slipstream-menubar`)
+
+1. **Architecture & Separation of Concerns**:
+   - Chose a separate companion repository (`npanj/slipstream-menubar`) rather than a monorepo merge.
+   - Preserves Slipstream engine as a pure C++/Metal/Python inference runtime without entangling Xcode/Swift build systems or CI runners.
+   - Enables independent release cadence for macOS UI features without incrementing engine semantic versions.
+2. **Attribution & Provenance**:
+   - Preserved all 40+ original git commits from Mike Zinner's repository (`mzinner/slipstream-menubar-item`) so full commit history and authorship are intact.
+   - Prominently credited Mike Zinner as creator and lead author in `README.md`, release notes, and documentation.
+3. **Configuration Alignment**:
+   - Set `defaultReleaseRepository` to `npanj/slipstream`.
+   - Set app update repository to `npanj/slipstream-menubar`.
+   - Configured official model defaults to `nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF` and `nitinpanj/qwen38-flash-next-v3`.
+
+
+## 2026-10-04 — Official Homebrew Tap Creation (`npanj/homebrew-tap`)
+
+1. **Tap Architecture**:
+   - Repository: `https://github.com/npanj/homebrew-tap`.
+   - Distributes `Formula/slipstream.rb` for the inference engine CLI and `Casks/slipstream-menubar.rb` for the macOS GUI app.
+   - Enforces `depends_on arch: :arm64` and `depends_on macos: :sequoia`.
+2. **Installation Simplicity**:
+   - Users can install the GUI menubar app with `brew install --cask npanj/tap/slipstream-menubar`.
+   - Users can install the engine CLI with `brew install npanj/tap/slipstream`.
+   - Zero external maintainer approval bottleneck; instant updates upon GitHub release tagging.
+
+## 2026-10-04 — Application Renaming to "Slipstream" & Gatekeeper Quarantine Automation
+
+1. **Renaming to "Slipstream" (`Slipstream.app`)**:
+   - Renamed user-facing and application bundle identity from "Slipstream Menubar" to simply "Slipstream" (`Slipstream.app`).
+   - Cleaned up build targets, packaging scripts, and plist identifiers across `npanj/slipstream-menubar`.
+2. **Gatekeeper Unverified Malware Warning Resolution**:
+   - Cause: macOS Gatekeeper marks files downloaded via browsers/curl/Homebrew with extended attribute `com.apple.quarantine`. When code is signed ad-hoc rather than with a paid Apple Developer certificate ($99/yr), macOS blocks execution with an unverified malware dialogue.
+   - Solution:
+     - For local installs: cleared attribute via `xattr -dr com.apple.quarantine "/Applications/Slipstream.app"`.
+     - For Homebrew Cask installs: embedded declarative `postflight_steps` executing `run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "Slipstream.app"], base: :appdir, must_succeed: false` in both `Casks/slipstream.rb` and `Casks/slipstream-menubar.rb`.
+     - Homebrew will now strip the quarantine attribute automatically during installation, allowing the app to open without Gatekeeper blocks.
+
+## 2026-10-04 — Developer Workspace Integration & Dynamic Local Model Discovery
+
+1. **Source Checkout Mode Integration**:
+   - Configured `menubar.json` with `useCheckout: true` pointing to local developer workspace `/Users/nitin/Documents/shared-with-google-drive/model-serving/slipstream`.
+   - Starts and stops run through the developer `slipstream` launcher, immediately executing local code iterations (Metal shaders, C++ engine, Python server).
+2. **Dynamic Local Model Discovery**:
+   - Implemented `LocalModelScanner.scan()` in `ModelSetup.swift` to scan standard model roots (`~/models` and `~/.slipstream/models`) for valid models (`manifest.json`, `prepared/manifest.json`, and `.gguf`).
+   - Fixed `ModelSpec.folderURL` to preserve absolute / tilde paths rather than prepending `ModelStore.root`.
+3. **Interactive Menu Bar Model Switcher**:
+   - Added `Model` submenu directly to the macOS status item menu, showing all local models (`Swift-Qwen3.8-Flash-Next V3`, `Qwen3.8-Flash-Next V3`, `Swift-Qwen3.8-27B-Splash-HQ`) with checkmark state.
+   - Selecting a model updates `menubar.json` and automatically restarts active servers or prepares the engine for the next launch.
+   - Enhanced `ServerProcessInspector` to detect servers launched via `-m server.server` and active listening sockets via `lsof`.

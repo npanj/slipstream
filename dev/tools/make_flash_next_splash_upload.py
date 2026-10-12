@@ -109,9 +109,11 @@ def main() -> int:
     (STAGE / "config.json").write_text(json.dumps(config, indent=2) + "\n")
 
     validated = installer.validate_package_manifest(STAGE / "manifest.json")
-    print(f"staged {len(records)} artifacts "
-          f"({sum(r['size'] for r in records) / 2**30:.2f} GiB), "
-          f"manifest validated: {validated['model']}")
+    print(
+        f"staged {len(records)} artifacts "
+        f"({sum(r['size'] for r in records) / 2**30:.2f} GiB), "
+        f"manifest validated: {validated['model']}"
+    )
     return 0
 
 

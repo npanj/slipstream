@@ -74,7 +74,11 @@ class LauncherTests(unittest.TestCase):
 
     def test_pull_takes_a_repository_id_only(self):
         self.assertEqual(launcher.parse_args(["pull", MODEL_ID]).model, MODEL_ID)
-        for arguments in (["pull"], ["pull", "./folder"], ["pull", MODEL_ID, "--", "x"]):
+        for arguments in (
+            ["pull"],
+            ["pull", "./folder"],
+            ["pull", MODEL_ID, "--", "x"],
+        ):
             with (
                 self.subTest(arguments=arguments),
                 mock.patch("sys.stderr", io.StringIO()),
@@ -97,6 +101,58 @@ class LauncherTests(unittest.TestCase):
             command[-5:],
             ["--models", str(launcher.paths.MODELS), "--model", MODEL_ID, "prepare"],
         )
+
+    def test_pull_check_asks_without_downloading(self):
+        for options, tail in (
+            (["--check"], ["--model", MODEL_ID, "check"]),
+            (["--check", "--json"], ["--model", MODEL_ID, "check", "--json"]),
+        ):
+            args = launcher.parse_args(["pull", MODEL_ID, *options])
+            with (
+                self.subTest(options=options),
+                mock.patch.object(launcher.paths, "PACKAGED", True),
+                mock.patch.object(launcher.os, "execv") as execute,
+            ):
+                launcher.pull(args)
+            self.assertEqual(execute.call_args.args[1][-len(tail) :], tail)
+        with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+            launcher.parse_args(["pull", MODEL_ID, "--json"])
+
+    def test_serve_keep_gguf(self):
+        args = launcher.parse_args(["serve", "--model", MODEL_ID, "--keep-gguf"])
+        self.assertTrue(args.keep_gguf)
+
+    def test_detect_model_format_and_arch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            td = Path(temp_dir)
+            # 1. Package with manifest.json
+            (td / "manifest.json").write_text("{}")
+            self.assertEqual(
+                launcher._detect_model_format_and_arch(td), ("package", None)
+            )
+            (td / "manifest.json").unlink()
+
+            # 2. Package with prepared/manifest.json
+            (td / "prepared").mkdir()
+            (td / "prepared/manifest.json").write_text("{}")
+            self.assertEqual(
+                launcher._detect_model_format_and_arch(td), ("package", None)
+            )
+            (td / "prepared/manifest.json").unlink()
+            (td / "prepared").rmdir()
+
+            # 3. MLX with config.json (qwen38)
+            (td / "model.safetensors").write_bytes(b"\0" * 16)
+            (td / "config.json").write_text(json.dumps({"num_hidden_layers": 64}))
+            self.assertEqual(
+                launcher._detect_model_format_and_arch(td), ("mlx", "qwen38")
+            )
+
+            # 4. MLX with config.json (qwen4exp)
+            (td / "config.json").write_text(json.dumps({"model_type": "qwen4exp"}))
+            self.assertEqual(
+                launcher._detect_model_format_and_arch(td), ("mlx", "qwen4exp")
+            )
 
     def test_size_validation(self):
         for value in ("1G", "1GB", "1GiB", "1073741824"):
@@ -252,9 +308,12 @@ class LauncherTests(unittest.TestCase):
                         self.assertEqual(
                             launcher.main(["serve", "--model", MODEL_ID]), 1
                         )
-                    self.assertEqual(
+                    self.assertIn(
                         error.getvalue(),
-                        "error: Slipstream v2 is already serving; stop it with Ctrl+C first\n",
+                        (
+                            "error: Slipstream is already serving; stop it with Ctrl+C first\n",
+                            "error: Slipstream v2 is already serving; stop it with Ctrl+C first\n",
+                        ),
                     )
                     self.assertEqual(lock_path.read_bytes(), content)
                     install.assert_not_called()
@@ -271,7 +330,15 @@ class LauncherTests(unittest.TestCase):
                 mock.patch("sys.stdout", io.StringIO()),
             ):
                 launcher.main(
-                    ["serve", "--model", MODEL_ID, "--host", "0.0.0.0", "--port", "8123"]
+                    [
+                        "serve",
+                        "--model",
+                        MODEL_ID,
+                        "--host",
+                        "0.0.0.0",
+                        "--port",
+                        "8123",
+                    ]
                 )
             probe = factory.return_value.__enter__.return_value
             probe.bind.assert_called_once_with(("0.0.0.0", 8123))
@@ -388,6 +455,74 @@ class LauncherTests(unittest.TestCase):
                 fcntl.flock(released, fcntl.LOCK_EX | fcntl.LOCK_NB)
         install.assert_not_called()
         execute.assert_not_called()
+
+    def serve_gguf(self, model_root, *options, model=MODEL_ID):
+        """Serve a GGUF model; returns the converter's command, or None if it did not run."""
+        with (
+            tempfile.TemporaryDirectory() as runtime,
+            mock.patch.object(launcher, "RUNTIME_DIR", Path(runtime)),
+            mock.patch.object(launcher.socket, "socket"),
+            mock.patch.object(launcher.catalog, "spawn_refresh"),
+            mock.patch.object(launcher, "_ensure_installed"),
+            mock.patch.object(
+                launcher.model_artifacts, "installed_root", return_value=model_root
+            ),
+            mock.patch.object(
+                launcher.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as run,
+            mock.patch.object(launcher.os, "execve"),
+            mock.patch("sys.stdout", io.StringIO()),
+        ):
+            launcher.main(["serve", "--model", model, *options])
+        return run.call_args.args[0] if run.called else None
+
+    def gguf_folder(self, root, prepared=False):
+        (root / "MTP").mkdir(parents=True)
+        (root / "Model-00001-of-00001.gguf").write_bytes(b"GGUF")
+        (root / "MTP/mtp-shared-Q4_K_M.gguf").write_bytes(b"GGUF")
+        (root / launcher.model_artifacts.GGUF_MARKER).write_text(
+            json.dumps({"model": MODEL_ID, "revision": "a" * 40, "downloaded": True})
+        )
+        if prepared:
+            (root / "prepared/target").mkdir(parents=True)
+            (root / "prepared/manifest.json").write_text("{}")
+            (root / "prepared/target/layer-0.bin").write_bytes(b"")
+        return root
+
+    def test_store_gguf_model_is_used_up_while_preparing_unless_kept(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.gguf_folder(Path(temporary) / "model")
+            command = self.serve_gguf(root)
+            self.assertIn("--consume-source", command)
+            self.assertEqual(
+                command[command.index("--output") + 1], str(root / "prepared")
+            )
+            self.assertNotIn("--consume-source", self.serve_gguf(root, "--keep-gguf"))
+
+    def test_prepared_store_gguf_model_drops_the_files_left_behind(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.gguf_folder(Path(temporary) / "model", prepared=True)
+            self.assertIsNone(self.serve_gguf(root, "--keep-gguf"))
+            self.assertTrue((root / "Model-00001-of-00001.gguf").exists())
+            self.assertIsNone(self.serve_gguf(root))
+            self.assertEqual(list(root.rglob("*.gguf")), [])
+            self.assertTrue((root / "prepared/manifest.json").exists())
+
+    def test_a_folder_of_the_users_own_is_never_used_up(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = self.gguf_folder(Path(temporary) / "mine")
+            command = self.serve_gguf(folder, model=str(folder))
+            self.assertNotIn("--consume-source", command)
+            self.assertTrue((folder / "Model-00001-of-00001.gguf").exists())
+
+    def test_a_prepared_folder_without_its_gguf_files_still_serves(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = self.gguf_folder(Path(temporary) / "mine", prepared=True)
+            for shard in folder.rglob("*.gguf"):
+                shard.unlink()
+            self.assertIsNone(self.serve_gguf(folder, model=str(folder)))
 
 
 if __name__ == "__main__":

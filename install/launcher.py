@@ -47,7 +47,7 @@ def _request_json(path, timeout=2):
     except urllib.error.HTTPError as error:
         if error.code == 401:
             raise LauncherError(
-                "Slipstream v2 authentication failed; set SLIPSTREAM_V2_API_KEY to the server's key"
+                "Slipstream authentication failed; set SLIPSTREAM_API_KEY to the server's key"
             ) from None
         return None
     except (
@@ -102,29 +102,149 @@ def pull(args):
         str(paths.MODELS),
         "--model",
         args.model,
-        "prepare",
     ]
+    if getattr(args, "check", False):
+        command += ["check", "--json"] if getattr(args, "json", False) else ["check"]
+    else:
+        command.append("prepare")
     # Replaced rather than waited for, so an interrupt (Ctrl+C, or a frontend
     # stopping the download) reaches the download itself, which keeps its
     # partial files for the next pull to resume.
     os.execv(command[0], command)
 
 
-def _prepare_gguf(model_path):
-    """Convert a folder of GGUF shards into model_path/prepared, once."""
-    prepared_dir = model_path / "prepared"
-    if not model_artifacts.gguf_prepared(model_path):
-        print(f"[Slipstream] Preparing GGUF model from {model_path}...", flush=True)
-        # A separate process: install/models.py, imported above as
-        # `models`, would shadow the repo's models/ package here.
-        converter = ROOT / "models/qwen4exp/tools/convert_qwen4exp_gguf.py"
-        prepared = subprocess.run(
-            [str(paths.PYTHON), "-u", str(converter),
-             "--model-dir", str(model_path), "--output", str(prepared_dir)]
+def _detect_model_format_and_arch(model_path: Path):
+    """Detect format ('gguf', 'mlx', 'package') and architecture ('qwen4exp', 'qwen38')."""
+    if model_path.is_dir():
+        if (model_path / "manifest.json").is_file():
+            return "package", None
+        if (model_path / "prepared/manifest.json").is_file():
+            return "package", None
+        gguf_files = sorted(p for p in model_path.glob("*.gguf") if p.is_file())
+        if gguf_files:
+            try:
+                with open(gguf_files[0], "rb") as f:
+                    header = f.read(model_artifacts.GGUF_HEADER_BYTES)
+                arch = model_artifacts.gguf_architecture(header)
+            except Exception:
+                arch = None
+            if arch == "qwen4exp":
+                return "gguf", "qwen4exp"
+            return "gguf", "qwen38"
+        safetensors = sorted(p for p in model_path.glob("*.safetensors") if p.is_file())
+        if safetensors:
+            config_file = model_path / "config.json"
+            if config_file.is_file():
+                try:
+                    config = json.loads(config_file.read_text())
+                    if (
+                        config.get("model_type") == "qwen4exp"
+                        or config.get("num_hidden_layers") == 48
+                    ):
+                        return "mlx", "qwen4exp"
+                except Exception:
+                    pass
+            return "mlx", "qwen38"
+    elif model_path.is_file() and model_path.name.endswith(".gguf"):
+        try:
+            with open(model_path, "rb") as f:
+                header = f.read(model_artifacts.GGUF_HEADER_BYTES)
+            arch = model_artifacts.gguf_architecture(header)
+        except Exception:
+            arch = None
+        if arch == "qwen4exp":
+            return "gguf", "qwen4exp"
+        return "gguf", "qwen38"
+    return "unknown", None
+
+
+def _prepare_model(model_path: Path, consume_source: bool = False):
+    """Convert GGUF shards or MLX checkpoints into model_path/prepared, once."""
+    if model_path.is_dir():
+        prepared_dir = model_path / "prepared"
+    else:
+        prepared_dir = model_path.parent / (model_path.stem + "-prepared")
+
+    manifest = prepared_dir / "manifest.json"
+    layer0 = prepared_dir / "target/layer-0.bin"
+    if manifest.is_file() and layer0.is_file():
+        if consume_source and model_path.is_dir():
+            model_artifacts.remove_gguf_source(model_path)
+        return prepared_dir
+
+    kind, arch = _detect_model_format_and_arch(model_path)
+    if kind == "package":
+        return (
+            model_path
+            if (model_path / "manifest.json").is_file()
+            else (model_path / "prepared")
         )
+
+    if kind == "gguf":
+        print(
+            f"[Slipstream] Preparing GGUF model ({arch or 'qwen'}) from {model_path}...",
+            flush=True,
+        )
+        if arch == "qwen4exp":
+            converter = ROOT / "models/qwen4exp/tools/convert_qwen4exp_gguf.py"
+        else:
+            converter = ROOT / "models/qwen38/tools/convert_qwen38_gguf.py"
+
+        cmd = [
+            str(paths.PYTHON),
+            "-u",
+            str(converter),
+            "--model-dir",
+            str(model_path),
+            "--output",
+            str(prepared_dir),
+        ]
+        if consume_source:
+            cmd.append("--consume-source")
+        prepared = subprocess.run(cmd)
         if prepared.returncode != 0:
             raise LauncherError(f"preparing {model_path} failed; see the output above")
-    return prepared_dir
+        if consume_source and model_path.is_dir():
+            model_artifacts.remove_gguf_source(model_path)
+        return prepared_dir
+
+    if kind == "mlx":
+        print(f"[Slipstream] Preparing MLX checkpoint from {model_path}...", flush=True)
+        if arch == "qwen4exp":
+            converter = ROOT / "models/qwen4exp/tools/convert_qwen4exp.py"
+            cmd = [
+                str(paths.PYTHON),
+                "-u",
+                str(converter),
+                str(model_path),
+                "--output",
+                str(prepared_dir),
+            ]
+        else:
+            converter = ROOT / "models/qwen38/tools/convert_qwen38_mlx.py"
+            cmd = [
+                str(paths.PYTHON),
+                "-u",
+                str(converter),
+                "--source",
+                str(model_path),
+                "--output",
+                str(prepared_dir),
+            ]
+        prepared = subprocess.run(cmd)
+        if prepared.returncode != 0:
+            raise LauncherError(
+                f"preparing MLX {model_path} failed; see the output above"
+            )
+        return prepared_dir
+
+    raise LauncherError(
+        f"Directory or file {model_path} does not contain supported model files (GGUF, MLX, or manifest.json)"
+    )
+
+
+def _prepare_gguf(model_path, consume_source=False):
+    return _prepare_model(model_path, consume_source=consume_source)
 
 
 def _serve_lock_owner(lock):
@@ -158,7 +278,7 @@ def serve(args):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise LauncherError(
-                f"Slipstream v2 is already serving{_serve_lock_owner(lock)}; "
+                f"Slipstream is already serving{_serve_lock_owner(lock)}; "
                 "stop it with Ctrl+C first"
             ) from None
         port = getattr(args, "port", None) or PORT
@@ -184,24 +304,29 @@ def serve(args):
                 ) from None
         model_str = args.model
         model_path = Path(model_str).expanduser()
-        if model_path.is_dir():
-            gguf_files = list(model_path.glob("*.gguf"))
-            if gguf_files:
-                root = _prepare_gguf(model_path)
+        if model_path.exists() or model_str.startswith(("/", "./", "../", "~")):
+            # A folder of the user's own is never used up; only the model store's
+            # downloads, which can be fetched again, are.
+            kind, arch = _detect_model_format_and_arch(model_path)
+            if kind == "package":
+                root = (
+                    model_path
+                    if (model_path / "manifest.json").exists()
+                    else (model_path / "prepared")
+                )
                 model_id = f"local/{model_path.name}"
-            elif (model_path / "manifest.json").exists():
-                root = model_path
-                model_id = f"local/{model_path.name}"
-            elif (model_path / "prepared/manifest.json").exists():
-                root = model_path / "prepared"
+            elif kind in ("gguf", "mlx"):
+                root = _prepare_model(model_path, consume_source=False)
                 model_id = f"local/{model_path.name}"
             else:
-                raise LauncherError(f"Directory {model_path} does not contain GGUF files or a manifest.json")
+                raise LauncherError(
+                    f"Directory or file {model_path} does not contain supported model files (GGUF, MLX, or manifest.json)"
+                )
         else:
             _ensure_installed(args.model)
             root = model_artifacts.installed_root(paths.MODELS, args.model)
             if model_artifacts.is_gguf_installation(root):
-                root = _prepare_gguf(root)
+                root = _prepare_model(root, consume_source=not args.keep_gguf)
             model_id = args.model
         command = [
             str(paths.PYTHON),
@@ -246,7 +371,7 @@ def coding_client(args):
     snapshot = _running_status()
     if snapshot is None:
         raise LauncherError(
-            "No ready Slipstream v2 server. Run 'slipstream-v2 serve --model <HF_REPO_ID>' "
+            "No ready Slipstream server. Run './slipstream serve --model <HF_REPO_ID>' "
             "in another terminal first."
         )
     catalog = _request_json("/v1/models")
@@ -255,13 +380,13 @@ def coding_client(args):
         not isinstance(models, list)
         or len(models) != 1
         or not isinstance(models[0], dict)
-        or models[0].get("owned_by") not in ("slipstream-v2", "slipstream", "splash")
+        or models[0].get("owned_by") not in ("slipstream", "slipstream-v2", "splash")
     ):
-        raise LauncherError("Could not identify the local Slipstream v2 server")
+        raise LauncherError("Could not identify the local Slipstream server")
     model, context = models[0].get("id"), snapshot.get("maximum_context_tokens")
     if type(context) is not int or context <= 0:
         raise LauncherError(
-            "Slipstream v2 is running but its context limit is not available yet; wait and retry"
+            "Slipstream is running but its context limit is not available yet; wait and retry"
         )
     command, environment = clients.command(
         args.command,
@@ -281,7 +406,7 @@ def coding_client(args):
         )
     elif args.command == "codex":
         print(
-            "Codex hosted WebSearch is disabled: Slipstream v2 does not provide "
+            "Codex hosted WebSearch is disabled: Slipstream does not provide "
             "OpenAI's search service. Local tools and MCP are unchanged.",
             flush=True,
         )
@@ -328,8 +453,8 @@ def _parse_max_context(value):
 
 def _version():
     if not paths.PACKAGED:
-        return "Slipstream v2 (source checkout)"
-    return "Slipstream v2 " + str(
+        return "Slipstream (source checkout)"
+    return "Slipstream " + str(
         json.loads((paths.ROOT / "release.json").read_text())["version"]
     )
 
@@ -351,7 +476,7 @@ def parse_args(argv=None):
     elif "--" in argv:
         boundary = argv.index("--")
         argv, client_args = argv[:boundary], argv[boundary + 1 :]
-    parser = argparse.ArgumentParser(prog="slipstream-v2", description=__doc__)
+    parser = argparse.ArgumentParser(prog="slipstream", description=__doc__)
     parser.add_argument("--version", action="version", version=_version())
     commands = parser.add_subparsers(dest="command", required=True)
     server = commands.add_parser("serve", help="run the local server; Ctrl+C stops it")
@@ -404,6 +529,12 @@ def parse_args(argv=None):
         help=f"HTTP serving port (default: {PORT})",
     )
     server.add_argument("--no-webui", action="store_true", help="disable the chat page")
+    server.add_argument(
+        "--keep-gguf",
+        action="store_true",
+        help="keep a downloaded GGUF model's files after preparing it (needs about twice "
+        "the model's size on disk); by default they are used up while preparing",
+    )
     puller = commands.add_parser(
         "pull", help="download a model from Hugging Face without serving it"
     )
@@ -411,7 +542,15 @@ def parse_args(argv=None):
         "model",
         type=model_artifacts.parse_repo_id,
         metavar="OWNER/REPO",
-        help="Hugging Face repository: a model package, or Qwen3.8-Flash-Next GGUF files",
+        help="Hugging Face repository: a model package, or GGUF files",
+    )
+    puller.add_argument(
+        "--check",
+        action="store_true",
+        help="only say whether the model can be pulled and served, and its size; download nothing",
+    )
+    puller.add_argument(
+        "--json", action="store_true", help="with --check: print one JSON object"
     )
     for name in clients.INSTALL_URLS:
         commands.add_parser(name, help=f"connect {name} to the running server")
@@ -419,6 +558,8 @@ def parse_args(argv=None):
     if args.command == "serve" and args.api_key is not None:
         if not args.api_key or any(ord(c) <= 32 or ord(c) >= 127 for c in args.api_key):
             parser.error("API key must contain only visible ASCII characters")
+    if args.command == "pull" and args.json and not args.check:
+        parser.error("--json is only supported with --check")
     if client_args and args.command in ("serve", "pull"):
         parser.error("arguments after -- are only supported for coding clients")
     args.client_args = client_args

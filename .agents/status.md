@@ -1,33 +1,43 @@
 # Status — Slipstream (handoff)
 
-**Updated:** 2026-10-01 13:17 PDT by antigravity.
-**Branch:** `main` (workspace `slipstream-v2` symlinked to `slipstream`).
+**Updated:** 2026-10-04 21:15 PDT by antigravity.
+**Branch:** `main` (canonical workspace `model-serving/slipstream`, release `v26.10.4`, app `npanj/slipstream-menubar` `v26.10.7`, tap `npanj/homebrew-tap`).
 
 ## In one line
 
-Refactored Reddit submission (`docs/REDDIT_POST.md` and Desktop pack): zero links in opening paragraph, converted all references to clean markdown hyperlinks, removed raw URLs to avoid automated spam filters. Server is stopped with 50+ GiB free RAM.
+Configured running `Slipstream.app` to point directly to the local developer workspace with checkout mode (`useCheckout: true`), implemented dynamic local model discovery (`~/models`), and integrated a macOS menu bar `Model` switcher for one-click model swapping and server controls.
+
 
 ---
 
 ## How to use it
 
 ```zsh
-# Serve Swift V3 directly pointing at GGUF directory:
+# Single command to install BOTH Menu Bar App & CLI Engine:
+brew install --cask npanj/tap/slipstream
+
+# Install Slipstream CLI only:
+brew install npanj/tap/slipstream
+
+# Or one-line curl install of prebuilt binary:
+curl -fsSL https://raw.githubusercontent.com/npanj/slipstream/main/install.sh | sh
+
+# Serve Swift-Qwen3.8-Flash-Next-V3 (local directory or Hugging Face repo):
 ./slipstream serve --model ~/models/swift-qwen38-flash-next-v3 --port 8090
+./slipstream serve --model nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF --port 8090
 
-# Or serve Nitin's daily V3 model:
-./slipstream serve --model ~/models/qwen38-flash-next-v3 --port 8090
+# Serve 27B models (GGUF folder, single .gguf file, MLX safetensors, or prepared package):
+./slipstream serve --model ~/models/swift-qwen38-27b-splash-hq --port 8090
+./slipstream serve --model /path/to/qwen38-27b.gguf --port 8090
+./slipstream serve --model /path/to/mlx-27b-directory --port 8090
 
-# Backward compatibility forwarders also work:
+# Inspect a remote Hugging Face repository before downloading:
+./slipstream pull nitinpanj/qwen38-flash-next-v3 --check
+./slipstream pull nitinpanj/qwen38-flash-next-v3 --check --json
+
+# Backward compatibility forwarders work identically:
 ./slipstream-v2 serve --model ~/models/swift-qwen38-flash-next-v3 --port 8090
 ./splash serve --model ~/models/swift-qwen38-flash-next-v3 --port 8090
-
-# Run guarded A/B benchmark comparing Slipstream vs llama.cpp:
-python3 dev/tools/compare_slipstream_vs_llamacpp.py --model-dir ~/models/swift-qwen38-flash-next-v3
-
-# View publication materials:
-cat docs/REDDIT_POST.md
-open docs/context_scaling_and_benchmark.png
 ```
 
 ---
@@ -61,23 +71,6 @@ Completed across 145 paired items (seed 1234, temperature 0.0), run sequentially
 | **HumanEval** | 25 | **92.0% (23/25)** | **92.0% (23/25)** | 0.0% | 40.6 tok/s | 40.6 tok/s |
 | **Hard Systems & Logic**| 5 | **100.0% (5/5)** | **100.0% (5/5)** | 0.0% | 39.2 tok/s | 39.2 tok/s |
 | **TOTAL / OVERALL** | **145** | **70.3% (102/145)** | **67.6% (98/145)** | **+2.8%** | **44.4 tok/s** | **43.9 tok/s** |
-
----
-
-## Context Scaling: Telemetry to 130k Tokens
-
-Empirical telemetry across 3,086 live requests:
-
-| Context Window | Live Runs | Avg Decode | Median Decode | Peak Decode | Avg TTFT |
-|---|---:|---:|---:|---:|---:|
-| **< 1k** | 314 | **41.5 tok/s** | 41.9 tok/s | 59.8 tok/s | 2.16 s |
-| **1k – 4k** | 21 | **41.0 tok/s** | 42.5 tok/s | 64.5 tok/s | 5.26 s |
-| **4k – 8k** | 58 | **43.6 tok/s** | 43.2 tok/s | 67.2 tok/s | 7.36 s |
-| **8k – 16k** | 117 | **43.6 tok/s** | 44.6 tok/s | 58.2 tok/s | 7.91 s |
-| **16k – 32k** | 562 | **38.2 tok/s** | 40.9 tok/s | 58.0 tok/s | 13.59 s |
-| **32k – 64k** | 1,029 | **35.0 tok/s** | 37.5 tok/s | 55.6 tok/s | 13.24 s |
-| **64k – 96k** | 650 | **32.4 tok/s** | 34.7 tok/s | 53.9 tok/s | 12.81 s |
-| **96k – 130k** | 364 | **32.9 tok/s** | 33.3 tok/s | 43.8 tok/s | 7.95 s |
 
 ---
 

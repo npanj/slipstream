@@ -43,12 +43,17 @@ def _read_key(path):
 def load_thinking_key(path=None):
     if path is None:
         v2_path = Path.home() / "Library/Application Support/Slipstream-v2/thinking.key"
-        slipstream_path = Path.home() / "Library/Application Support/Slipstream/thinking.key"
+        slipstream_path = (
+            Path.home() / "Library/Application Support/Slipstream/thinking.key"
+        )
         splash_path = Path.home() / "Library/Application Support/Splash/thinking.key"
         path = (
-            v2_path if v2_path.exists()
-            else slipstream_path if slipstream_path.exists()
-            else splash_path if splash_path.exists()
+            v2_path
+            if v2_path.exists()
+            else slipstream_path
+            if slipstream_path.exists()
+            else splash_path
+            if splash_path.exists()
             else v2_path
         )
     else:

@@ -58,6 +58,7 @@
 - [x] Standalone CPU Prompt Lookup engine (`runtime/ops/PromptLookup.hpp`, 49.1 ns/query, 0 allocations)
 - [x] Hybrid MTP + Prompt Lookup fallback for Swift-V3 on low-confidence tokens (integrated in `Qwen4ExpTarget.cpp`)
 - [x] Full CPU test suite verification (`make test-engine-cpu` 18/18 targets PASS)
+- [x] Upstream Contribution: Zero-Allocation Prompt Lookup Drafter submitted as PR incoai/splash#300 (resolves #186, builds on #194; 49.1 ns/query, 0 heap allocations, ASAN/UBSAN/TSAN clean)
 - [x] Prompt Lookup Decoding engine integrated into Swift-27B (`splash2/runtime/model/Runtime.mm`, bypasses DFlash on n-gram match >= 2 tokens; installed to Splash-Q8 and pushed to `fork/q8`)
 - [x] Updated Work Hub (`~/Documents/shared-with-google-drive/INDEX.html`) and `~/.omp/agent/models.yml` to minimum medium thinking (`--thinking=medium`) for Swift-27B and Swift-V3
 - [x] Grammar-Pruned Speculative Verification in constrained decoding (`Runtime.mm`, 8.5x tool-calling speedup: 5.6 -> 49.6 tok/s)
@@ -163,9 +164,122 @@
   - [x] Compiled head-to-head comparison tables against llama.cpp fork (1.76x speedup) and Swift KV-sparsity gains (+8.6% GPQA Diamond, 70.3% overall)
   - [x] Authored complete, focused Reddit release post draft in `docs/REDDIT_POST.md` and conversation artifact
 
+## Release v26.10.4 & Community PR Integration
+
+- [x] Integrated PRs #3, #4, #5 from Reddit contributor Mike Zinner (@mariadb-MikeZinner):
+  - [x] Bundled `fast_dequant.c` compilation into `build/libslipstream-dequant.dylib` (eliminates hardcoded `libggml-base` path)
+  - [x] Fixed FP16->FP32 dequantization bit-offsets in `fast_dequant.c`
+  - [x] Standalone GGUF conversion (`convert_qwen4exp_gguf.py`) without requiring reference `ngram.bin`
+  - [x] Network serving with `--host` parameter (`0.0.0.0`) and `serve.lock` tracking
+  - [x] Direct Hub ID serving (`slipstream serve --model <hub_id>`) and pre-download (`slipstream pull`)
+- [x] Diagnosed and fixed `runtime_unavailable` (503) error on deep contexts:
+  - [x] Identified 64 KiB macOS pipe buffer limit causing `_write_bytes` to time out on >28k token prompts
+  - [x] Dynamically refreshed `io_deadline` on active forward progress (`written > 0`) in `server/runtime.py`
+  - [x] Configured 60s timeout in `server/server.py` (`NATIVE_IO_TIMEOUT`)
+  - [x] Verified full server suite (171/171 tests pass) and runtime tests (36/36 pass)
+- [x] Standalone Release Packaging & GitHub Publication:
+  - [x] Packaged full distribution `slipstream-26.10.4-macos26-arm-64bit.zip` with bundled python, engine, dequantizer dylib, and converters
+  - [x] Generated `SHA256SUMS` and verified smoke test cleanly
+  - [x] Published Release `v26.10.4` on GitHub (`https://github.com/npanj/slipstream/releases/tag/v26.10.4`)
+  - [x] Closed Issues #1 and #2, and merged PRs #3, #4, #5 with full attribution
+- [x] Updated documentation and installer:
+  - [x] Updated `install.sh` default repository to `npanj/slipstream`
+  - [x] Updated `README.md` with one-line curl install and direct model serving
+  - [x] Synced rich tutorial documentation in `docs/tutorial.html`
+- [x] Clean directory restructuring & Work Hub:
+  - [x] Deleted duplicate checkouts `slipstream-orig` and `slipstream-gguf`
+  - [x] Consolidated to canonical `model-serving/slipstream` (symlinked `slipstream-v2 -> slipstream`)
+  - [x] Consolidated Work Hub (`INDEX.html`): removed duplicate cards (173, 196, 214) and moved Slipstream to position #0 (`bucket: "🟢 live"`)
+  - [x] Provided Swift V3 default with full options for Original Base V3 serving
+  - [x] Synced `MAIN.md` and `PROJECT_INDEX.json`; confirmed zero drift on `hub-sync.sh`
+  - [x] Verified local serve on port 8090 with curl completion (46.3 tok/s decode); server stopped cleanly with 50+ GiB free RAM
+
+## Quality & Speed Enhancements (Selective Upstream & Engine Optimizations)
+
+- [x] **Speculative Early-Exit Gating**: Added pre-step early-exit gating in `models/qwen4exp/Qwen4ExpTarget.cpp` (`SPLASH_MTP_EARLY_EXIT_P=0.85`), preventing doomed MTP GPU passes when chain confidence cannot reach the acceptance threshold (+3% to +6% tok/s).
+- [x] **Vectorized Compute Buffer Binding**: Vectorized compute argument binding in `runtime/metal/MetalBackend.mm` with `setBuffers:offsets:withRange:`, eliminating ~1,000+ scalar Objective-C dispatches per step.
+- [x] **Driver Pipeline Stall Elimination**: Removed `addScheduledHandler` memory sampling in `MetalBackend.mm`, eliminating mid-flight IOGPU driver synchronization.
+- [x] **Defensive Out-of-Vocabulary Logits Guard**: Hardened `runtime/engine/Engine.cpp` against non-finite (NaN/INF) logits emitting out-of-vocabulary sentinels (`0xffffffff`), failing the lane cleanly before KV cache publication or output.
+- [x] **Pre-Compiled Policy Pipelines**: Added `MetalBackend::preparePipeline` and wired `preparePolicyPipelines()` in `Runtime.mm` to warm up sampling and constrained decoding shaders at startup, eliminating the 200–400 ms first-token JIT spike.
+- [x] **Regression Coverage**: Added `testOutOfVocabularyOutputFailsLaneOnly` in `dev/tests/engine/kv_first_engine_test.cpp`, verified 21/21 CPU engine tests pass 100% green, and verified 171/171 Python server tests pass.
+
+## Native Qwen3.8-27B Port & Upstream Synchronization
+
+- [x] **Native 27B Architecture Integration**: Added layout, C++ weights loader, and execution plan for `Qwen3_8Layout` and `Qwen3_8Q8Layout` in `models/qwen38/` with clean architecture isolation (`check_architecture.py` PASS).
+- [x] **GGUF 27B Converter**: Created `models/qwen38/tools/convert_qwen38_gguf.py` supporting single-file .gguf, multi-shard GGUF, and `--consume-source` hole punching.
+- [x] **MLX 27B Converter**: Created `models/qwen38/tools/convert_qwen38_mlx.py` converting safetensors/MLX checkpoints into `splash-packed-q4`.
+- [x] **APFS Hole Punching (`F_PUNCHHOLE`)**: Integrated Darwin `fcntl(F_PUNCHHOLE)` into `package_format.py`, `sharded_gguf_reader.py`, `convert_qwen4exp_gguf.py`, and `convert_qwen38_gguf.py` to halve peak disk requirements during GGUF preparation.
+- [x] **Launcher Auto-Detection**: Implemented `_detect_model_format_and_arch` and `_prepare_model` in `install/launcher.py` to seamlessly route single `.gguf` files, GGUF folders, MLX folders, and pre-converted packages.
+- [x] **CLI Flag Enhancements**: Added `--keep-gguf` to `serve` and `--check` / `--json` to `pull`. Added full test suite in `dev/tests/engine/test_launcher.py`.
+- [x] **Upstream Fixes**: Ported finite whole-number float support in `ModelDescriptor.mm`, zero-copy retry via `MetalAllocationError` in `MetalBackend.mm`, crash-trace dump isolation in `server/runtime.py`, and status cache tracking on engine restarts in `server/backend.py`.
+- [x] **Verification**: All 21 CPU engine tests pass (`make test-engine-cpu`), model execution plans pass (`model-execution-plans`), all 171 server tests pass (`test_server.py`), and all 17 launcher tests pass (`test_launcher.py`).
+- [x] **Community PRs Merged & Credited**: Cleanly reviewed, validated, and merged PRs #7, #8, #9, and #10 by @mzinner.
+- [x] **GGUF Standardization**: Deprecated proprietary Splash package distribution on Hugging Face; standardized documentation and launcher on universal GGUF format with in-place APFS hole punching.
+- [x] **Synchronized with Origin**: Pushed all 14 commits to `origin/main` with 100% green CI and unit test suite.
+
+## MTP Restoration & Canonical Slipstream Naming Standardization (2026-10-04)
+
+- [x] **Flash-Next MTP Restore**: Restored `buffers.mtpEnabled = mtpDrafting()` in `runtime/model/Runtime.mm`, restoring 40–50+ tok/s decode performance (from 15 tok/s with 0% acceptance rate).
+- [x] **Canonical Naming Standardization**:
+  - [x] Converted `./slipstream` into the primary CLI executable launcher; made `./slipstream-v2` and `./splash` forwarders.
+  - [x] Updated Makefile targets: `TARGET := $(BUILD)/slipstream`, `LIB := $(BUILD)/slipstream.metallib`, with backward-compatibility alias rules and symlinks.
+  - [x] Updated C++ runtime: queue name `com.slipstream.memory-pressure`, metallib search order, usage string.
+  - [x] Standardized server internals: thread names, crash trace dumps, chat UI localStorage keys, model `"owned_by": "slipstream"`, keepalive string.
+  - [x] Updated all test assertions across `dev/tests/test_server.py` and `dev/tests/engine/` (417/417 tests pass; 171/171 server tests pass; 21/21 CPU engine targets pass).
+
+## Upstream PR #253 Evaluation & High-Leverage Borrowing (2026-10-04)
+
+- [x] **Upstream Analysis**: Analyzed all 72 changed files (+4,673 lines) in Jan Hilgard's PR #253 (`incoai/splash#253`), identifying key architectural differences (PR #253 requires 118 GB unified memory for M3 Ultra, while Slipstream runs on 64 GB via SSD expert streaming).
+- [x] **4-Pass Radix Block Selection**: Replaced 32-pass bitwise search and sequential tie loop in `models/qwen4exp/kernels/qsa_select.metal` with 4-pass 8-bit radix histogram selection and parallel chunk-wise tie resolution. Benchmarked 4.52x speedup on heavy ties (779.1 µs vs 3,523.9 µs) and 2.05x speedup on production blocks (379.3 µs vs 776.3 µs).
+- [x] **Verification**: All 5 reference test cases pass exact match in `qsa-select`, all 21 CPU engine targets pass (`make test-engine-cpu`), and all 171 server tests pass (`test_server.py`).
+
+## Layer-Ahead Prefill Prefetch & Upstream Alignment (2026-10-04)
+
+- [x] **Layer-Ahead Prefill Prefetch**: Implemented in `models/qwen4exp/Qwen4ExpTarget.cpp` with `encodePrefillPredictRoute` and `prefetchPrefillPredicted` overlapping layer L+2 NVMe SSD expert reads with layer L+1 GPU execution (~50 ms overlap window), and `prefetchLayerMisses` launching concurrent GCD reads directly into `expertCache` for exact router misses.
+- [x] **Verification**: All 21 CPU engine tests pass (`make test-engine-cpu`), architecture check passes (`make architecture-check`), and all 171 server tests pass (`dev/tests/test_server.py`).
+- [ ] **GPU Live-Row Speculative Pruning (PR #283)**: Evaluate upstream PR #283 draft verify live rows kernel for pruning doomed draft candidates before target verification.
 
 
+## macOS Menu Bar App Companion Repository & Community Adoption (2026-10-04)
 
+- [x] **Audit & Verification**: Cloned and audited Mike Zinner's native Swift/SwiftUI menubar app (`mzinner/slipstream-menubar-item`). Verified clean architecture, zero external dependencies, 92 passing unit tests (`make test`), and verified local `.app` compilation and ad-hoc code signing (`make app`).
+- [x] **Decoupled Companion Repository**: Created standalone repository `npanj/slipstream-menubar`, keeping the C++ inference engine codebase clean and free of Xcode/AppKit dependencies.
+- [x] **Full Commit History & Credits**: Preserved all 40+ original git commits from Mike Zinner, giving him full creator and co-author credits in `README.md`, docs, and release notes.
+- [x] **Configuration Alignment**: Pointed `defaultReleaseRepository` to `npanj/slipstream`, app update check to `npanj/slipstream-menubar`, and default models to `nitinpanj/*`.
+- [x] **Release Packaging**: Tagged and pushed `v26.10.6` to trigger GitHub Actions automated packaging of `.dmg`, `.zip`, checksums, and `install.sh`.
+- [x] **Slipstream Main Documentation**: Updated `npanj/slipstream/README.md` with a prominent "macOS Menu Bar App (GUI)" section with one-line install and creator credits.
 
+## Official Homebrew Tap Creation & Validation (2026-10-04)
+
+- [x] **Repository Creation**: Created public repository `npanj/homebrew-tap` configured with Homebrew formula and cask standards.
+- [x] **Cask Definition**: Added `Casks/slipstream-menubar.rb` for `v26.10.6` with SHA256 checksum and macOS Sequoia ARM64 constraints.
+- [x] **Formula Definition**: Added `Formula/slipstream.rb` for `v26.10.4` with automated unzipping, libexec placement, and symlinking to `bin/slipstream`.
+- [x] **Local Validation**: Tapped locally via `brew tap npanj/tap`, verified clean `brew info` (0 warnings, 0 errors), and verified checksum extraction with `brew fetch`.
+- [x] **Documentation**: Added Homebrew installation instructions to `npanj/slipstream/README.md`, `npanj/slipstream-menubar/README.md`, and `npanj/homebrew-tap/README.md`.
+- [x] **Slipstream App Rename & Gatekeeper Quarantine Resolution**:
+  - [x] Renamed application from "Slipstream Menubar" to "Slipstream" (`Slipstream.app`) across Makefile, build scripts, Info.plist, Swift codebase, and install scripts.
+  - [x] Resolved macOS Gatekeeper unverified malware warning by stripping `com.apple.quarantine` on local install and embedding `postflight_steps` with `xattr -dr com.apple.quarantine` in Homebrew casks.
+  - [x] Tagged and released `v26.10.7` on GitHub (`npanj/slipstream-menubar`) with DMG and ZIP artifacts.
+  - [x] Updated Homebrew tap (`npanj/homebrew-tap`) to `v26.10.7` with 100% clean `brew audit` (0 errors, 0 warnings).
+
+## Developer Checkout Mode & Local Model Discovery (2026-10-04)
+
+- [x] **Developer Checkout Configuration**:
+  - [x] Configured `menubar.json` with `useCheckout: true` pointing to `/Users/nitin/Documents/shared-with-google-drive/model-serving/slipstream`.
+  - [x] Verified `Slipstream.app` runs directly through local `./slipstream` launcher, enabling real-time local testing of C++, Metal, and Python modifications.
+- [x] **Dynamic Local Model Discovery**:
+  - [x] Implemented `LocalModelScanner.scan()` in `ModelSetup.swift` detecting local models in `~/models` and `~/.slipstream/models`.
+  - [x] Fixed `ModelSpec.folderURL` to preserve absolute and tilde paths instead of incorrectly appending `ModelStore.root`.
+  - [x] Added unit tests `testLocalModelFolderURL` and `testLocalModelScanner` in `CoreTests.swift` (94/94 tests pass).
+- [x] **macOS Menu Bar Model Switcher**:
+  - [x] Added dynamic `Model` submenu directly in the status item menu, listing all scanned local models (`Swift-Qwen3.8-Flash-Next V3`, `Qwen3.8-Flash-Next V3`, `Swift-Qwen3.8-27B-Splash-HQ`) with live checkmarks.
+  - [x] Added "Choose Folder…" open panel dialog for ad-hoc custom model directories.
+  - [x] Wired seamless model switching: updates configuration and automatically stops and restarts active server with the new model.
+- [x] **Server Process Detection Hardening**:
+  - [x] Enhanced `ServerProcessInspector.isSlipstreamServer` to recognize processes started with `-m server.server`.
+  - [x] Added fallback TCP socket listener check via `lsof -ti :<port> -sTCP:LISTEN` for robust status detection across all launch mechanisms.
+- [x] **Deployment**:
+  - [x] Recompiled release binary, installed to `/Applications/Slipstream.app`, stripped quarantine, and launched.
+  - [x] Committed and pushed changes to `origin/main` in `npanj/slipstream-menubar`.
 
 

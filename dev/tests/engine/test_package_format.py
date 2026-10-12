@@ -114,6 +114,42 @@ class PackageFormatTests(unittest.TestCase):
 
             self.assertEqual(whole.read_bytes(), streamed.read_bytes())
 
+    def test_reserved_sections_filled_side_by_side_match_writing_it_all_at_once(self):
+        payloads = [b"a" * (ALIGNMENT + 7), b"b" * 300, b"c" * 300, b"d" * 5]
+        with tempfile.TemporaryDirectory() as scratch:
+            whole = Path(scratch) / "whole.bin"
+            written = WeightFile(whole, b"MDFN0004", 2, 3)
+            for payload in payloads:
+                written.section(payload)
+            written.finish()
+
+            # Codes, scales and biases arrive a chunk of each at a time, as the table's do.
+            reserved = Path(scratch) / "reserved.bin"
+            out = StreamingWeightFile(reserved, b"MDFN0004", 2, 3)
+            cursors = [out.reserve(len(payload)) for payload in payloads[:3]]
+            for start in range(0, len(payloads[0]), 100):
+                for index, payload in enumerate(payloads[:3]):
+                    piece = payload[start : start + 100]
+                    if piece:
+                        out.write_at(cursors[index], piece)
+                        cursors[index] += len(piece)
+            out.section(payloads[3])
+            out.finish()
+
+            self.assertEqual(whole.read_bytes(), reserved.read_bytes())
+
+    def test_a_reserved_section_at_the_end_still_sizes_the_file(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            whole = Path(scratch) / "whole.bin"
+            written = WeightFile(whole, b"MDFN0004", 0, 0)
+            written.section(b"\0" * 300)
+            written.finish()
+            reserved = Path(scratch) / "reserved.bin"
+            out = StreamingWeightFile(reserved, b"MDFN0004", 0, 0)
+            out.reserve(300)
+            out.finish()
+            self.assertEqual(whole.read_bytes(), reserved.read_bytes())
+
     def test_streaming_refuses_a_write_outside_a_section(self):
         with tempfile.TemporaryDirectory() as scratch:
             out = StreamingWeightFile(Path(scratch) / "x.bin", b"MDFN0004", 0, 0)

@@ -97,7 +97,8 @@ class RequestContractTests(unittest.TestCase):
 
     def test_missing_native_executable_has_upgrade_guidance(self):
         with self.assertRaisesRegex(
-            runtime.EngineUnhealthy, "restart Splash from the current installation"
+            runtime.EngineUnhealthy,
+            "restart Slipstream v2 from the current installation",
         ):
             runtime.MultiplexedRuntime(
                 process_factory=mock.Mock(side_effect=FileNotFoundError())

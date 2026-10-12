@@ -17,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include "AwakeClock.hpp"
 
 static const char *kSource = R"(
 #include <metal_stdlib>
@@ -73,7 +74,7 @@ int main() {
       {
         id<MTLSharedEvent> event = [device newSharedEvent];
         uint32_t bad = 0;
-        const auto start = std::chrono::steady_clock::now();
+        const auto start = AwakeClock::now();
         std::vector<id<MTLCommandBuffer>> commands;
         for (uint32_t k = 1; k <= kStages; ++k) {
           id<MTLCommandBuffer> command = [queue commandBuffer];
@@ -91,7 +92,7 @@ int main() {
           if (k < kStages) event.signaledValue = 2 * (k + 1);
         }
         [commands.back() waitUntilCompleted];
-        const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
+        const double us = std::chrono::duration<double, std::micro>(AwakeClock::now() - start).count();
         printf("events: %6.1f us per stage, %u stale reads\n", us / kStages, bad);
       }
       // flags
@@ -99,7 +100,7 @@ int main() {
         gpuFlag->store(0);
         hostFlag->store(0);
         uint32_t bad = 0;
-        const auto start = std::chrono::steady_clock::now();
+        const auto start = AwakeClock::now();
         id<MTLCommandBuffer> command = [queue commandBuffer];
         id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
         for (uint32_t k = 1; k <= kStages; ++k) {
@@ -118,9 +119,9 @@ int main() {
         [encoder endEncoding];
         [command commit];
         for (uint32_t k = 1; k <= kStages; ++k) {
-          const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+          const auto deadline = AwakeClock::now() + std::chrono::seconds(2);
           while (gpuFlag->load(std::memory_order_acquire) < k) {
-            if (std::chrono::steady_clock::now() > deadline) {
+            if (AwakeClock::now() > deadline) {
               printf("flags: stage %u flag never became visible (reads %u)\n", k, gpuFlag->load());
               hostFlag->store(1000000);  // release the GPU so the buffer can finish
               [command waitUntilCompleted];
@@ -131,7 +132,7 @@ int main() {
           if (k < kStages) hostFlag->store(k + 1, std::memory_order_release);
         }
         [command waitUntilCompleted];
-        const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
+        const double us = std::chrono::duration<double, std::micro>(AwakeClock::now() - start).count();
         printf("flags:  %6.1f us per stage, %u stale reads, status %ld\n", us / kStages, bad, (long)command.status);
       }
     }

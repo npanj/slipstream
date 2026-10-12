@@ -755,6 +755,56 @@ void testStepTokensFitTheWire() {
   }
 }
 
+// The loop reports that it holds requests from the first it takes to the end
+// of its last, the span the process keeps the Mac from idle sleep for.
+void testHoldingRequestsSpansFirstToLastRequest() {
+  std::vector<bool> reported;
+  Backing backing(512);
+  KvPool pool(backing);
+  engine::Cache resources(pool, CacheNamespace{});
+  Executor executor;
+  std::vector<uint8_t> output;
+  double monotonic = 100.0;
+  engine::NativeLoopConfig config;
+  config.engine.maxContext = 1024;
+  config.holdingRequests = [&](bool held) { reported.push_back(held); };
+  engine::NativeRuntime loop(
+      config, resources, executor,
+      [&](std::span<const uint8_t> bytes) {
+        output.insert(output.end(), bytes.begin(), bytes.end());
+      },
+      [] { return std::string("{\"schema_version\":5,\"ready\":true}"); },
+      {[] { return uint64_t{1'000'000}; }, [&] { return monotonic += 0.25; }});
+  loop.announceReady();
+  require(reported.empty(), "a loop without requests reported holding one");
+  auto sendReq = [&](protocol::RequestFrame r) {
+    auto encoded = protocol::serializeMessage(protocol::Message{r});
+    return encoded && loop.receive(*encoded.value);
+  };
+  require(sendReq(request(1)) && sendReq(request(2)), "two requests failed");
+  require(reported == std::vector<bool>{true}, "two requests did not share one span");
+  runUntilIdle(loop);
+  require(reported == std::vector<bool>{true, false},
+          "the span did not end with the last request");
+  // A cancelled request completes; a request whose deadline passes fails.
+  require(sendReq(request(3)) && loop.tick(), "request 3 failed");
+  auto cancelEncoded = protocol::serializeMessage(protocol::Message{protocol::CancelFrame{3}});
+  require(cancelEncoded && loop.receive(*cancelEncoded.value), "cancel failed");
+  runUntilIdle(loop);
+  require(reported == std::vector<bool>{true, false, true, false},
+          "a cancelled request did not end its span");
+  require(sendReq(request(4, 64)), "request 4 failed");
+  monotonic += 5000.0;
+  runUntilIdle(loop);
+  require(reported == std::vector<bool>{true, false, true, false, true, false},
+          "a request that failed did not end its span");
+  // One refused on arrival is never held.
+  protocol::RequestFrame expired = request(5);
+  expired.absoluteDeadlineUnixMicros = 1'000'000;
+  require(sendReq(expired) && reported.size() == 6,
+          "a request refused on arrival was held");
+}
+
 } // namespace
 
 int main() {
@@ -769,6 +819,7 @@ int main() {
     testControlFailureUsesExecutionBoundary();
     testInvalidPromptTokensStayRequestScoped();
     testStepTokensFitTheWire();
+    testHoldingRequestsSpansFirstToLastRequest();
     std::cout << "native KV-first loop tests passed\n";
     return EXIT_SUCCESS;
   } catch (const std::exception &error) {

@@ -77,9 +77,8 @@ class CompletionTests(unittest.TestCase):
         (directory / "official-models.txt").write_text("\n".join(OFFICIAL) + "\n")
         if release:
             (root / "release.json").write_text("{}")
-            models = self.home / "Library/Application Support/Splash/models"
-        else:
-            models = root / "install/models"
+        # Source and release installations share one model store.
+        models = self.home / ".slipstream/models"
         for model in (*OFFICIAL, LOCAL[0]):
             model_root = models / model
             model_root.mkdir(parents=True, exist_ok=True)
@@ -174,7 +173,7 @@ class CompletionTests(unittest.TestCase):
             with self.subTest(release=release):
                 root, directory = self.layout(str(release), release=release)
                 data = (
-                    self.home / "Library/Application Support/Splash"
+                    self.home / "Library/Application Support/Slipstream-v2"
                     if release
                     else root / "build/runtime"
                 )

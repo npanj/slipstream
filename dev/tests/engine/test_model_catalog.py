@@ -107,9 +107,10 @@ class ModelCatalogTests(unittest.TestCase):
         self.output.parent.mkdir()
         self.output.write_text("company/Existing\n")
         os.utime(self.output, (0, 0))
-        with mock.patch.object(catalog, "COLLECTION", None), mock.patch.object(
-            catalog.subprocess, "Popen"
-        ) as process:
+        with (
+            mock.patch.object(catalog, "COLLECTION", None),
+            mock.patch.object(catalog.subprocess, "Popen") as process,
+        ):
             self.assertFalse(catalog.refresh())
             catalog.spawn_refresh()
             with mock.patch("sys.stderr", io.StringIO()):
@@ -120,7 +121,9 @@ class ModelCatalogTests(unittest.TestCase):
         self.urlopen.assert_not_called()
         process.assert_not_called()
         self.assertEqual(self.output.read_text(), "company/Existing\n")
-        self.assertEqual(catalog.official_ids(), ["company/Bundled", "company/Existing"])
+        self.assertEqual(
+            catalog.official_ids(), ["company/Bundled", "company/Existing"]
+        )
 
     def test_background_refresh_is_detached_and_fresh_cache_skips_spawn(self):
         with mock.patch.object(catalog.subprocess, "Popen") as process:

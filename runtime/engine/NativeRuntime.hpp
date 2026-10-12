@@ -20,6 +20,10 @@ struct NativeLoopConfig {
   uint64_t engineInstanceId = 1;
   uint32_t maskWordsPerToken = 1;
   RuntimeMetrics *metrics = nullptr;
+  // Told true when the engine takes a request while it holds none, and false
+  // when its last request ends; the process keeps the Mac from idle sleep in
+  // between (main.mm). It must not throw. Empty where nothing needs to know.
+  std::function<void(bool)> holdingRequests;
 };
 
 struct NativeLoopClocks {
@@ -123,6 +127,9 @@ private:
   void capacityExhausted(uint64_t requestId, uint32_t requiredKvPages,
                          uint32_t availableKvPages,
                          uint64_t retryAfterMicros) override;
+
+  // After a request's terminal event: the engine no longer holds it.
+  void ended(uint64_t requestId);
 
   static NativeLoopClocks defaultClocks();
   static uint64_t durationMicros(double startMilliseconds,

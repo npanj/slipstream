@@ -38,7 +38,7 @@ BENCH_PROMPTS = [
             "\\[\\sum_{j = 1}^\\infty \\sum_{k = 1}^\\infty \\frac{1}{(j + k)^3}\\]\n"
             "in terms of $p$ and $q.$\n"
             "Think step by step and conclude your response with: "
-            'Therefore, the final answer is \\boxed{ANSWER}'
+            "Therefore, the final answer is \\boxed{ANSWER}"
         ),
         "expected": "p - q",
         "max_tokens": 1200,
@@ -75,7 +75,7 @@ BENCH_PROMPTS = [
         "prompt": (
             "Write a Rust function `parse_csv_line(line: &str) -> Vec<String>` that parses a single CSV line "
             "with quoted fields (commas inside double quotes are preserved) into a Vec<String>. "
-            "Handle double-quote escaping (\"\") properly. Include two unit tests in a `#[cfg(test)]` module."
+            'Handle double-quote escaping ("") properly. Include two unit tests in a `#[cfg(test)]` module.'
         ),
         "expected": None,
         "max_tokens": 1200,
@@ -96,10 +96,14 @@ BENCH_PROMPTS = [
 
 def check_port_free(port: int):
     try:
-        out = subprocess.check_output(
-            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
-            stderr=subprocess.DEVNULL,
-        ).decode().strip()
+        out = (
+            subprocess.check_output(
+                ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
         return len(out) == 0
     except subprocess.CalledProcessError:
         return True
@@ -107,10 +111,14 @@ def check_port_free(port: int):
 
 def kill_on_port(port: int):
     try:
-        out = subprocess.check_output(
-            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
-            stderr=subprocess.DEVNULL,
-        ).decode().strip()
+        out = (
+            subprocess.check_output(
+                ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
         if out:
             for pid in out.split():
                 try:
@@ -141,7 +149,9 @@ def wait_for_ready(url: str, timeout: int = 180):
     return False
 
 
-def stream_chat_completion(base_url: str, prompt: str, max_tokens: int, model: str = None):
+def stream_chat_completion(
+    base_url: str, prompt: str, max_tokens: int, model: str = None
+):
     url = f"{base_url}/chat/completions"
     payload = {
         "messages": [{"role": "user", "content": prompt}],
@@ -195,7 +205,11 @@ def stream_chat_completion(base_url: str, prompt: str, max_tokens: int, model: s
         elapsed = t_end - t0
         ttft_ms = ((first_token_time - t0) * 1000.0) if first_token_time else 0.0
         decode_duration = (t_end - first_token_time) if first_token_time else 0.0
-        decode_tok_s = ((token_count - 1) / decode_duration) if (decode_duration > 0 and token_count > 1) else 0.0
+        decode_tok_s = (
+            ((token_count - 1) / decode_duration)
+            if (decode_duration > 0 and token_count > 1)
+            else 0.0
+        )
 
         full_content = "".join(chunks_text)
         full_reasoning = "".join(reasoning_text)
@@ -213,37 +227,65 @@ def stream_chat_completion(base_url: str, prompt: str, max_tokens: int, model: s
 
 
 def run_benchmark_on_engine(engine_name: str, base_url: str, model_id: str = None):
-    print(f"\n{'='*70}\nRunning Benchmark on: {engine_name} ({base_url})\n{'='*70}")
+    print(f"\n{'=' * 70}\nRunning Benchmark on: {engine_name} ({base_url})\n{'=' * 70}")
     results = []
     for item in BENCH_PROMPTS:
-        print(f"\n--> [{item['id']}] {item['category']} (max {item['max_tokens']} tok)...", end="", flush=True)
-        res = stream_chat_completion(base_url, item["prompt"], item["max_tokens"], model=model_id)
+        print(
+            f"\n--> [{item['id']}] {item['category']} (max {item['max_tokens']} tok)...",
+            end="",
+            flush=True,
+        )
+        res = stream_chat_completion(
+            base_url, item["prompt"], item["max_tokens"], model=model_id
+        )
         if "error" in res:
             print(f" ERROR: {res['error']}")
-            results.append({"id": item["id"], "category": item["category"], "error": res["error"]})
+            results.append(
+                {"id": item["id"], "category": item["category"], "error": res["error"]}
+            )
         else:
-            print(f" Done in {res['elapsed_s']:.2f}s | TTFT: {res['ttft_ms']:.1f}ms | Decode: {res['decode_tok_s']:.2f} tok/s | Tokens: {res['token_count']}")
-            ans_display = res["content"].strip() if res["content"].strip() else res["reasoning"].strip()
-            snippet = ans_display[-120:].replace("\n", " ") if len(ans_display) > 120 else ans_display.replace("\n", " ")
+            print(
+                f" Done in {res['elapsed_s']:.2f}s | TTFT: {res['ttft_ms']:.1f}ms | Decode: {res['decode_tok_s']:.2f} tok/s | Tokens: {res['token_count']}"
+            )
+            ans_display = (
+                res["content"].strip()
+                if res["content"].strip()
+                else res["reasoning"].strip()
+            )
+            snippet = (
+                ans_display[-120:].replace("\n", " ")
+                if len(ans_display) > 120
+                else ans_display.replace("\n", " ")
+            )
             print(f"    Tail snippet: {snippet}")
-            results.append({
-                "id": item["id"],
-                "category": item["category"],
-                "expected": item.get("expected"),
-                "token_count": res["token_count"],
-                "elapsed_s": res["elapsed_s"],
-                "ttft_ms": res["ttft_ms"],
-                "decode_tok_s": res["decode_tok_s"],
-                "content": res["content"],
-                "reasoning": res["reasoning"],
-            })
+            results.append(
+                {
+                    "id": item["id"],
+                    "category": item["category"],
+                    "expected": item.get("expected"),
+                    "token_count": res["token_count"],
+                    "elapsed_s": res["elapsed_s"],
+                    "ttft_ms": res["ttft_ms"],
+                    "decode_tok_s": res["decode_tok_s"],
+                    "content": res["content"],
+                    "reasoning": res["reasoning"],
+                }
+            )
     return results
 
 
 def main():
-    parser = argparse.ArgumentParser(description="A/B Benchmark: Slipstream-GGUF vs llama.cpp on V3 GGUF")
-    parser.add_argument("--model-dir", default=str(Path.home() / "models/qwen38-flash-next-v3"), help="Model directory for Slipstream")
-    parser.add_argument("--llama-model", default=None, help="GGUF shard 1 file for llama.cpp")
+    parser = argparse.ArgumentParser(
+        description="A/B Benchmark: Slipstream-GGUF vs llama.cpp on V3 GGUF"
+    )
+    parser.add_argument(
+        "--model-dir",
+        default=str(Path.home() / "models/qwen38-flash-next-v3"),
+        help="Model directory for Slipstream",
+    )
+    parser.add_argument(
+        "--llama-model", default=None, help="GGUF shard 1 file for llama.cpp"
+    )
     parser.add_argument("--only-slipstream", action="store_true")
     parser.add_argument("--only-llamacpp", action="store_true")
     parser.add_argument("--out", default=None, help="Output JSON path")
@@ -256,11 +298,16 @@ def main():
         if shards:
             llama_model = str(shards[0])
         else:
-            llama_model = str(Path.home() / "models/qwen38-flash-next-v3/Qwen3.8-Flash-Next-Q4_0-Q8out-v3-00001-of-00003.gguf")
+            llama_model = str(
+                Path.home()
+                / "models/qwen38-flash-next-v3/Qwen3.8-Flash-Next-Q4_0-Q8out-v3-00001-of-00003.gguf"
+            )
 
     out_path_str = args.out
     if not out_path_str:
-        out_path_str = str(ROOT / f"dev/benchmarks/comparison_{model_dir_path.name}_results.json")
+        out_path_str = str(
+            ROOT / f"dev/benchmarks/comparison_{model_dir_path.name}_results.json"
+        )
     out_file = Path(out_path_str)
     out_file.parent.mkdir(parents=True, exist_ok=True)
     all_data = {}
@@ -280,9 +327,9 @@ def main():
 
     # 1. RUN SLIPSTREAM-GGUF
     if not args.only_llamacpp:
-        print("\n" + "="*70)
+        print("\n" + "=" * 70)
         print("STEP 1: Starting Slipstream-GGUF on port 8090...")
-        print("="*70)
+        print("=" * 70)
         slip_env = os.environ.copy()
         slip_env["REPO"] = str(ROOT)
         slip_env["PKG"] = str(model_dir_path / "prepared")
@@ -292,8 +339,10 @@ def main():
 
         cmd = [
             str(ROOT / "dev/benchmarks/guarded.py"),
-            "--floor-gib", "4",
-            "--max-seconds", "1800",
+            "--floor-gib",
+            "4",
+            "--max-seconds",
+            "1800",
             "--",
             str(ROOT / "splash"),
             "serve",
@@ -303,16 +352,24 @@ def main():
             "8090",
         ]
         log_file = open("/tmp/slipstream_bench_server.log", "w")
-        proc_slip = subprocess.Popen(cmd, env=slip_env, stdout=log_file, stderr=subprocess.STDOUT)
+        proc_slip = subprocess.Popen(
+            cmd, env=slip_env, stdout=log_file, stderr=subprocess.STDOUT
+        )
 
         print("Waiting for Slipstream-GGUF on http://127.0.0.1:8090/v1/models...")
         if not wait_for_ready("http://127.0.0.1:8090/v1/models", timeout=120):
-            print("ERROR: Slipstream-GGUF failed to start! Check /tmp/slipstream_bench_server.log")
+            print(
+                "ERROR: Slipstream-GGUF failed to start! Check /tmp/slipstream_bench_server.log"
+            )
             proc_slip.kill()
             return 1
 
         print("Slipstream-GGUF is live!")
-        slip_results = run_benchmark_on_engine("Slipstream-GGUF", "http://127.0.0.1:8090/v1", model_id=f"local/{model_dir_path.name}")
+        slip_results = run_benchmark_on_engine(
+            "Slipstream-GGUF",
+            "http://127.0.0.1:8090/v1",
+            model_id=f"local/{model_dir_path.name}",
+        )
         all_data["slipstream"] = slip_results
 
         print("\nStopping Slipstream-GGUF cleanly...")
@@ -329,9 +386,11 @@ def main():
 
     # 2. RUN LLAMA.CPP
     if not args.only_slipstream:
-        print("\n" + "="*70)
-        print(f"STEP 2: Starting llama.cpp (llama-server) on port 8080 with {Path(llama_model).name}...")
-        print("="*70)
+        print("\n" + "=" * 70)
+        print(
+            f"STEP 2: Starting llama.cpp (llama-server) on port 8080 with {Path(llama_model).name}..."
+        )
+        print("=" * 70)
         llama_env = os.environ.copy()
         llama_env["MODEL"] = str(llama_model)
         llama_env["PORT"] = "8080"
@@ -342,22 +401,30 @@ def main():
 
         cmd = [
             str(ROOT / "dev/benchmarks/guarded.py"),
-            "--floor-gib", "4",
-            "--max-seconds", "1800",
+            "--floor-gib",
+            "4",
+            "--max-seconds",
+            "1800",
             "--",
-            str(Path.home() / "models/bin/qwen-q40-server.sh")
+            str(Path.home() / "models/bin/qwen-q40-server.sh"),
         ]
         log_file_llama = open("/tmp/llamacpp_bench_server.log", "w")
-        proc_llama = subprocess.Popen(cmd, env=llama_env, stdout=log_file_llama, stderr=subprocess.STDOUT)
+        proc_llama = subprocess.Popen(
+            cmd, env=llama_env, stdout=log_file_llama, stderr=subprocess.STDOUT
+        )
 
         print("Waiting for llama.cpp on http://127.0.0.1:8080/health...")
         if not wait_for_ready("http://127.0.0.1:8080/health", timeout=180):
-            print("ERROR: llama.cpp failed to start! Check /tmp/llamacpp_bench_server.log")
+            print(
+                "ERROR: llama.cpp failed to start! Check /tmp/llamacpp_bench_server.log"
+            )
             proc_llama.kill()
             return 1
 
         print("llama.cpp is live!")
-        llama_results = run_benchmark_on_engine("llama.cpp", "http://127.0.0.1:8080/v1", model_id="qwen3.8-flash-next-q40")
+        llama_results = run_benchmark_on_engine(
+            "llama.cpp", "http://127.0.0.1:8080/v1", model_id="qwen3.8-flash-next-q40"
+        )
         all_data["llamacpp"] = llama_results
 
         print("\nStopping llama.cpp cleanly...")
@@ -376,10 +443,12 @@ def main():
     print(f"\nSaved raw benchmark data to {out_file}")
 
     if "slipstream" in all_data and "llamacpp" in all_data:
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("HEAD-TO-HEAD SPEED & QUALITY COMPARISON (V3 GGUF Model)")
-        print("="*80)
-        print(f"{'Prompt ID':<20} | {'Slipstream (tok/s)':<18} | {'llama.cpp (tok/s)':<18} | {'Speedup':<8} | {'Quality Match'}")
+        print("=" * 80)
+        print(
+            f"{'Prompt ID':<20} | {'Slipstream (tok/s)':<18} | {'llama.cpp (tok/s)':<18} | {'Speedup':<8} | {'Quality Match'}"
+        )
         print("-" * 80)
 
         slip_map = {r["id"]: r for r in all_data["slipstream"] if "decode_tok_s" in r}
@@ -416,15 +485,19 @@ def main():
                 else:
                     q_status = "Both completed"
 
-                print(f"{pid:<20} | {s_tok:>14.2f} t/s | {l_tok:>14.2f} t/s | {ratio:>6.2f}x | {q_status}")
+                print(
+                    f"{pid:<20} | {s_tok:>14.2f} t/s | {l_tok:>14.2f} t/s | {ratio:>6.2f}x | {q_status}"
+                )
 
         if slip_speeds and llama_speeds:
             avg_s = sum(slip_speeds) / len(slip_speeds)
             avg_l = sum(llama_speeds) / len(llama_speeds)
             overall_ratio = avg_s / avg_l if avg_l > 0 else 0.0
             print("-" * 80)
-            print(f"{'AVERAGE':<20} | {avg_s:>14.2f} t/s | {avg_l:>14.2f} t/s | {overall_ratio:>6.2f}x |")
-            print("="*80)
+            print(
+                f"{'AVERAGE':<20} | {avg_s:>14.2f} t/s | {avg_l:>14.2f} t/s | {overall_ratio:>6.2f}x |"
+            )
+            print("=" * 80)
 
 
 if __name__ == "__main__":

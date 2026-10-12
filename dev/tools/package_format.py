@@ -21,6 +21,7 @@ Two layouts carry Q4 weights and they are not interchangeable:
 
 from __future__ import annotations
 
+import os
 import struct
 from pathlib import Path
 
@@ -116,11 +117,33 @@ class StreamingWeightFile:
             raise ValueError("a packed section is never empty")
         return self.begin().write(payload)
 
+    def reserve(self, size: int) -> int:
+        """Start a section of size bytes that write_at fills in later; returns its offset.
+
+        Sections built side by side, a piece of each at a time, then need no
+        scratch files.
+        """
+        if size <= 0:
+            raise ValueError("a packed section is never empty")
+        self.begin()
+        offset = self._offset
+        self._handle.seek(size, os.SEEK_CUR)
+        self._offset += size
+        return offset
+
+    def write_at(self, offset: int, payload: bytes) -> "StreamingWeightFile":
+        """Write into a reserved section."""
+        self._handle.flush()
+        os.pwrite(self._handle.fileno(), payload, offset)
+        return self
+
     def finish(self) -> int:
         padding = align(self._offset) - self._offset
         if padding:
             self._handle.write(b"\0" * padding)
             self._offset += padding
+        # A reserved section at the end is not written by the handle itself.
+        self._handle.truncate(self._offset)
         self._handle.close()
         return self._offset
 

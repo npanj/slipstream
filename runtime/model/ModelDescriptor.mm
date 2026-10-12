@@ -5,6 +5,7 @@
 #include <CommonCrypto/CommonDigest.h>
 
 #include <array>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -101,15 +102,22 @@ uint64_t requireUnsigned(NSDictionary *object, NSString *key,
     throw std::invalid_argument(std::string(label) +
                                 " must be an unsigned integer");
   }
-  NSNumber *number = static_cast<NSNumber *>(value);
-  if (CFNumberIsFloatType((__bridge CFNumberRef)number) ||
-      number.longLongValue <= 0 ||
-      static_cast<uint64_t>(number.longLongValue) !=
-          number.unsignedLongLongValue) {
-    throw std::invalid_argument(std::string(label) +
-                                " must be a positive unsigned integer");
+  NSNumber *number = (NSNumber *)value;
+  if (CFNumberIsFloatType((__bridge CFNumberRef)number)) {
+    // A config saved from Python writes a float that holds a whole number,
+    // rope_theta=1e7 as 10000000.0, and the installer compares it equal to
+    // that integer. A double holds every integer exactly up to 2^53 - 1.
+    const double real = number.doubleValue;
+    if (std::isfinite(real) && real >= 1 && real <= 9007199254740991.0 &&
+        std::floor(real) == real)
+      return static_cast<uint64_t>(real);
+  } else if (number.longLongValue > 0 &&
+             static_cast<uint64_t>(number.longLongValue) ==
+                 number.unsignedLongLongValue) {
+    return number.unsignedLongLongValue;
   }
-  return number.unsignedLongLongValue;
+  throw std::invalid_argument(std::string(label) +
+                              " must be a positive unsigned integer");
 }
 
 void requireEqual(uint64_t actual, uint64_t expected,
@@ -165,6 +173,16 @@ void validateCommonFormat(NSDictionary *format, std::string_view targetMagic) {
 
 ModelDescriptor qwen4expDescriptor(std::string name) {
   constexpr Qwen4ExpLayout target;
+  return makeModelDescriptor(std::move(name), target);
+}
+
+ModelDescriptor qwen38Descriptor(std::string name) {
+  constexpr Qwen3_8Layout target;
+  return makeModelDescriptor(std::move(name), target);
+}
+
+ModelDescriptor qwen38Q8Descriptor(std::string name) {
+  constexpr Qwen3_8Q8Layout target;
   return makeModelDescriptor(std::move(name), target);
 }
 
@@ -261,6 +279,40 @@ void validateQwen4Exp(NSDictionary *manifest,
   validateTokenizer(root, descriptor, "qwen4_exp_text");
 }
 
+void validateQwen38(NSDictionary *manifest,
+                    const std::filesystem::path &root,
+                    const ModelDescriptor &descriptor) {
+  requireEqual(requireUnsigned(manifest, @"schema_version", "schema_version"),
+               3, "schema_version");
+  NSDictionary *format =
+      requireObject(manifest, @"format", "model weight format");
+  requireEqual(requireUnsigned(format, @"q4_bits", "q4_bits"), 4,
+               "q4_bits");
+  requireEqual(requireUnsigned(format, @"q4_group_size", "q4_group_size"),
+               kQ4GroupElements, "q4_group_size");
+  requireEqual(requireUnsigned(format, @"q4_storage_n", "q4_storage_n"),
+               kQ4StorageN, "q4_storage_n");
+  validateCommonFormat(format, Qwen3_8Layout::layerMagic);
+  validateTokenizer(root, descriptor, "qwen3_5_text");
+}
+
+void validateQwen38Q8(NSDictionary *manifest,
+                      const std::filesystem::path &root,
+                      const ModelDescriptor &descriptor) {
+  requireEqual(requireUnsigned(manifest, @"schema_version", "schema_version"),
+               5, "schema_version");
+  NSDictionary *format =
+      requireObject(manifest, @"format", "model weight format");
+  requireEqual(requireUnsigned(format, @"q8_bits", "q8_bits"), 8,
+               "q8_bits");
+  requireEqual(requireUnsigned(format, @"quant_group_size", "quant_group_size"),
+               kQ4GroupElements, "quant_group_size");
+  requireEqual(requireUnsigned(format, @"storage_n", "storage_n"),
+               kQ4StorageN, "storage_n");
+  validateCommonFormat(format, Qwen3_8Q8Layout::layerMagic);
+  validateTokenizer(root, descriptor, "qwen3_5_text");
+}
+
 } // namespace
 
 ModelDescriptor makeModelDescriptor(std::string name, TargetLayout target) {
@@ -324,6 +376,12 @@ ModelDescriptor inspectModelPackage(const std::filesystem::path &root) {
     if (format == "splash-packed-q4-qwen4exp") {
       descriptor = qwen4expDescriptor(model);
       validateQwen4Exp(manifest, root, descriptor);
+    } else if (format == "splash-packed-q8") {
+      descriptor = qwen38Q8Descriptor(model);
+      validateQwen38Q8(manifest, root, descriptor);
+    } else if (format == "splash-packed-q4") {
+      descriptor = qwen38Descriptor(model);
+      validateQwen38(manifest, root, descriptor);
     } else {
       throw std::invalid_argument("unsupported weight format: " + format);
     }
