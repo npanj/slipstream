@@ -4,7 +4,6 @@
 #include "model/DFlashDraft.hpp"
 #include "model/QwenVision.hpp"
 #include "models/qwen4exp/Qwen4Exp.hpp"
-#include "models/qwen38/Qwen3_8.hpp"
 #include "ops/Q8PageStorage.hpp"
 #include "ops/ExecutionPlans.hpp"
 
@@ -14,9 +13,9 @@
 
 namespace splash::model {
 
-// One alternative per model family; a new model adds its weights here.
-using TargetWeights =
-    std::variant<Qwen4ExpWeights, Qwen3_8Weights, Qwen3_8Q8Weights>;
+// Flash-Next only: 27B support lives on the 27b branch. The single-variant
+// form keeps every std::visit/holds_alternative call site compiling.
+using TargetWeights = std::variant<Qwen4ExpWeights>;
 
 struct ModelPackage final {
   ModelDescriptor descriptor;

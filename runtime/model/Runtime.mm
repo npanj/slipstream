@@ -553,14 +553,8 @@ struct Runtime::Impl {
     return mtpDrafting() && !std::getenv("SPLASH_MTP_SHADOW");
   }
 
-  bool isQwen38() const noexcept {
-    return std::holds_alternative<Qwen3_8Weights>(package.target) ||
-           std::holds_alternative<Qwen3_8Q8Weights>(package.target);
-  }
+  // Flash-Next only: prompt-lookup drafting was 27B-only (27b branch).
   bool promptLookupProposing(const Request &) const noexcept {
-    if (isQwen38()) {
-      return !std::getenv("SPLASH_NO_PLD");
-    }
     return false;
   }
 

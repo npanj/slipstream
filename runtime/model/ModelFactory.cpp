@@ -31,29 +31,14 @@ ModelPackage loadPackage(metal::MetalBackend &backend,
         using L = std::remove_cvref_t<decltype(layout)>;
         if constexpr (std::is_same_v<L, Qwen4ExpLayout>) {
           return loadQwen4ExpWeights(backend, root / "target", layout);
-        } else if constexpr (std::is_same_v<L, Qwen3_8Layout>) {
-          return loadQwen3_8Weights(backend, root / "target", layout);
-        } else if constexpr (std::is_same_v<L, Qwen3_8Q8Layout>) {
-          return loadQwen3_8Q8Weights(backend, root / "target", layout);
+        } else {
+          throw std::invalid_argument("unsupported target layout for load");
         }
       },
       result.descriptor.target);
 
   std::vector<WeightFileRecord> records(result.targetFiles().begin(),
                                         result.targetFiles().end());
-  const bool isQwen38 =
-      std::holds_alternative<Qwen3_8Weights>(result.target) ||
-      std::holds_alternative<Qwen3_8Q8Weights>(result.target);
-  if (isQwen38 &&
-      std::filesystem::is_directory(root / "draft") &&
-      std::filesystem::is_regular_file(root / "draft/model.bin")) {
-    result.draft = loadDFlashDraftWeights(backend, root / "draft");
-    records.insert(records.end(), result.draft.files.begin(),
-                   result.draft.files.end());
-    // State geometry completes at load: the descriptor built during
-    // inspection knows the target layout only.
-    result.descriptor.stateLayout.draft = result.draft.layout.stateLayout();
-  }
   if (std::filesystem::is_regular_file(root / "vision/model.bin")) {
     // The tower is shared; only the language-space projection width varies
     // with the text model (2560 for Flash-Next, 5120 for the 27B).

@@ -247,8 +247,6 @@ ENGINE_CPP_SOURCES := \
 	models/qwen4exp/Qwen4Exp.cpp \
 	runtime/model/QwenTarget.cpp \
 	models/qwen4exp/Qwen4ExpTarget.cpp \
-	models/qwen38/Qwen3_8.cpp \
-	models/qwen38/Qwen3_8Target.cpp \
 	runtime/model/QwenVision.cpp \
 	runtime/model/DFlashDraft.cpp \
 	runtime/model/DraftContextPlan.cpp \

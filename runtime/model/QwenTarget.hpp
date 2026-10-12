@@ -23,9 +23,6 @@
 namespace splash::model {
 
 struct Qwen4ExpWeights;
-struct Qwen3_8Weights;
-struct Qwen3_8Q8Weights;
-class Qwen3_8Target;
 
 enum class QwenFfnKind : uint8_t { Dense, SparseMoe };
 
@@ -425,10 +422,6 @@ struct QwenTargetCommitBuffers final {
 
 [[nodiscard]] QwenTargetGeometry
 qwenTargetGeometry(const Qwen4ExpWeights &weights);
-[[nodiscard]] QwenTargetGeometry
-qwenTargetGeometry(const Qwen3_8Weights &weights);
-[[nodiscard]] QwenTargetGeometry
-qwenTargetGeometry(const Qwen3_8Q8Weights &weights);
 
 // Measurement only: the residual rows a model kept from the last prompt chunk
 // (SPLASH_CAPTURE_LAYERS), one bf16 [rows x width] block per layer.
@@ -444,10 +437,6 @@ struct CapturedPrefillLayers {
 class QwenTarget final {
 public:
   QwenTarget(const Qwen4ExpWeights &weights, metal::MetalBackend &backend,
-             const ops::ExecutionPlans &operators);
-  QwenTarget(const Qwen3_8Weights &weights, metal::MetalBackend &backend,
-             const ops::ExecutionPlans &operators);
-  QwenTarget(const Qwen3_8Q8Weights &weights, metal::MetalBackend &backend,
              const ops::ExecutionPlans &operators);
   ~QwenTarget();
   QwenTarget(QwenTarget &&) noexcept;
@@ -481,9 +470,9 @@ public:
   [[nodiscard]] ops::VocabularyProjection vocabularyProjection() const;
 
 private:
-  using WeightView =
-      std::variant<const Qwen4ExpWeights *, const Qwen3_8Weights *,
-                   const Qwen3_8Q8Weights *>;
+  // Flash-Next only: 27B support lives on the 27b branch. The
+  // single-variant form keeps every std::visit/get call site compiling.
+  using WeightView = std::variant<const Qwen4ExpWeights *>;
 
   WeightView weights_;
   QwenTargetGeometry geometry_;
@@ -492,7 +481,6 @@ private:
   metal::MetalBuffer embeddingScratch_;
   metal::MetalBuffer headNormalized_;
   metal::MetalBuffer headReduced_;
-  std::unique_ptr<Qwen3_8Target> qwen38Target_;
 };
 
 } // namespace splash::model
