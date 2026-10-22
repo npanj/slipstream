@@ -230,6 +230,7 @@ ENGINE_CPP_SOURCES := \
 	runtime/engine/KvPool.cpp \
 	runtime/engine/KvCache.cpp \
 	runtime/engine/StateCache.cpp \
+	runtime/engine/PrefixCache.cpp \
 	runtime/engine/Protocol.cpp \
 	runtime/engine/NativeRuntime.cpp \
 	runtime/engine/FdTransport.cpp \

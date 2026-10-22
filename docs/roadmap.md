@@ -1,7 +1,8 @@
 # Slipstream roadmap: what to do, in what order, and why
 
 **Status:** proposal, 2026-10-22. Companion to [`docs/kapitsa-review.md`](kapitsa-review.md) (the evidence: what
-Slipstream can borrow from Kapitsa and what it can't).
+Slipstream can borrow from Kapitsa and what it can't) and [`docs/cloud-execution.md`](cloud-execution.md) (which of
+these items can be executed away from an Apple-silicon Mac, and what was already built that way).
 
 **How to read it.** Every item below has an **impact class**, an **effort** in focused dev-days for one experienced
 engineer (agent-assisted), a **risk**, a **dependency** and an **acceptance test** — a number that has to move, measured
