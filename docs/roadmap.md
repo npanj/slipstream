@@ -148,7 +148,7 @@ optimising a cost the policy is not yet steering.
 |---|---|---|---|---|---|
 | Q1 | **Retire or finish `SPLASH_TREE_DRAFT`** — today a flag that turns on a hand-written tree whose rows are *verified* with parent masks but *stored* linearly; either delete flag+code (≤1 d) or gate it off until D4 | A (quality risk) | 0.5–1 d | low | `grep SPLASH_TREE_DRAFT` finds nothing, or the flag refuses to enable without compaction |
 | Q2 | **Regression table**: one command that runs the 145-item quality suite *and* the logit dump on a fixed commit set, writing a row per build (accuracy, same-pick, KL, noise-floor deltas) | A (decision quality) | 3–4 d | low | Two builds can be compared in one table; the 79%-vs-89% code-prompt outlier is either reproduced or retired |
-| Q3 | **Thermal / power-state honesty**: record `pmset -g therm` and AC/battery in every benchmark result; flag battery runs (Kapitsa flags them)`guess` | B (credibility) | 0.5 d | low | Every committed result carries the flag |
+| Q3 | **Thermal / power-state honesty**: record `pmset -g therm` and AC/battery in every benchmark result, and flag battery runs as Kapitsa does (`guess`: the effect on a 3-minute run is small, on a 300 s sustain phase it is not) | B (credibility) | 0.5 d | low | Every committed result carries the flag |
 | Q4 | **Sampling correctness test suite**: T=0 identity with plain decoding, T>0 exact speculative sampling, greedy ties — as property tests over a fixed seed | B (quality) | 3 d | med | A deliberately broken sampler fails; the current one passes over 1k steps |
 
 ### W6 — Operations and developer experience
