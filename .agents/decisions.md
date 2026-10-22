@@ -513,4 +513,3 @@ To create a Swift version of Nitin's V3 model (`Swift-Qwen3.8-Flash-Next-V3`) de
    - Public model distribution paths clarified: base Flash-Next V3 (`nitinpanj/Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF`) and Swift KV-sparse variant (`nitinpanj/Swift-Qwen3.8-Flash-Next-Q4_0-Q8out-v3-GGUF`).
 2. **Upstream Contribution Stance**:
    - Package Flash-Next architectural extensions, SSD expert streaming, and PLD speculative drafting as an upstream PR/patch to Incoai Splash.
-

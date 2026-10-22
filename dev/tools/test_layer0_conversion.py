@@ -78,7 +78,7 @@ class GgufShardReader:
         dims = meta["dims"]
         ttype = meta["type"]
         self.fd.seek(offset)
-        
+
         # Dequantize or read into float32 numpy array
         if ttype == 0: # F32
             count = int(np.prod(dims))

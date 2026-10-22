@@ -431,5 +431,3 @@ With port 8000 idle, executed the full 10-prompt `speed_suite.py` (2,509 tokens 
   - `34 → 36 GiB` flattens on clean wall-clock (`38.8 → 39.0 tok/s`, `+0.5%`) while dropping lowest free RAM to **3.8–3.9 GiB** on <9k prompts — triggering the plan's stop rule. The engine implicit expert-cache budget is now capped at **32 GiB**; explicit `SPLASH_EXPERT_CACHE_GIB` overrides remain available for controlled experiments.
   - Verified `Q8PageStorage` allocates KV extents lazily on demand (`runtime/engine/MemoryPlan.cpp`), so lowering `--max-context` from 262k/131k to 100k does not free startup RAM for `mlock`ed expert caches.
 Blocked on: nothing.
-
-

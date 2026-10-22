@@ -101,7 +101,7 @@ class MultiShardGgufReader:
                 fd.close()
                 continue
             ver, n_tensors, n_kv = struct.unpack("<IQQ", fd.read(20))
-            
+
             # Read KV metadata (on shard 0 or all shards)
             for _ in range(n_kv):
                 klen = struct.unpack("<Q", fd.read(8))[0]
