@@ -1,7 +1,7 @@
 # What Slipstream can take from Kapitsa (and what it can't)
 
 **Reviewed:** [nace-ai/kapitsa](https://github.com/nace-ai/kapitsa) at `e6e1f46` (2026-10-22), against this tree
-(`main` @ `2c7ac4d`). Kapitsa is Apache-2.0, like Slipstream, so code can be ported with attribution — and Kapitsa
+(`main` @ `2c7ac4d`). **The prioritised plan that follows from this is [`docs/roadmap.md`](roadmap.md).** Kapitsa is Apache-2.0, like Slipstream, so code can be ported with attribution — and Kapitsa
 itself credits Splash 1.4.0's streamed experts for its expert store, i.e. it is already downstream of the codebase
 Slipstream forked.
 
@@ -13,7 +13,7 @@ What is genuinely borrowable is **policy and machinery**, in this order:
 
 | # | Borrow | Where it pays | Effort | Expected |
 |---|---|---|---|---|
-| 1 | **SSD prefix cache** (`src/engine/prefix_cache.*`, `engine_disk.cpp`) | TTFT on agent turn 2+, and after a restart | M | 10–100× better follow-up TTFT (Kapitsa: 16K follow-up 0.16 s vs 17 s) |
+| 1 | **SSD prefix cache** (`src/engine/prefix_cache.*`, `engine_disk.cpp`) | TTFT on agent turn 2+, and after a restart | M | 10–100× better follow-up TTFT *where it misses today* (Kapitsa: 16K follow-up 0.16 s vs 17 s) — measure the miss rate first |
 | 2 | **Measured verify-row budget** (`kflash_budget.*`) replacing `SPLASH_MTP_CHAIN_MIN`/`SPLASH_MTP_P_MIN` | decode tok/s, every step | S–M | +2–5%, and removes hand-tuned env knobs |
 | 3 | **Finish the tree verifier** (KFlash's builder + the missing KV compaction) | decode tok/s | L | +3–8% (Kapitsa measured +6% on the 27B, +5% on the 4B, +3% on the 35B-A3B); the plumbing is ~80% there already |
 | 4 | **Expert store design** (`expert_store.h`: one arena, ARC, per-layer slot table, GPU↔CPU handshake, reader pool) over today's `mmap`+`MADV_WILLNEED` | row cost (8.9 ms/row) and GPU stall time | L | each 1 ms off a row is ~1.3% tok/s |
@@ -22,6 +22,11 @@ What is genuinely borrowable is **policy and machinery**, in this order:
 
 Numbers 1, 2, 5 and 6 are cheap and low-risk. 3 and 4 are real engineering; do them after 1/2 with the existing
 trace tooling.
+
+**Two ordering caveats.** (a) Item 1's value is the *miss* rate, not the idea: one day of instrumentation decides how
+much the disk cache deserves (`docs/roadmap.md` L2). (b) Policy before machinery: the row budget (2) steers the same
+rows the expert store (4) makes cheaper, and it is a tenth of the work — so it goes first even though 4 is the bigger
+mechanism.
 
 ---
 
@@ -114,7 +119,7 @@ Where it plugs into Slipstream (no new concepts needed — every hook exists):
 | State boundaries | `runtime/engine/StateCache.cpp` | write composite states tagged by boundary; they are already keyed by KV block |
 | Admission | `Engine::admitKv` / resume boundary (`Engine.cpp`) | look up the longest cached prefix, restore KV pages + state, set `promptProcessed` |
 | Eviction | `runtime/engine/MemoryGovernor.cpp` | spill pinned prefixes to disk instead of dropping them |
-| Reporting | `server/protocol.py` usage | report `cached_tokens` (the harness and users need it) |
+| Reporting | already there | `cached_tokens` is per response (`server/metrics.py:215`, `server/api_shapes.py:953`) — no work; just keep it honest after a restore, i.e. a restored prefix must count as cached tokens |
 | Test | new CPU-only test next to `dev/tests/engine/kv_page_cache_test.cpp` | write/read/CRC-corrupt/namespace-isolation, no GPU |
 
 Two details that are easy to get wrong. Expert residency does **not** belong in the key or the entry: which experts are
@@ -294,6 +299,42 @@ Also worth borrowing as-is: **`kapitsa doctor`** reports which models fit this M
 uses. Slipstream has `MemoryPlan.cpp` and a governor; exposing it as `slipstream doctor` would remove the most common
 support question (which quant fits a 64 GB Mac with 96 GB of weights on disk).
 
+### 3.7 Prefill: one setting, and one mechanism that does not apply
+
+Kapitsa prefill is much faster than Slipstream's on comparable hardware (35B-A3B: 4702 tok/s on an M5 Max, 2552 on an
+M5 Pro) — but the models are resident there, so most of the gap is SSD reads per prompt token, not kernel quality.
+Two things transfer:
+
+- **Bigger prompt chunks.** Kapitsa's most recent M5 commit moves the 35B-A3B's single-slot prefill to **4096-row
+  chunks** and measures **1.05× cold prefill at 4K and 16K, logits bitwise the same**. Slipstream's package asks for
+  `prefill_token_budget: 2048` (`models/qwen4exp/tools/convert_qwen4exp.py:832`) under a compiled ceiling of 4096
+  (`.agents/decisions.md:202`) — a one-line experiment with a known-sign, known-size effect, and a specific risk to
+  check (a 144-expert prompt-staging pool can thrash when a chunk routes to more distinct experts).
+- **The read-count axis.** Kapitsa measures prefill as prompt tokens per second *and* keeps its expert-store counters
+  (`bytes`, `hits`, `late`, `misses`) in the same result. Slipstream's `docs/profiling.md` already reports reads per
+  decode step (87 ahead + 46 on demand); it does not report reads per *prompt* token, which is the number that decides
+  whether a bigger chunk helps.
+
+Not applicable: Kapitsa's Neural Engine prefill split and its QMT tensor-op kernels. Slipstream already runs
+`matmul2d` tiles for 4-bit prefill and MoE; the ANE split is a single-digit win on resident dense models and uses
+private framework interfaces.
+
+### 3.8 Product and process parity (cheap, visible, and easy to copy)
+
+Kapitsa's engineering discipline is as borrowable as its code:
+
+| Kapitsa habit | Slipstream today | Why it matters |
+|---|---|---|
+| `kapitsa doctor` reports the chip, the wired limit and which models fit, from the engine's own memory plan | no equivalent, though `MemoryPlan.cpp` already computes it | the most common support question is "will this model fit my Mac, and with what cache" |
+| `bench compare` keeps every run as a record with provenance, flags, and a **CI-checked generated table** (629 runs across 5 Macs) | README numbers are hand-maintained; results live in ad-hoc JSON (`dev/benchmarks/swift_benchmark_results/`) | a table nobody can regenerate is a claim, not a measurement |
+| One documented configuration surface (`--help` is the contract; env switches are grouped and explained in `docs/usage.md`) | 79 `SPLASH_*` knobs, 24 documented | every undocumented knob is a future regression nobody can attribute |
+| `logit_floors/<model>.json` per Mac, measured once | no self-noise floor (see §3.5) | lets a default change be argued with numbers |
+| Output identity is *checked* before a default changes | output identity is checked by eye in a few places | the difference between "we think it didn't change" and "it didn't change" |
+
+One habit **not** to copy: Kapitsa's kernel set is per-model and per-shape (`qmm*`, `nemotron/*`, `flint/*`, ~18k lines of
+Metal). It buys speed on hardware where the model is resident; for one model with a fixed layout it is upkeep without
+return.
+
 ---
 
 ## 4. What *not* to borrow
@@ -309,23 +350,25 @@ support question (which quant fits a 64 GB Mac with 96 GB of weights on disk).
 
 ---
 
-## 5. Suggested order of work
+## 5. Order of work
 
-Each step ends in a number, from tools that already exist.
+The full plan — every item with impact, effort, risk, dependency and an acceptance test, plus a sequenced ten-day
+start — is **[`docs/roadmap.md`](roadmap.md)**. In one table:
 
-| Step | Change | Ends when |
+| Priority | Items (roadmap IDs) | Why now |
 |---|---|---|
-| 1 | `slipstream doctor`: expose the existing memory plan as a CLI report | A 64 GB Mac says which quants fit, with the plan's numbers |
-| 2 | Port the SSD prefix cache (§3.1) with a CPU-only test | Trace shows `cached_tokens`; a 16K follow-up's TTFT drops ≥ 5× on turn 2 and survives a restart |
-| 3 | Row budget (§3.2) behind `SPLASH_DRAFT_BUDGET=1`, fed by existing trace/timing hooks | A/B on the 10-prompt suite: equal or better tok/s, `SPLASH_MTP_*` env knobs deleted, table cached per chip |
-| 4 | Noise floor (§3.5) | `logit_floor.py` writes a JSON for this Mac; step 3's A/B is gated by the dump, not by eyeballing |
-| 5 | KV compaction + tree builder (§3.3) behind the budget | Identical greedy output on the suite (logit gate), tokens/step up at the same rows |
-| 6 | Expert store (§3.4): arena + slot table + handshake + router-driven read-ahead, instrumented | `waiting for SSD reads` per step down; `stall_ms`/`read_miss` visible; identical tokens |
-| 7 | Bench harness config (§3.6) in CI or a release checklist | One table, one Mac, flags and provenance, regenerated by script |
+| **P0** | M0 harness baseline, L2 prefix-hit measurement, M1 logit floor, M2 engine counters, Q1 retire the broken `SPLASH_TREE_DRAFT` path | days of work, and they create the yardstick every later claim needs |
+| **P1** | L1 SSD prefix cache, R1/R2/R4 prefill, D1 row budget, D2 live-row draft head, M3 Metal gate in CI | the two biggest user-visible wins plus the decode policy that deletes four env knobs |
+| **P2** | E1/E2 expert store + ARC, Q2 regression table, O1 `doctor`, O2 config surface, O3 fail-loudly | the biggest decode bet, once its cost is visible; then the project can maintain itself |
+| **P3** | D3 batch budget, D4 tree verifier (only if D1 says branches pay), E3 route-aware drafting, second model, CLI parity, packaging | conditional on measurement, or not about speed |
 
-Steps 2, 3, 4 and 7 are each a few days and none of them can change the model's output if done right — the acceptance
-rule stays the target's own. Steps 5 and 6 are the ones to schedule deliberately, and 6 is where the remaining 1.76× →
-more is hiding.
+Two things worth repeating from the roadmap, because they contradict the instinct this review started with:
+
+1. **Measure before building the SSD cache.** If the in-memory cache already covers ordinary turns, the disk cache's
+   value is restarts and evictions, which changes how much it deserves. That is one day of instrumentation (L2).
+2. **The tree verifier is last, not first.** It is the most tempting item because the kernels already know how to do
+   it, and the least attractive one economically: each row costs ~8.9 ms of SSD traffic here, so a branch must clear a
+   ~0.34-token bar to pay.
 
 ---
 
