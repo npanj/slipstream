@@ -1,0 +1,110 @@
+[
+ {
+  "label": "flash-slipstream",
+  "display": "Slipstream (MTP head + prompt lookup)",
+  "engine": "slipstream",
+  "version": "auto",
+  "version_cmd": [
+   "{env:SLIPSTREAM_BIN={first:{home}/slipstream/slipstream|slipstream}}",
+   "--version"
+  ],
+  "model_name": "Qwen3.8-Flash-Next",
+  "model_path": "{env:SLIPSTREAM_FLASH_MODEL=~/models/swift-qwen38-flash-next-v3/prepared}",
+  "cmd": [
+   "{env:SLIPSTREAM_BIN={first:{home}/slipstream/slipstream|slipstream}}",
+   "serve",
+   "--model",
+   "{env:SLIPSTREAM_FLASH_MODEL=~/models/swift-qwen38-flash-next-v3/prepared}",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "8090"
+  ],
+  "env": {},
+  "env_clear_prefixes": [
+   "SPLASH_",
+   "SLIPSTREAM_"
+  ],
+  "base_url": "http://127.0.0.1:8090/v1",
+  "model": "local/prepared",
+  "ready_timeout": 1800,
+  "requires_paths": [
+   "{env:SLIPSTREAM_FLASH_MODEL=~/models/swift-qwen38-flash-next-v3/prepared}",
+   "{env:SLIPSTREAM_BIN={first:{home}/slipstream/slipstream|slipstream}}"
+  ],
+  "bench_args": [
+   "--ref-prompt-tokens",
+   "4000:4133,16000:16286"
+  ],
+  "note": "Slipstream serving its streaming package (the `prepared/` directory; its served model id is `local/<directory name>`, hence `local/prepared`). Point SLIPSTREAM_FLASH_MODEL at the package itself, not at the GGUF shard directory, so the harness's readiness wait does not have to sit through the one-time 5-7 minute preparation - build it once with `./slipstream serve --model <gguf dir>` and stop that server. --host 127.0.0.1 keeps it off the LAN; no --api-key so the harness's plain OpenAI requests work. Slipstream's defaults are left alone (MTP drafting with its confidence stop, prompt lookup for tool calls, one model server at a time); add SPLASH_EXPERT_CACHE_GIB or SPLASH_MAX_CONCURRENCY under `env` to measure a configuration rather than a default. Reference prompt lengths 4133 / 16286 are the frozen corpus prompts through Qwen3.8-Flash-Next's tokenizer and chat template with thinking off (the same numbers Kapitsa's and llama.cpp's Flash-Next configs use); if the harness's +/-1% check fails, it prints the counts it measured - record those here for this tokenizer."
+ },
+ {
+  "label": "flash-slipstream-plain",
+  "extends": "flash-slipstream",
+  "display": "Slipstream (no speculation)",
+  "env": {
+   "SPLASH_MTP_DRAFTS": "1",
+   "SPLASH_MTP_P_MIN": "1.0"
+  },
+  "note": "The same server with drafting effectively disabled (one guess, and only when the head is certain), for the same-engine baseline column: how much of Slipstream's decode is the target model alone."
+ },
+ {
+  "label": "flash-slipstream-llamacpp",
+  "display": "llama.cpp (same GGUF family)",
+  "engine": "llama.cpp",
+  "version": "auto",
+  "model_name": "Qwen3.8-Flash-Next",
+  "model_path": "{env:FLASH_NEXT_GGUF=/path/to/Qwen3.8-Flash-Next-Q4_0-Q8out.gguf}",
+  "cmd": [
+   "{env:LLAMA_SERVER={first:llama-server|/opt/homebrew/bin/llama-server}}",
+   "-m",
+   "{env:FLASH_NEXT_GGUF=/path/to/Qwen3.8-Flash-Next-Q4_0-Q8out.gguf}",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "8083",
+   "-a",
+   "flash-next",
+   "-c",
+   "32768",
+   "-np",
+   "1",
+   "-ngl",
+   "999",
+   "-fa",
+   "on",
+   "-b",
+   "2048",
+   "-ub",
+   "2048",
+   "-lm",
+   "none",
+   "--jinja",
+   "--temp",
+   "0.6",
+   "--top-p",
+   "0.95",
+   "--top-k",
+   "20",
+   "--min-p",
+   "0",
+   "--no-webui"
+  ],
+  "env": {
+   "GGML_METAL_RESIDENCY_KEEP_ALIVE_S": "3600"
+  },
+  "env_clear_prefixes": [
+   "LLAMA_ARG_"
+  ],
+  "base_url": "http://127.0.0.1:8083/v1",
+  "model": "flash-next",
+  "requires_paths": [
+   "{env:FLASH_NEXT_GGUF=/path/to/Qwen3.8-Flash-Next-Q4_0-Q8out.gguf}"
+  ],
+  "bench_args": [
+   "--ref-prompt-tokens",
+   "4000:4133,16000:16286"
+  ],
+  "note": "The baseline the README compares against, under the harness's rules instead of a bespoke script: the same GGUF shard set Slipstream streams (set FLASH_NEXT_GGUF), -np 1 so both engines hold one sequence, -b/-ub 2048 (llama.cpp's default ubatch reads every expert once per 2048 rows), -lm none so its weights count in phys_footprint like Slipstream's, --min-p 0 because llama.cpp's default of 0.05 is not what the other configs measure, and the same explicit sampler. Pass the model's own chat template with --chat-template-file if its GGUF carries none, or the +/-1% prompt-length check will catch the drift. This row is optional: drop it if the point is only to place Kapitsa next to Slipstream on this Mac."
+ }
+]
