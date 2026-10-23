@@ -371,6 +371,30 @@ Pipelines makePipelines(id<MTLDevice> device, id<MTLLibrary> library,
   return result;
 }
 
+// Instrumented, the kv2_g12 tile (19,600 bytes) grows to 39,188, past a 32 KB
+// device limit. Metal still builds the pipeline, but its dispatches overrun
+// threadgroup memory and return garbage that changes run to run, so a shape
+// that only exceeds the limit under shader validation is checked
+// uninstrumented. Uninstrumented, exceeding it is a kernel defect.
+bool fitsThreadgroupMemory(id<MTLDevice> device,
+                           const std::array<Pipelines, 2> &pipelines) {
+  const uint64_t limit = device.maxThreadgroupMemoryLength;
+  bool fits = true;
+  for (const Pipelines &placement : pipelines) {
+    const uint64_t scratch = placement.split.staticThreadgroupMemoryLength;
+    if (scratch <= limit)
+      continue;
+    require(shaderValidationEnabled(),
+            "verify tile exceeds the device's threadgroup memory");
+    std::cout << "skipping " << placement.splitName << ": shader validation "
+              << "instruments it to " << scratch << " threadgroup bytes, past "
+              << "the device's " << limit << "; run without "
+              << "MTL_SHADER_VALIDATION to check it\n";
+    fits = false;
+  }
+  return fits;
+}
+
 // The split, reduce and every scratch buffer of one production-sized verify
 // dispatch: partials and statistics exactly cover [lane][KV head][split].
 struct Dispatch {
@@ -690,6 +714,8 @@ void run(const char *libraryPath) {
     const std::array<Pipelines, 2> pipelines{
         makePipelines(device, library, shape, false),
         makePipelines(device, library, shape, true)};
+    if (!fitsThreadgroupMemory(device, pipelines))
+      continue;
     for (uint32_t width = 1; width <= 4; ++width)
       runCase(device, queue, pipelines, shape, 127, 8, width);
     runCase(device, queue, pipelines, shape, 0, 8, 4);
