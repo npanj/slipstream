@@ -33,6 +33,7 @@ namespace {
 using splash::metal::BufferBinding;
 using splash::metal::BufferStorage;
 using splash::metal::BytesBinding;
+using splash::metal::CommandTicket;
 using splash::metal::ComputeDispatch;
 using splash::metal::MetalBackend;
 using splash::metal::MetalBackendError;
@@ -663,8 +664,131 @@ void sparsePacedRelease(MetalBackend &backend) {
               << " tile_bytes=" << kTile << '\n';
 }
 
+// Three pipeline stages that each add one to a counter, as the engine's
+// prefill waves and decode layers do with real work.
+struct CountingPipeline {
+    static constexpr uint32_t kStages = 3;
+    MetalBuffer counter;
+    uint32_t count = 1, increment = 1;
+    std::vector<ComputeDispatch> dispatches;
+    std::vector<size_t> starts{0, 1, 2};
+
+    explicit CountingPipeline(MetalBackend &backend)
+        : counter(backend.allocateBuffer(sizeof(uint32_t))) {
+        *static_cast<uint32_t *>(counter.contents()) = 0;
+        for (uint32_t s = 0; s < kStages; ++s)
+            dispatches.push_back(ComputeDispatch{"test_add_u32", {{0, counter}},
+                {{1, &count, sizeof(count)}, {2, &increment, sizeof(increment)}},
+                {1, 1, 1}, {1, 1, 1}});
+    }
+    uint32_t value() const { return *static_cast<const uint32_t *>(counter.contents()); }
+};
+
+// Waits for a pipeline's ticket; a backend error fails the test as `what`.
+void awaitPipeline(CommandTicket &ticket, const std::string &what) {
+    try {
+        (void)ticket.wait();
+    } catch (const MetalBackendError &error) {
+        fail(what + " failed: " + error.what());
+    }
+}
+
+// Waits for a stage to end; when it does not, reports the backend's error.
+void awaitStage(MetalBackend &backend, CommandTicket &ticket, uint64_t base,
+                uint32_t stage, const std::string &what) {
+    if (backend.waitPipelineStageDone(base, stage, 10000)) return;
+    awaitPipeline(ticket, what);
+    fail("a pipeline stage did not finish");
+}
+
+// macOS fails a command buffer that waits on an event for about five seconds
+// (kIOGPUCommandBufferCallbackErrorTimeout), even one that has used no GPU
+// time, and a stage's host work (expert reads from SSD) can take that long.
+// A stage the host signals late must therefore not be waiting on the GPU.
+void pipelineStageSignalledLate(MetalBackend &backend) {
+    CountingPipeline pipeline(backend);
+    const uint64_t base = backend.reservePipelineEvents(CountingPipeline::kStages);
+    auto ticket = backend.submitPipelineAsync(pipeline.dispatches, pipeline.starts, base);
+    for (uint32_t s = 1; s < CountingPipeline::kStages; ++s) {
+        awaitStage(backend, ticket, base, s - 1, "a late-signalled pipeline stage");
+        if (s == 1) std::this_thread::sleep_for(std::chrono::seconds(6));
+        backend.signalPipelineEvent(base + 2 * s);
+    }
+    awaitPipeline(ticket, "a late-signalled pipeline");
+    require(pipeline.value() == CountingPipeline::kStages,
+            "a late-signalled pipeline did not run every stage once");
+}
+
+// The host releases stage s while stage s - 1 may still be ending: the
+// prefill loop only waits for the last stage that used the same staging half
+// (here s - 2). When stages also raised the start event as they ended, that
+// end signal and the host's release could land together and leave the event
+// below the next stage's start; the last stage, with no later release to
+// lift it, then waited until macOS killed it.
+void pipelineStagesReleasedAsTheyEnd(MetalBackend &backend) {
+    constexpr uint32_t kStages = 8;
+    for (int round = 0; round < 100; ++round) {
+        CountingPipeline pipeline(backend);
+        std::vector<ComputeDispatch> dispatches;
+        std::vector<size_t> starts;
+        for (uint32_t s = 0; s < kStages; ++s) {
+            starts.push_back(dispatches.size());
+            for (int d = 0; d < 50; ++d) dispatches.push_back(pipeline.dispatches[0]);
+        }
+        const uint64_t base = backend.reservePipelineEvents(kStages);
+        auto ticket = backend.submitPipelineAsync(dispatches, starts, base);
+        for (uint32_t s = 1; s < kStages; ++s) {
+            if (s >= 2)
+                awaitStage(backend, ticket, base, s - 2,
+                           "a pipeline stage released as the previous ended");
+            backend.signalPipelineEvent(base + 2 * s);
+        }
+        awaitPipeline(ticket, "a pipeline released as its stages ended");
+        require(pipeline.value() == dispatches.size(),
+                "a pipeline released as its stages ended did not run every dispatch once");
+    }
+}
+
+// A host loop that throws signals no further stage; the release commits the
+// rest so the ticket completes instead of waiting forever.
+void pipelineStagesReleasedEarly(MetalBackend &backend) {
+    CountingPipeline pipeline(backend);
+    const uint64_t base = backend.reservePipelineEvents(CountingPipeline::kStages);
+    auto ticket = backend.submitPipelineAsync(pipeline.dispatches, pipeline.starts, base);
+    {
+        splash::metal::PipelineStageRelease release(backend);
+    }
+    awaitPipeline(ticket, "a released pipeline");
+    require(pipeline.value() == CountingPipeline::kStages,
+            "released pipeline stages did not run");
+    backend.releasePipelineStages();  // nothing left: a no-op
+}
+
+// macOS 27 decides residency per set, so keepResident spreads its buffers over
+// size-capped sets, at most the 32 a queue takes, and commands still run with
+// all of them attached.
+void residencySetsSpread(const std::string &metallibPath) {
+    // The smallest cap, 64 MiB: each 40 MiB buffer then needs a set of its own.
+    setenv("SPLASH_RESIDENCY_SET_MAX_PCT", "0.0001", 1);
+    MetalBackend backend(metallibPath);
+    std::vector<MetalBuffer> buffers;
+    for (int b = 0; b < 36; ++b)
+        buffers.push_back(backend.allocateBuffer(40ull << 20, BufferStorage::Shared, "resident"));
+    backend.keepResident(std::span(buffers).first(3));
+    require(backend.residencySetCount() == 3, "kept-resident buffers did not get a set each");
+    backend.keepResident(std::span(buffers).subspan(3));
+    require(backend.residencySetCount() == 32, "kept-resident sets went past a queue's 32");
+    unsetenv("SPLASH_RESIDENCY_SET_MAX_PCT");
+    CountingPipeline pipeline(backend);
+    for (const ComputeDispatch &dispatch : pipeline.dispatches) (void)backend.submit(dispatch);
+    require(pipeline.value() == CountingPipeline::kStages,
+            "commands did not run with the residency sets attached");
+    std::cout << "PASS residency sets spread sets=" << backend.residencySetCount() << '\n';
+}
+
 void run(const std::string &metallibPath) {
     placementProbeFailures(metallibPath);
+    residencySetsSpread(metallibPath);
     backendDeferredSubmission(metallibPath);
     NSData *libraryData = [NSData dataWithContentsOfFile:
         [NSString stringWithUTF8String:metallibPath.c_str()]];
@@ -966,6 +1090,10 @@ void run(const std::string &metallibPath) {
     sharedMemoryCompletionLifetime(backend);
     sparsePacedRelease(backend);
     sparseExtentChurn(backend);
+    pipelineStagesReleasedAsTheyEnd(backend);
+    pipelineStagesReleasedEarly(backend);
+    // Last: before the fix, the timeout this provokes leaves the backend unhealthy.
+    pipelineStageSignalledLate(backend);
     require(capabilities.gpuCoreCount >= 1 && capabilities.gpuCoreCount <= 4096,
             "GPU core count was not read from the IORegistry");
     require(capabilities.meetsMinimumMacos(),

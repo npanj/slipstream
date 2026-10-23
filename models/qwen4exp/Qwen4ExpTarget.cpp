@@ -1589,6 +1589,7 @@ void Qwen4ExpTarget::addPrefill(
     const uint64_t base = backend.reservePipelineEvents(static_cast<uint32_t>(waves.size()));
     const auto gpuStart = std::chrono::steady_clock::now();
     metal::CommandTicket ticket = backend.submitPipelineAsync(all, starts, base);
+    metal::PipelineStageRelease releaseStages(backend);
     for (size_t w = 1; w < waves.size(); ++w) {
       if (waves[w].after >= 0 &&
           !backend.waitPipelineStageDone(base, static_cast<uint32_t>(waves[w].after), 60000))
@@ -3410,17 +3411,14 @@ void Qwen4ExpTarget::addVerify(
     // graph), so stages here start at layer R's experts.
     // Waves: every layer after the first is two stages. A runs the experts
     // already cached while the host reads the missing ones; B runs those,
-    // then the rest of the layer as before. A is quiet (raises no event), so
-    // the host starts B as soon as its reads land. Same outputs; 84.6 -> 79.6
-    // ms a step on the 10-prompt suite. SPLASH_DECODE_WAVES=0 turns it off.
+    // then the rest of the layer as before. The host starts B as soon as its
+    // reads land, waiting only for the previous layer's B. Same outputs; 84.6
+    // -> 79.6 ms a step on the 10-prompt suite. SPLASH_DECODE_WAVES=0 turns
+    // it off.
     static const bool waves = [] {
       const char *value = std::getenv("SPLASH_DECODE_WAVES");
       return !value || std::atoi(value) != 0;
     }();
-    // One flag per stage (at most two per layer); std::vector<bool> is packed
-    // bits and cannot be viewed as bools.
-    std::array<bool, 2 * 64> quiet{};
-    size_t quietCount = 0;
     if (waves && !weights.decodeRanges)
       weights.decodeRanges = backend.allocateBuffer(
           512, metal::BufferStorage::Shared, "qwen4exp-decode-ranges");
@@ -3439,7 +3437,6 @@ void Qwen4ExpTarget::addVerify(
         ops::MoE::addExpertTilesInRange(cached, moeBuffers, makeCacheWeights(L), moePlan,
                                         backend.view(weights.decodeRanges, 0, 8));
         append(cached);
-        quiet[quietCount++] = true;
       }
       metal::CommandGraph &stepGraph = stageGraphs.emplace_back();
       if (waves && L > R) {
@@ -3459,7 +3456,6 @@ void Qwen4ExpTarget::addVerify(
       if (lookahead && L + 2 < geometry.layers)
         encodePredictRoute(stepGraph, L + 2);
       append(stepGraph);
-      quiet[quietCount++] = false;
       pipelineDeferred = nullptr;
     }
     encodeMs = std::chrono::duration<double, std::milli>(
@@ -3491,8 +3487,8 @@ void Qwen4ExpTarget::addVerify(
     const uint32_t stages = static_cast<uint32_t>(starts.size());
     const uint64_t base = backend.reservePipelineEvents(stages);
     auto tg0 = std::chrono::steady_clock::now();
-    metal::CommandTicket ticket = backend.submitPipelineAsync(
-        all, starts, base, waves ? std::span<const bool>(quiet.data(), quietCount) : std::span<const bool>{});
+    metal::CommandTicket ticket = backend.submitPipelineAsync(all, starts, base);
+    metal::PipelineStageRelease releaseStages(backend);
     static uint32_t tracedSteps = 0;
     const bool trace = std::getenv("SPLASH_TRACE_STAGES") && tracedSteps++ < 3;
     std::vector<double> waits;
@@ -3503,7 +3499,7 @@ void Qwen4ExpTarget::addVerify(
       const uint32_t cachedStage = mainStage - 1;
       const uint32_t previous = waves ? (k == 1 ? 0 : 2 * (k - 1)) : k - 1;
       const auto waitStart = std::chrono::steady_clock::now();
-      if (!backend.waitPipelineEvent(base + 2 * previous + 1, 60000))
+      if (!backend.waitPipelineStageDone(base, previous, 60000))
         throw std::runtime_error("pipelined decode stage timed out");
       if (trace)
         waits.push_back(std::chrono::duration<double, std::milli>(

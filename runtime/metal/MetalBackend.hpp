@@ -344,33 +344,38 @@ public:
                      CommandCompletion completion = {});
 
   // A pipeline: the dispatches split into stages at `stageStarts`, one
-  // command buffer each, committed together. Stage k > 0 waits for the
-  // pipeline event to reach base + 2k and raises it to base + 2k + 1 when it
-  // completes (stage 0 raises base + 1). The caller does host work between
-  // stages: waitPipelineEvent(base + 2k - 1), then signalPipelineEvent(base +
-  // 2k). The GPU never waits for a submission, only for that signal.
+  // command buffer each. Stage 0 is committed once any pending sparse mapping
+  // lands; stage k > 0 when the host's signalPipelineEvent reaches base + 2k.
+  // Each stage raises the done event to base + 2k + 1 as it completes. The
+  // caller does host work between stages: waitPipelineStageDone(base, k - 1)
+  // when it needs stage k - 1's output, then signalPipelineEvent(base + 2k).
   // reservePipelineEvents(stages) returns a fresh base.
   // Keeps these buffers resident on the GPU for every command from now on
-  // (a residency set on the queue), instead of the driver making them
-  // resident when a command first uses them - and again after something
-  // large evicted them.
+  // (size-capped residency sets on the queue, requested again every 500 ms),
+  // instead of the driver making them resident when a command first uses
+  // them - and again after something large evicted them.
   void keepResident(std::span<const MetalBuffer> buffers);
+  // How many residency sets keepResident spread its buffers over.
+  [[nodiscard]] size_t residencySetCount() const;
 
   [[nodiscard]] uint64_t reservePipelineEvents(uint32_t stages);
-  // `quietStages[k]` true: stage k still waits for base + 2k but does not
-  // raise the pipeline event when it ends (it still counts as done for
-  // waitPipelineStageDone). The host can then start stage k + 1 without
-  // waiting for stage k: the event only ever moves forward.
+  // Stage k waits for the host's signalPipelineEvent(base + 2k); its end is
+  // waitPipelineStageDone(base, k). The host may release stage k + 1 without
+  // waiting for stage k.
   [[nodiscard]] CommandTicket
   submitPipelineAsync(std::span<const ComputeDispatch> dispatches,
-                      std::span<const size_t> stageStarts, uint64_t base,
-                      std::span<const bool> quietStages = {});
-  [[nodiscard]] bool waitPipelineEvent(uint64_t value, uint64_t timeoutMs);
+                      std::span<const size_t> stageStarts, uint64_t base);
   // Waits until stage `stage` of the pipeline at `base` has finished on the
   // GPU, whatever the host has signalled since.
   [[nodiscard]] bool waitPipelineStageDone(uint64_t base, uint32_t stage,
                                            uint64_t timeoutMs);
+  // Lets stage k of the pipeline run once `value` reaches base + 2k. A stage
+  // is committed to the GPU only now, so none waits there for the host.
   void signalPipelineEvent(uint64_t value);
+  // Commits the stages of the latest pipeline the host has not signalled, so
+  // its ticket completes. A host that stops early (an exception) calls it
+  // before the ticket goes; after a normal run there is nothing left.
+  void releasePipelineStages();
 
   // Development profiling replays a multi-dispatch command synchronously,
   // one dispatch per command buffer. Even submitCommandAsync() then blocks,
@@ -398,6 +403,20 @@ public:
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
+};
+
+// Releases the latest pipeline's stages the host has not signalled when it
+// goes out of scope. Declare it after the pipeline's ticket, so it runs first
+// when the host loop throws: the ticket waits for every stage to complete.
+class PipelineStageRelease {
+public:
+  explicit PipelineStageRelease(MetalBackend &backend) : backend_(backend) {}
+  PipelineStageRelease(const PipelineStageRelease &) = delete;
+  PipelineStageRelease &operator=(const PipelineStageRelease &) = delete;
+  ~PipelineStageRelease() { backend_.releasePipelineStages(); }
+
+private:
+  MetalBackend &backend_;
 };
 
 } // namespace splash::metal
